@@ -1,0 +1,47 @@
+[project]
+name = "aerix-rf"
+version = "0.1.0"
+description = "AERIX RF/SDR drone-detection box (HackRF Pro). Runs the DSP + detection the HackRF cannot do onboard, on a small Linux box."
+requires-python = ">=3.11"
+dependencies = [
+    "numpy>=1.26",
+    "scipy>=1.11",
+    "pillow>=10.0",
+    "httpx>=0.27",
+    "pydantic>=2.6",
+    "fastapi>=0.110",
+    "uvicorn>=0.29",
+    "zeroconf>=0.132",
+]
+
+[project.optional-dependencies]
+# Stage-2 classifier training pipeline (aerix_rf.classify.train). Light by
+# default: scikit-learn + joblib only, no torch. Install with:
+#   uv sync --extra train           (or)   pip install -e '.[train]'
+# The box RUNTIME never needs these -- classify.model imports joblib lazily and
+# falls back to the rule-based classifier when no model / no joblib is present.
+train = [
+    "scikit-learn>=1.4",
+    "joblib>=1.3",
+]
+# Optional torch CNN path (aerix_rf.classify.train, --model cnn). Heavy; opt-in.
+train-cnn = [
+    "torch>=2.2",
+]
+
+# SoapySDR / python bindings for the HackRF are provided by the OS package
+# (e.g. `apt install soapysdr-tools python3-soapysdr soapysdr-module-hackrf hackrf`),
+# NOT pip. The code imports it lazily so the box runs in --sim mode without it.
+
+[project.scripts]
+aerix-rf = "aerix_rf.main:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["aerix_rf"]
+
+[dependency-groups]
+dev = ["pytest>=8.0"]
