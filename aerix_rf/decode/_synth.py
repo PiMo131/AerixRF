@@ -26,6 +26,16 @@ class SynthBurst:
     scrambled: bool                  # whether payload symbols were scrambled
 
 
+@dataclass
+class EncodedBurst:
+    """A fully-encoded DroneID burst plus the ground-truth frame fields."""
+    iq: np.ndarray
+    sample_rate: float
+    burst_start: int
+    fields: dict                     # the known serial / lat / lon / ... that went in
+    frame_bytes: bytes               # 176-byte turbo info block (for reference)
+
+
 def _qpsk_from_bits(bits: np.ndarray) -> np.ndarray:
     """Inverse of ofdm.quantize_qpsk: (b0,b1) pairs -> unit QPSK points.
 
@@ -65,6 +75,28 @@ def make_burst(sample_rate: float = ofdm.NOMINAL_SAMPLE_RATE, *,
         for r, row in enumerate(data_rows):
             tx_bits[row] = payload_bits[row] ^ seq[r]
 
+    iq = _tx_bits_to_iq(tx_bits, fs, fft_size, schedule, dci,
+                        snr_db=snr_db, cfo_hz=cfo_hz,
+                        pad_start=pad_start, pad_end=pad_end, rng=rng)
+
+    return SynthBurst(
+        iq=iq.astype(np.complex64),
+        sample_rate=fs,
+        burst_start=pad_start,
+        payload_bits=payload_bits,
+        scrambled=scramble,
+    )
+
+
+def _tx_bits_to_iq(tx_bits: np.ndarray, fs: float, fft_size: int, schedule, dci,
+                   *, snr_db: float | None, cfo_hz: float,
+                   pad_start: int, pad_end: int, rng) -> np.ndarray:
+    """Turn a [9, 1200] scrambled-bit matrix into a padded, noisy IQ burst.
+
+    ZC symbols (4 & 6, 1-based) are inserted from the golden sequence; every other
+    symbol carries QPSK from ``tx_bits``. The RNG draw order (lead, tail, noise) is
+    kept stable so callers reproduce bit-exact output for a given seed.
+    """
     # Build each OFDM symbol's time-domain samples (fft_size) then prepend its CP.
     burst_parts = []
     for idx in range(ofdm.NUM_OFDM_SYMBOLS):
@@ -100,11 +132,58 @@ def make_burst(sample_rate: float = ofdm.NOMINAL_SAMPLE_RATE, *,
         noise = (rng.standard_normal(iq.size) + 1j * rng.standard_normal(iq.size))
         noise *= np.sqrt(noise_p / 2.0)
         iq = iq + noise
+    return iq
 
-    return SynthBurst(
+
+def make_encoded_burst(fields: dict | None = None, *,
+                       sample_rate: float = ofdm.NOMINAL_SAMPLE_RATE,
+                       snr_db: float | None = 30.0, cfo_hz: float = 0.0,
+                       pad_start: int = 500, pad_end: int = 500,
+                       seed: int = 0) -> EncodedBurst:
+    """Encode a full DroneID frame end-to-end into an IQ burst.
+
+    Runs the complete transmit chain: frame bytes -> CRC16 -> CRC24A -> LTE turbo
+    encode -> rate match (E=7200) -> LTE scramble -> QPSK -> OFDM (+ ZC pilots).
+    ``fields`` overrides any packer keyword (serial, drone_lat, drone_lon,
+    operator_lat, operator_lon, home_lat, home_lon, height, altitude, ...). The
+    returned IQ is decodable by :func:`aerix_rf.decode.droneid.decode`.
+    """
+    from . import turbo as T
+    from . import frame as F
+    from .droneid import generate_scrambler_seq
+
+    fields = dict(fields or {})
+    dji_frame = F.pack_dji_frame(**fields)
+    payload = F.build_turbo_payload(dji_frame)             # 176 bytes
+
+    info_bits = T.bytes_to_bits(payload)                   # 1408 bits
+    d0, d1, d2 = T.turbo_encode(info_bits)
+    e = T.rate_match(d0, d1, d2)                            # 7200 bits
+
+    # Scramble so the decoder's descramble stage recovers `e` exactly.
+    seq = generate_scrambler_seq(e.size)
+    scrambled = (e ^ seq).astype(np.int8)
+
+    fs = sample_rate
+    fft_size = ofdm.fft_size_for(fs)
+    schedule = ofdm.cp_schedule(fs)
+    dci = ofdm.data_carrier_indices(fft_size)
+
+    data_rows = [s - 1 for s in ofdm.DATA_SYMBOLS_1B]      # [1,2,4,6,7,8]
+    tx_bits = np.zeros((ofdm.NUM_OFDM_SYMBOLS, dci.size * 2), dtype=np.int8)
+    chunks = scrambled.reshape(len(data_rows), dci.size * 2)
+    for r, row in enumerate(data_rows):
+        tx_bits[row] = chunks[r]
+
+    rng = np.random.default_rng(seed)
+    iq = _tx_bits_to_iq(tx_bits, fs, fft_size, schedule, dci,
+                        snr_db=snr_db, cfo_hz=cfo_hz,
+                        pad_start=pad_start, pad_end=pad_end, rng=rng)
+
+    return EncodedBurst(
         iq=iq.astype(np.complex64),
         sample_rate=fs,
         burst_start=pad_start,
-        payload_bits=payload_bits,
-        scrambled=scramble,
+        fields=fields,
+        frame_bytes=payload,
     )

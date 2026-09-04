@@ -9,7 +9,9 @@ import numpy as np
 import pytest
 
 from aerix_rf.decode import ofdm
-from aerix_rf.decode._synth import make_burst
+from aerix_rf.decode import turbo as T
+from aerix_rf.decode import frame as F
+from aerix_rf.decode._synth import make_burst, make_encoded_burst
 from aerix_rf.decode.droneid import (
     decode, available, demodulate, generate_scrambler_seq, descramble_payload,
 )
@@ -156,20 +158,145 @@ def test_decode_via_resample_from_20mhz():
 
 
 # ---------------------------------------------------------------------------
-# decode() top-level contract
+# decode() top-level contract (now includes Turbo decode + CRC + field parse)
 # ---------------------------------------------------------------------------
-
-def test_decode_returns_result_on_burst():
-    b = make_burst(snr_db=15.0, seed=10)
-    res = decode(b.iq, b.sample_rate)
-    assert res is not None
-    assert res.protocol == "ocusync2"
-    # Field extraction (serial/lat/lon) is a documented TODO -> None for now.
-    assert res.serial is None and res.drone_lat is None
-
 
 def test_decode_returns_none_on_noise():
     rng = np.random.default_rng(11)
     n = ofdm.burst_length(ofdm.NOMINAL_SAMPLE_RATE) * 2
     noise = (rng.standard_normal(n) + 1j * rng.standard_normal(n)).astype(np.complex64)
     assert decode(noise, ofdm.NOMINAL_SAMPLE_RATE) is None
+
+
+def test_decode_none_on_unencoded_burst():
+    # A burst with random QPSK payload (no valid Turbo frame) must fail CRC -> None.
+    b = make_burst(snr_db=None, seed=10)
+    assert decode(b.iq, b.sample_rate) is None
+
+
+# ---------------------------------------------------------------------------
+# Turbo back-end unit layers (encode/decode, rate-match inversion, CRC)
+# ---------------------------------------------------------------------------
+
+def test_qpp_interleaver_is_bijection():
+    pi = T.qpp_interleaver(T.K_INFO)
+    assert pi.size == T.K_INFO
+    assert np.array_equal(np.sort(pi), np.arange(T.K_INFO))
+
+
+def test_turbo_encode_decode_roundtrip_clean():
+    rng = np.random.default_rng(0)
+    info = rng.integers(0, 2, T.K_INFO).astype(np.int8)
+    d0, d1, d2 = T.turbo_encode(info)
+    assert d0.size == d1.size == d2.size == T.D_STREAM
+    l0, l1, l2 = T.bits_to_llr(d0), T.bits_to_llr(d1), T.bits_to_llr(d2)
+    dec, _, _ = T.turbo_decode(l0, l1, l2, iterations=3)
+    assert np.array_equal(dec, info)
+
+
+def test_rate_match_forward_reverse_inverts():
+    rng = np.random.default_rng(1)
+    d0, d1, d2 = T.turbo_encode(rng.integers(0, 2, T.K_INFO).astype(np.int8))
+    e = T.rate_match(d0, d1, d2)
+    assert e.size == T.E_RATE
+    r0, r1, r2 = T.de_rate_match(T.bits_to_llr(e))
+    assert np.array_equal((r0 < 0).astype(np.int8), d0)
+    assert np.array_equal((r1 < 0).astype(np.int8), d1)
+    assert np.array_equal((r2 < 0).astype(np.int8), d2)
+
+
+def test_full_turbo_chain_corrects_errors():
+    # Effective rate ~0.2: the decoder should fix a heavy raw bit-flip rate.
+    rng = np.random.default_rng(2)
+    info = rng.integers(0, 2, T.K_INFO).astype(np.int8)
+    d0, d1, d2 = T.turbo_encode(info)
+    e = T.rate_match(d0, d1, d2)
+    flip = rng.random(e.size) < 0.10
+    e[flip] ^= 1
+    r0, r1, r2 = T.de_rate_match(T.bits_to_llr(e))
+    dec, _, _ = T.turbo_decode(r0, r1, r2, iterations=8)
+    assert np.array_equal(dec, info)
+
+
+def test_crc24a_zeroes_out():
+    rng = np.random.default_rng(3)
+    payload = bytes(rng.integers(0, 256, 173).astype(np.uint8))
+    c = T.crc24a(payload)
+    full = payload + bytes([(c >> 16) & 0xFF, (c >> 8) & 0xFF, c & 0xFF])
+    assert T.crc24a(full) == 0
+
+
+def test_frame_pack_parse_roundtrip():
+    fr = F.pack_dji_frame(serial="TESTSERIAL012345", drone_lat=1.0, drone_lon=2.0)
+    assert len(fr) == F.DJI_FRAME_LEN
+    payload = F.build_turbo_payload(fr)
+    assert len(payload) == F.TURBO_BYTES and T.crc24a(payload) == 0
+    p = F.parse_frame(payload)
+    assert p is not None and p.serial == "TESTSERIAL012345"
+
+
+# ---------------------------------------------------------------------------
+# End-to-end encode -> decode: exact serial + GPS recovery
+# ---------------------------------------------------------------------------
+
+_FIELDS = dict(
+    serial="1581F5FKD227ABCD",
+    drone_lat=52.3702157, drone_lon=4.8951679,
+    operator_lat=52.3600000, operator_lon=4.9000000,
+    home_lat=52.3500000, home_lon=4.9100000,
+    height=120, altitude=95, sequence=42,
+)
+
+# GPS is quantized to int32 = round(deg * 1e7/57.2957795785523), step ~5.7e-6 deg.
+_COORD_TOL = 1e-5
+
+
+def test_encode_decode_exact_serial_and_gps_clean():
+    b = make_encoded_burst(_FIELDS, snr_db=None, seed=3)
+    res = decode(b.iq, b.sample_rate)
+    assert res is not None
+    assert res.protocol == "ocusync2"
+    assert res.serial == _FIELDS["serial"]                 # serial recovers exactly
+    assert abs(res.drone_lat - _FIELDS["drone_lat"]) < _COORD_TOL
+    assert abs(res.drone_lon - _FIELDS["drone_lon"]) < _COORD_TOL
+    assert abs(res.operator_lat - _FIELDS["operator_lat"]) < _COORD_TOL
+    assert abs(res.operator_lon - _FIELDS["operator_lon"]) < _COORD_TOL
+    assert abs(res.home_lat - _FIELDS["home_lat"]) < _COORD_TOL
+    assert abs(res.home_lon - _FIELDS["home_lon"]) < _COORD_TOL
+    assert res.drone_height == 120 and res.drone_altitude == 95
+    assert res.sequence == 42
+
+
+def test_encode_decode_exact_at_15db():
+    b = make_encoded_burst(_FIELDS, snr_db=15.0, seed=4)
+    res = decode(b.iq, b.sample_rate)
+    assert res is not None
+    assert res.serial == _FIELDS["serial"]
+    assert abs(res.drone_lat - _FIELDS["drone_lat"]) < _COORD_TOL
+    assert abs(res.drone_lon - _FIELDS["drone_lon"]) < _COORD_TOL
+
+
+def test_encode_decode_negative_coords():
+    fields = dict(serial="WESTHEMISPHERE00", drone_lat=-33.8688, drone_lon=151.2093,
+                  operator_lat=-33.87, operator_lon=151.21)
+    b = make_encoded_burst(fields, snr_db=None, seed=5)
+    res = decode(b.iq, b.sample_rate)
+    assert res is not None and res.serial == fields["serial"]
+    assert abs(res.drone_lat - fields["drone_lat"]) < _COORD_TOL
+    assert abs(res.drone_lon - fields["drone_lon"]) < _COORD_TOL
+
+
+def test_encode_decode_none_on_corruption():
+    # Corrupt the descrambled bits hard enough that CRC cannot validate.
+    b = make_encoded_burst(_FIELDS, snr_db=None, seed=6)
+    d = demodulate(b.iq, b.sample_rate)
+    assert d is not None
+    rng = np.random.default_rng(6)
+    corrupted = d.descrambled_bits.copy()
+    flip = rng.random(corrupted.size) < 0.45          # near-random -> CRC must fail
+    corrupted[flip] ^= 1
+    from aerix_rf.decode.droneid import DroneIdDemod
+    from dataclasses import replace
+    d2 = replace(d, descrambled_bits=corrupted)
+    from aerix_rf.decode.droneid import decode_frame
+    assert decode_frame(d2) is None

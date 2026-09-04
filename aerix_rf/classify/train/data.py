@@ -35,6 +35,11 @@ from ...sdr.sim import synth_iq
 CLASSES = ("dji_ocusync", "wifi_drone", "fpv_analog", "noise")
 DRONE_CLASSES = ("dji_ocusync", "wifi_drone", "fpv_analog")
 
+# aerix-rf/ -- data.py is .../aerix_rf/classify/train/data.py
+_PKG_ROOT = Path(__file__).resolve().parents[3]
+# Where fetch_dronerf.py prepares the local subset (gitignored).
+_DRONERF_DEFAULT = _PKG_ROOT / "data" / "dronerf"
+
 
 @dataclass
 class Dataset:
@@ -120,45 +125,103 @@ def _require_dir(p: Path, name: str, hint: str) -> None:
         )
 
 
-def load_dronerf(root: str | os.PathLike | None = None, *,
-                 sample_rate: float = 20e6, fft_size: int = 1024,
-                 max_per_class: int | None = None) -> Dataset:
-    """DroneRF (Al-Sa'd et al., Mendeley). CSVs of RF time series, named by a
-    BUI activity code (e.g. ``00000`` = background, ``10000``/``10001`` = a DJI).
+# DroneRF BUI (Bird-of-Unusual-Interest) activity codes -> our signature class.
+# A leading 0 = background (no drone). Otherwise the first two digits pick the
+# drone: 10xxx = Parrot Bebop, 101xx = Parrot AR (both Wi-Fi control links),
+# 110xx = DJI Phantom. DroneRF contains no analog-FPV emitter, so ``fpv_analog``
+# is deliberately unmapped here (see README).
+def _dronerf_label(bui: str) -> str | None:
+    if bui.startswith("0"):
+        return "noise"
+    if bui.startswith("11"):        # DJI Phantom
+        return "dji_ocusync"
+    if bui.startswith("10"):        # Parrot Bebop / AR -- Wi-Fi control link
+        return "wifi_drone"
+    return None
 
-    Prepared layout expected::
 
-        <root>/DroneRF/**/<BUI>H_*.csv   (high-band halves)
-        <root>/DroneRF/**/<BUI>L_*.csv   (low-band halves)
+def _dronerf_dir(root: str | os.PathLike | None) -> Path:
+    """Resolve the DroneRF CSV directory.
 
-    We read the amplitude series, treat it as a real signal (Hilbert -> analytic
-    IQ), window it, and label by the leading BUI digit (drone present or not).
+    Priority: explicit ``root`` -> ``$AERIX_RF_DATA_ROOT/DroneRF`` (legacy
+    layout) -> the packaged ``aerix-rf/data/dronerf`` the fetch script fills.
     """
-    base = _data_root(root) / "DroneRF"
-    _require_dir(base, "DroneRF", "Download from Mendeley Data (Al-Sa'd et al.).")
+    if root is not None:
+        return Path(root)
+    env = os.environ.get("AERIX_RF_DATA_ROOT")
+    if env:
+        return Path(env) / "DroneRF"
+    return _DRONERF_DEFAULT
+
+
+def load_dronerf(root: str | os.PathLike | None = None, *,
+                 sample_rate: float | None = None, fft_size: int = 1024,
+                 window_s: float = 0.02, hop_s: float = 0.01,
+                 max_per_class: int | None = None) -> Dataset:
+    """DroneRF (Al-Sa'd et al., Mendeley 10.17632/f4c2b4n755.1).
+
+    CSVs of a **real** RF amplitude series, one file per (BUI activity code,
+    band, segment); filenames look like ``10000H_0.csv`` / ``00000L_2.csv``.
+    ``fetch_dronerf.py`` prepares a local subset under ``aerix-rf/data/dronerf``.
+
+    Each CSV is read as a real signal, sliced into overlapping ``window_s``
+    frames, made analytic via a Hilbert transform (real -> complex IQ), and run
+    through the box's own ``spectrogram.compute`` so the features match the live
+    path. Labels come from the BUI code (see ``_dronerf_label``).
+
+    Sample-rate caveat: DroneRF was captured at **40 MS/s**, not the box's
+    20 MS/s. The PSD feature is a *fraction of the captured band*, so a model
+    trained here is only valid at 40 MS/s; the bundle records that rate and
+    inference warns on a mismatch. ``sample_rate`` defaults to 40e6 for this
+    reason -- do not let a caller silently stamp the box rate onto it.
+
+    Grouping: every frame carries its source-CSV path in ``meta['groups']`` so
+    the trainer can hold out *whole recordings* for validation (frames from one
+    CSV are near-duplicates; a random split would leak and inflate accuracy).
+    """
+    sr = 40e6 if sample_rate is None else float(sample_rate)
+    base = _dronerf_dir(root)
+    _require_dir(base, "DroneRF",
+                 "Run: python -m aerix_rf.classify.train.fetch_dronerf (Mendeley).")
     from scipy.signal import hilbert  # lazy: scipy only when a real load runs
+
+    win = max(fft_size, int(round(sr * window_s)))
+    hop = max(1, int(round(sr * hop_s)))
 
     specs: list[Spectrogram] = []
     labels: list[str] = []
+    groups: list[str] = []
     counts: dict[str, int] = {}
     for csv in sorted(glob.glob(str(base / "**" / "*.csv"), recursive=True)):
         stem = Path(csv).stem
         bui = "".join(ch for ch in stem if ch.isdigit())[:5]
-        if not bui:
+        if len(bui) < 5:
             continue
-        label = "noise" if bui.startswith("0") else "dji_ocusync"
+        label = _dronerf_label(bui)
+        if label is None:
+            continue
         if max_per_class and counts.get(label, 0) >= max_per_class:
             continue
-        amp = np.loadtxt(csv, delimiter=",").ravel().astype(np.float64)
-        if amp.size < fft_size:
+        amp = np.fromfile(csv, sep=",").astype(np.float32)   # fast, single line
+        if amp.size < win:
             continue
-        iq = hilbert(amp).astype(np.complex64)
-        specs.append(compute(iq, sample_rate, fft_size=fft_size))
-        labels.append(label)
-        counts[label] = counts.get(label, 0) + 1
+        for start in range(0, amp.size - win + 1, hop):
+            if max_per_class and counts.get(label, 0) >= max_per_class:
+                break
+            seg = amp[start:start + win]
+            # Skip the all-zero lead-in some captures carry (would be -inf dB).
+            if not np.any(np.abs(seg) > 1e-9):
+                continue
+            iq = hilbert(seg).astype(np.complex64)
+            specs.append(compute(iq, sr, fft_size=fft_size))
+            labels.append(label)
+            groups.append(Path(csv).name)
+            counts[label] = counts.get(label, 0) + 1
     if not specs:
         raise RuntimeError(f"DroneRF present at {base} but no usable CSVs parsed.")
-    return Dataset(specs, labels, sample_rate, fft_size, {"source": "DroneRF"})
+    return Dataset(specs, labels, sr, fft_size,
+                   {"source": "DroneRF", "groups": groups, "window_s": window_s,
+                    "hop_s": hop_s, "counts": counts})
 
 
 def load_dronedetect(root: str | os.PathLike | None = None, *,

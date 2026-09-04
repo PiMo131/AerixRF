@@ -55,6 +55,8 @@ class TrainResult:
     classes: list[str]
     report: str
     out_path: str
+    confusion: list[list[int]] | None = None   # rows=true, cols=pred, in `classes` order
+    grouped: bool = False                       # whole-recording (leak-free) val split?
 
 
 def features_matrix(ds: data_mod.Dataset, feature_kind: str = "psd") -> np.ndarray:
@@ -62,25 +64,40 @@ def features_matrix(ds: data_mod.Dataset, feature_kind: str = "psd") -> np.ndarr
     return np.stack([feat.extract(s, feature_kind) for s in ds.specs])
 
 
-def _split(X: np.ndarray, y: list[str], val_frac: float, seed: int):
+def _split(X: np.ndarray, y: list[str], val_frac: float, seed: int,
+           groups: list | None = None):
+    """Train/val index split.
+
+    Random by default. When ``groups`` is given (e.g. one id per source
+    recording), hold out *whole groups* so near-duplicate frames from the same
+    capture never straddle the split -- otherwise val accuracy is leaked and
+    meaningless. Returns ``(Xtr, ytr, Xval, yval, grouped)``.
+    """
+    ya = np.asarray(y)
+    if groups is not None and len(set(groups)) >= 2:
+        from sklearn.model_selection import GroupShuffleSplit
+        gss = GroupShuffleSplit(n_splits=1, test_size=val_frac, random_state=seed)
+        tr, val = next(gss.split(X, ya, groups=np.asarray(groups)))
+        return X[tr], ya[tr], X[val], ya[val], True
     rng = np.random.default_rng(seed)
     idx = rng.permutation(len(y))
     n_val = max(1, int(len(y) * val_frac))
     val, tr = idx[:n_val], idx[n_val:]
-    ya = np.asarray(y)
-    return X[tr], ya[tr], X[val], ya[val]
+    return X[tr], ya[tr], X[val], ya[val], False
 
 
 def train_sklearn(X: np.ndarray, y: list[str], *, algo: str = "rf",
-                  val_frac: float = 0.25, seed: int = 0):
+                  val_frac: float = 0.25, seed: int = 0,
+                  groups: list | None = None):
     """Fit a scikit-learn classifier; return (fitted_model, TrainResult-ish dict)."""
     from sklearn.ensemble import RandomForestClassifier
     from sklearn.svm import SVC
     from sklearn.pipeline import make_pipeline
     from sklearn.preprocessing import StandardScaler
-    from sklearn.metrics import accuracy_score, classification_report
+    from sklearn.metrics import (accuracy_score, classification_report,
+                                 confusion_matrix)
 
-    Xtr, ytr, Xval, yval = _split(X, y, val_frac, seed)
+    Xtr, ytr, Xval, yval, grouped = _split(X, y, val_frac, seed, groups)
     if algo == "svm":
         model = make_pipeline(StandardScaler(),
                               SVC(C=10.0, kernel="rbf", probability=True,
@@ -90,12 +107,15 @@ def train_sklearn(X: np.ndarray, y: list[str], *, algo: str = "rf",
                                        random_state=seed, n_jobs=-1)
     model.fit(Xtr, ytr)
     tr_acc = float(accuracy_score(ytr, model.predict(Xtr)))
-    val_acc = float(accuracy_score(yval, model.predict(Xval)))
-    report = classification_report(yval, model.predict(Xval), zero_division=0)
+    yval_pred = model.predict(Xval)
+    val_acc = float(accuracy_score(yval, yval_pred))
     classes = sorted(set(y))
+    report = classification_report(yval, yval_pred, zero_division=0)
+    cm = confusion_matrix(yval, yval_pred, labels=classes).tolist()
     return model, {"accuracy": tr_acc, "val_accuracy": val_acc,
                    "n_train": len(ytr), "n_val": len(yval),
-                   "classes": classes, "report": report}
+                   "classes": classes, "report": report,
+                   "confusion": cm, "grouped": grouped}
 
 
 def build_bundle(model, *, kind: str, feature_kind: str, classes: list[str],
@@ -126,28 +146,40 @@ def train_and_save(*, dataset: str = "synth", feature_kind: str = "psd",
                    sample_rate: float = 20e6, duration_s: float = 0.12,
                    fft_size: int = 1024, n_per_class: int = 60,
                    binary: bool = False, seed: int = 0,
-                   data_root: str | None = None) -> TrainResult:
-    """End-to-end: build/load dataset -> features -> fit sklearn -> save bundle."""
+                   data_root: str | None = None,
+                   max_per_class: int | None = None) -> TrainResult:
+    """End-to-end: build/load dataset -> features -> fit sklearn -> save bundle.
+
+    Real-data loaders own their capture ``sample_rate`` (DroneRF is 40 MS/s):
+    ``sample_rate`` here is used for the synthetic set only, so a real bundle is
+    never mislabelled with the box rate. The recording-grouped validation split
+    (see ``_split``) is used automatically when the loader supplies groups.
+    """
     if dataset == "synth":
         ds = data_mod.synth_dataset(n_per_class=n_per_class, sample_rate=sample_rate,
                                      duration_s=duration_s, fft_size=fft_size, seed=seed)
     elif dataset == "dronerf":
-        ds = data_mod.load_dronerf(data_root, sample_rate=sample_rate, fft_size=fft_size)
+        # Do NOT pass sample_rate: the loader stamps the true 40 MS/s capture rate.
+        ds = data_mod.load_dronerf(data_root, fft_size=fft_size,
+                                   max_per_class=max_per_class)
     elif dataset == "dronedetect":
-        ds = data_mod.load_dronedetect(data_root, fft_size=fft_size)
+        ds = data_mod.load_dronedetect(data_root, fft_size=fft_size,
+                                       max_per_class=max_per_class)
     else:
         raise ValueError(f"unknown dataset {dataset!r} (synth|dronerf|dronedetect)")
 
     X = features_matrix(ds, feature_kind)
     y = data_mod.to_binary(ds.labels) if binary else ds.labels
-    model, m = train_sklearn(X, y, algo=algo, seed=seed)
+    groups = ds.meta.get("groups")
+    model, m = train_sklearn(X, y, algo=algo, seed=seed, groups=groups)
     bundle = build_bundle(model, kind="sklearn", feature_kind=feature_kind,
                           classes=m["classes"], sample_rate=ds.sample_rate,
                           fft_size=ds.fft_size)
     out = save_bundle(bundle, out_path)
     return TrainResult(accuracy=m["accuracy"], val_accuracy=m["val_accuracy"],
                        n_train=m["n_train"], n_val=m["n_val"],
-                       classes=m["classes"], report=m["report"], out_path=str(out))
+                       classes=m["classes"], report=m["report"], out_path=str(out),
+                       confusion=m["confusion"], grouped=m["grouped"])
 
 
 def _main(argv: list[str] | None = None) -> int:
@@ -162,6 +194,8 @@ def _main(argv: list[str] | None = None) -> int:
     ap.add_argument("--n-per-class", type=int, default=60)
     ap.add_argument("--binary", action="store_true", help="drone-vs-noise instead of 4-class")
     ap.add_argument("--data-root", default=None)
+    ap.add_argument("--max-per-class", type=int, default=None,
+                    help="cap frames per class (real datasets)")
     ap.add_argument("--seed", type=int, default=0)
     args = ap.parse_args(argv)
 
@@ -169,12 +203,20 @@ def _main(argv: list[str] | None = None) -> int:
                          out_path=args.out, sample_rate=args.sample_rate,
                          duration_s=args.duration_s, fft_size=args.fft_size,
                          n_per_class=args.n_per_class, binary=args.binary,
-                         seed=args.seed, data_root=args.data_root)
+                         seed=args.seed, data_root=args.data_root,
+                         max_per_class=args.max_per_class)
+    split = "grouped-by-recording" if res.grouped else "random"
     print(f"classes      : {res.classes}")
     print(f"train acc    : {res.accuracy:.3f}")
-    print(f"val   acc    : {res.val_accuracy:.3f}  (n_train={res.n_train}, n_val={res.n_val})")
+    print(f"val   acc    : {res.val_accuracy:.3f}  (n_train={res.n_train}, "
+          f"n_val={res.n_val}, split={split})")
     print(f"saved bundle : {res.out_path}")
     print(res.report)
+    if res.confusion is not None:
+        print("confusion matrix (rows=true, cols=pred):")
+        print("             " + "  ".join(f"{c[:10]:>10}" for c in res.classes))
+        for c, row in zip(res.classes, res.confusion):
+            print(f"{c[:11]:>11}  " + "  ".join(f"{v:>10d}" for v in row))
     return 0
 
 

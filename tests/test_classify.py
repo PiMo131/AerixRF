@@ -7,6 +7,8 @@ Run (private env + ephemeral train deps, no shared uv sync):
       uv run --with scikit-learn,joblib pytest tests/test_classify.py -q
 """
 
+from pathlib import Path
+
 import numpy as np
 import pytest
 
@@ -14,6 +16,12 @@ from aerix_rf.dsp import spectrogram
 from aerix_rf.detect import energy
 from aerix_rf.sdr.sim import synth_iq
 from aerix_rf.classify import model as clsmodel
+
+# Real DroneRF subset, prepared by data/dronerf/fetch_dronerf.py (gitignored).
+# The real-data test below is skipped unless it is present, so CI stays green
+# and light; the synthetic tests always run.
+_DRONERF_DIR = Path(__file__).resolve().parents[1] / "data" / "dronerf"
+_HAVE_DRONERF = bool(list(_DRONERF_DIR.glob("**/*.csv")))
 
 # Small, fast, internally consistent: train and infer at the SAME sample rate so
 # the fractional-band PSD feature is comparable (a model is only valid at its
@@ -63,6 +71,49 @@ def test_multiclass_model_trains_and_predicts(tmp_path):
     assert set(res.classes) == {"dji_ocusync", "wifi_drone", "fpv_analog", "noise"}
     # 4-class is harder than binary but the classes are well separated by design.
     assert res.val_accuracy >= 0.75, res.report
+
+
+# --- real DroneRF data path (opt-in: skipped unless the subset is present) ------
+
+@pytest.mark.skipif(not _HAVE_DRONERF,
+                    reason="DroneRF subset absent; run data/dronerf/fetch_dronerf.py")
+def test_dronerf_real_path_separates_drone_from_background(tmp_path):
+    """The real-data loader parses DroneRF CSVs and a model trained on them
+    separates a real drone from real background RF (which includes ambient
+    Wi-Fi/Bluetooth) -- the domain gap the synthetic-only model had.
+
+    Uses a leak-free split: whole recordings are held out for validation
+    (frames from one CSV are near-duplicates), so the accuracy is honest.
+    """
+    from aerix_rf.classify.train import data as d
+    from aerix_rf.classify.train import train as trainer
+
+    # Cap frames per class to keep the test bounded; still >=2 recordings/class
+    # so the recording-grouped validation split is meaningful.
+    ds = d.load_dronerf(fft_size=512, max_per_class=30)
+    assert ds.sample_rate == 40e6, "DroneRF is a 40 MS/s capture; bundle must record it"
+    assert "groups" in ds.meta and len(ds.meta["groups"]) == len(ds)
+    assert "noise" in set(ds.labels)
+    assert set(ds.labels) & set(d.DRONE_CLASSES), "expected at least one drone class"
+
+    # Binary drone-vs-background, grouped (leak-free) split.
+    X = trainer.features_matrix(ds, "psd")
+    y = d.to_binary(ds.labels)
+    model, m = trainer.train_sklearn(X, y, algo="rf", seed=0,
+                                     groups=ds.meta["groups"])
+    assert m["grouped"] is True, "validation must hold out whole recordings"
+    assert m["confusion"] is not None
+    assert m["val_accuracy"] >= 0.7, m["report"]
+
+    # End-to-end: a saved real-data bundle drives classify_spectrogram, and its
+    # recorded sample_rate is the true capture rate (not the box's 20 MS/s).
+    res = trainer.train_and_save(dataset="dronerf", feature_kind="psd", algo="rf",
+                                 out_path=tmp_path / "dronerf.joblib",
+                                 fft_size=512, max_per_class=30, binary=True)
+    assert res.grouped is True
+    import joblib
+    bundle = joblib.load(tmp_path / "dronerf.joblib")
+    assert bundle["sample_rate"] == 40e6
 
 
 # --- inference wiring: classify_spectrogram uses the model when present ---------

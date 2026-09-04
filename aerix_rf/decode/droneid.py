@@ -46,6 +46,15 @@ class DroneIdResult:
     operator_lat: float | None
     operator_lon: float | None
     protocol: str        # e.g. "ocusync2"
+    # Extended fields populated once the Turbo/CRC back end validates a frame.
+    # Kept at the end with None defaults so existing constructors/consumers are
+    # unaffected (main.py filters None out of res.__dict__).
+    drone_height: float | None = None
+    drone_altitude: float | None = None
+    home_lat: float | None = None
+    home_lon: float | None = None
+    sequence: int | None = None
+    decode_iterations: int | None = None
 
 
 @dataclass
@@ -167,13 +176,11 @@ def decode(iq: np.ndarray, sample_rate: float) -> DroneIdResult | None:
     (sync + OFDM demod + descramble) is implemented; the fields below remain None
     until the LTE rate-match / Turbo decode stage lands.
 
-    TODO(stage-3): LTE de-rate-match + Turbo decode of `demod.descrambled_bits`
-        (7200 bits -> ~176-byte frame). The reference offloads this to the C++
-        `remove_turbo` program (proto17/dji_droneid cpp/remove_turbo). Port it or
-        shell out, then parse the frame per DroneSecurity/arxiv 2207.10795.
-    TODO(stage-3): after Turbo decode, verify the frame CRC and extract fields
-        (serial, drone lat/lon, operator lat/lon, home lat/lon, altitude) into the
-        DroneIdResult below.
+    The LTE de-rate-match + Turbo decode + CRC24A back end is implemented in
+    :mod:`aerix_rf.decode.turbo`; the frame is parsed by :mod:`aerix_rf.decode.frame`.
+    If the CRC does not validate (noise, an encrypted O3/O4 burst, or a non-DroneID
+    signal), ``None`` is returned.
+
     TODO(stage-3): integer (multi-subcarrier) CFO via the DC-null search in the ZC
         symbol (process_file.m) -- currently only fractional CFO is corrected, so
         offsets |f| must be < half a subcarrier (7.5 kHz).
@@ -183,15 +190,37 @@ def decode(iq: np.ndarray, sample_rate: float) -> DroneIdResult | None:
     demod = demodulate(iq, sample_rate)
     if demod is None:
         return None
-    # Front end succeeded but frame decode is not implemented yet; surface the
-    # protocol so callers know a decodable burst was seen.
+    return decode_frame(demod)
+
+
+def decode_frame(demod: DroneIdDemod, iterations: int = 8) -> DroneIdResult | None:
+    """Back end: de-rate-match + Turbo decode + CRC + field parse of a demod result.
+
+    Returns a populated :class:`DroneIdResult` when CRC24A validates, else None.
+    """
+    from . import turbo
+    from . import frame as _frame
+
+    decoded = turbo.decode_frame_bits(demod.descrambled_bits, iterations=iterations)
+    if decoded is None:
+        return None
+    frame_bytes, meta = decoded
+    parsed = _frame.parse_frame(frame_bytes)
+    if parsed is None:
+        return None
     return DroneIdResult(
-        serial=None,
-        drone_lat=None,
-        drone_lon=None,
-        operator_lat=None,
-        operator_lon=None,
+        serial=parsed.serial,
+        drone_lat=parsed.drone_lat,
+        drone_lon=parsed.drone_lon,
+        operator_lat=parsed.operator_lat,
+        operator_lon=parsed.operator_lon,
         protocol="ocusync2",
+        drone_height=parsed.drone_height,
+        drone_altitude=parsed.drone_altitude,
+        home_lat=parsed.home_lat,
+        home_lon=parsed.home_lon,
+        sequence=parsed.sequence,
+        decode_iterations=meta["iterations"],
     )
 
 
