@@ -1,349 +1,223 @@
-# AERIX RF / ANTSDR — Full implementation scope
+# AERIX RF — HackRF-first implementation and test plan
 
 > **Working document for Claude Code**  
 > Branch: `aerix-rf`  
-> Scope owner: AERIX RF  
-> Primary target hardware: **ANTSDR E200 AD9361**  
-> Secondary/legacy target: **HackRF / HackRF Pro**  
-> Status snapshot: 2026-09-04, branch head before this document: `c32663e5ec1226fe0f1d314f41f24be8e9207999`
+> Current hardware: **HackRF / HackRF Pro**  
+> Phase 3 target hardware: **ANTSDR E200 AD9361**  
+> Future optional hardware: **bladeRF 2.0** and other SoapySDR-capable receivers  
+> Scope status: 2026-09-04
 
 ---
 
-## 0. Mission
+# 0. Project order — do not skip ahead
 
-Turn the current `aerix-rf` prototype into a hardware-independent, production-oriented passive RF sensing subsystem for AERIX with the ANTSDR E200 as the primary SDR platform.
+This project is deliberately split into three main phases.
 
-The system must be able to:
+```text
+PHASE 1
+HackRF RF engine
+      ↓
+local field-test ready
+      ↓
+real captures from two DJI drones
+      ↓
+prove detection / classification / decode / replay
 
-1. Detect RF activity that is plausibly related to drones without requiring Remote ID.
-2. Decode DJI DroneID/OcuSync telemetry when the protocol is publicly decodable.
-3. Detect DJI O4 transmissions even when position telemetry cannot be decoded locally.
-4. Correlate RF detections with AERIX Remote ID observations without poisoning the RF training dataset.
-5. Preserve raw IQ around meaningful detections for later analysis/training.
-6. Support generic ML-based RF classification in addition to protocol-specific DJI decoding.
-7. Prepare the data model for synchronized multi-node RF localization (TDOA) without pretending that the current implementation already has TDOA-grade timing.
-8. Keep HackRF support working while making ANTSDR a first-class receiver.
-9. Keep RF detections separate from the ODID `observations` invariant.
-10. Fail safely: uncertainty must be represented as uncertainty, never silently upgraded to a confirmed drone/identity/location.
+PHASE 2
+AERIX server integration
+      ↓
+RF events + evidence + correlation + retention + fleet status
 
-This project is **receive-only/passive**. Do not add transmit, spoofing, jamming, interference, takeover, or active interrogation features.
+PHASE 3
+ANTSDR E200
+      ↓
+DJI protocol-event backend + generic IQ backend
+      ↓
+O2/O3 decode + O4 detection + future synchronized localization
+
+LATER
+bladeRF / USRP / other SDRs
+through the same receiver abstraction
+```
+
+**Do not start ANTSDR or bladeRF implementation until the Phase 1 HackRF exit criteria are met.**
+
+The immediate objective is not a finished product. The immediate objective is a **trustworthy RF test instrument** that can be used with the two DJI drones physically available for testing.
+
+Phase 1 must work without the AERIX server being available.
+
+This project is passive/receive-only. Do not implement transmit, spoofing, jamming, takeover, interference, or active interrogation features.
 
 ---
 
 # 1. Current repository state
 
-The current branch is already substantially implemented. Do **not** restart from scratch.
+Do not restart the implementation. Build on the current branch.
 
-## Already present
+## Already implemented
 
-### RF pipeline
+### HackRF acquisition
 
-Current main path:
+Current sources include:
+
+- `HackrfTransferSource`
+- SoapySDR `HackRFSource`
+- file replay
+- simulator
+
+Relevant file:
 
 ```text
-capture
-  -> spectrogram
-  -> stage-1 energy/spectral detector
-  -> rule classifier
-  -> optional DJI DroneID decode
-  -> IQ retention
-  -> RF ingest endpoint
-  -> rf_detections table
+aerix_rf/sdr/capture.py
+```
+
+The current code has already been exercised against real ambient RF with a HackRF.
+
+### DSP / detection
+
+Current chain:
+
+```text
+IQ
+ -> spectrogram
+ -> energy/spectral detector
+ -> signature classifier
+ -> optional DJI decoder
 ```
 
 Relevant files:
 
-- `aerix_rf/main.py`
-- `aerix_rf/sdr/capture.py`
-- `aerix_rf/dsp/spectrogram.py`
-- `aerix_rf/detect/energy.py`
-- `aerix_rf/classify/model.py`
-- `aerix_rf/decode/*`
-- `aerix_rf/buffer/iq_ring.py`
-- `aerix_rf/uplink/client.py`
-- `contracts/rf-detection.v1.schema.json`
-- `db/migrations/038_sensor_class_hackrf.sql`
-- `db/migrations/039_rf_detections.sql`
-
-### HackRF
-
-HackRF capture is working via:
-
-- `hackrf_transfer`
-- SoapySDR fallback
-- file replay
-- simulation
-
-The branch has been tested end-to-end on real HackRF hardware for ambient RF:
-
 ```text
-live capture -> detect -> spectrogram -> ingest -> rf_detections
+aerix_rf/dsp/spectrogram.py
+aerix_rf/detect/energy.py
+aerix_rf/classify/model.py
 ```
 
-There has **not yet been a validated real-drone field detection** in this branch.
+### DJI DroneID decoder
 
-### DJI OcuSync / DroneID decoder
-
-The branch now contains:
+The branch now includes:
 
 - Zadoff-Chu synchronization
 - resampling to 15.36 MS/s
-- timing synchronization
-- CFO correction
+- STO / CFO handling
 - OFDM demodulation
 - channel equalization
-- QPSK hard decisions
+- QPSK decisions
 - LTE descrambling
 - LTE de-rate-matching
 - max-log-MAP Turbo decode
 - CRC24A validation
 - DJI frame parsing
-- serial and position fields
 
 Relevant files:
 
-- `aerix_rf/decode/droneid.py`
-- `aerix_rf/decode/turbo.py`
-- `aerix_rf/decode/frame.py`
-- `aerix_rf/decode/ofdm.py`
-- `aerix_rf/decode/zc.py`
-
-The full chain is currently **synthetic-validated**, including exact serial/GPS round trips down to the tested SNR range. It is **not yet validated against a known real DroneID IQ capture**. Preserve that distinction everywhere.
-
-### Real training data
-
-The branch now has a real DroneRF loader and training helper.
-
-Important improvements already made:
-
-- DJI Phantom -> `dji_ocusync`
-- Parrot Bebop / AR -> `wifi_drone`
-- background -> `noise`
-- validation can hold out complete recordings with `GroupShuffleSplit`
-
-This fixes the earlier class-collapse/leakage concern. Do not undo it.
-
-The current DroneRF demonstration is at the dataset's ~40 MS/s rate. It is not yet a valid drop-in deployment model for a 20 MS/s live receiver.
-
-### Server separation
-
-The design decision to keep RF detections separate from ODID observations is correct and must remain.
-
-RF detections currently use:
-
 ```text
-POST /v1/rf-detections:batch
+aerix_rf/decode/droneid.py
+aerix_rf/decode/turbo.py
+aerix_rf/decode/frame.py
+aerix_rf/decode/ofdm.py
+aerix_rf/decode/zc.py
 ```
 
-and storage in:
+The decoder is currently **synthetic-validated**. It is not yet proven against a known real DroneID IQ recording from the HackRF.
+
+### Classifier training
+
+Current training supports synthetic data and public datasets including DroneRF.
+
+DroneRF mapping has already been corrected so DJI and Parrot are not collapsed into one class, and validation can hold out complete source recordings to reduce leakage.
+
+Do not undo this.
+
+### Server path
+
+A separate RF server path already exists:
 
 ```text
+/v1/rf-detections:batch
 rf_detections
 ```
 
-Do not force RF events into the ODID `observations` table.
+The architectural decision to keep RF detections separate from ODID observations is correct.
 
-### Retention
-
-The current RF table supports retention classes and expiry, including stricter handling when decoded operator position is present. Keep the retention model.
+However, **server work is Phase 2**. Do not let server integration block Phase 1 field testing.
 
 ---
 
-# 2. Critical gaps in the current branch
+# 2. Known critical issues to fix before field testing
 
-These are the highest-priority issues found in the current code.
+## 2.1 Live ML inference is not currently wired in
 
-## P0-1 — the trained ML model is not used by the live loop
-
-`aerix_rf/main.py` currently imports:
-
-```python
-from .classify.model import classify
-```
-
-and runs:
+`main.py` currently calls the rule-only path:
 
 ```python
 cls = classify(det)
 ```
 
-But `classify()` is explicitly the **rule-only** path.
-
-The actual model-loading inference function is:
+The function that actually loads and runs `AERIX_RF_MODEL` is:
 
 ```python
 classify_spectrogram(spec, center_freq_mhz)
 ```
 
-Therefore installing/training `models/signature.joblib` currently does not alter live classification.
+Fix this in Phase 1.
 
-### Required fix
-
-Wire the trained classifier into the live path while preserving the rule detector as a fallback.
-
-Desired semantics:
+Required behavior:
 
 ```text
-Stage 1: signal candidate detector
-Stage 2: ML classifier / open-set classifier
-Stage 3: protocol decoder
+no model
+ -> rule fallback
+
+valid model
+ -> ML classifier
+
+broken/incompatible model
+ -> warning
+ -> rule fallback
+ -> service continues
 ```
 
-Do not make a model load failure kill the RF service.
+Live output must show:
 
-### Acceptance
+```text
+classification label
+classification confidence
+classification source/model version
+```
 
-- A test model placed in `AERIX_RF_MODEL` changes live output.
-- With no model, rules continue to work.
-- Invalid/corrupt model -> warning + fallback, no process crash.
-- Live output includes classifier source/version.
+Do not use classifier output as a prerequisite for protocol decoding. A valid protocol decode is stronger evidence than an ML label.
 
 ---
 
-## P0-2 — `verified=true` is currently unsafe as training ground truth
+## 2.2 Stage 1 over-claims identity
 
-The live loop currently marks a frame verified if any active ODID cue is drained in the same processing cycle.
+The current energy detector assigns labels such as `dji_ocusync` based primarily on bandwidth/cadence.
 
-That is insufficient.
+That is too strong for 2.4 GHz environments because normal Wi-Fi can resemble wideband OFDM.
 
-Example failure:
-
-```text
-BLE Remote ID from a drone occurs
-            +
-SDR happens to be centered on / dominated by unrelated Wi-Fi
-            =
-RF frame currently becomes verified=true
-```
-
-This can poison AERIX's own training dataset.
-
-### Required redesign
-
-Replace a single binary concept with explicit correlation quality.
-
-Recommended model:
+For Phase 1, separate the concepts:
 
 ```text
-correlation_level
-0 = none
-1 = temporal coincidence only
-2 = temporal + site/spatial consistency
-3 = temporal + RF/frequency/signature consistency
-4 = protocol-confirmed drone signal
-5 = same identity confirmed by decoded RF + ODID
+Stage 1 = RF morphology / candidate detection
+Stage 2 = probabilistic UAS classification
+Stage 3 = protocol decode / deterministic confirmation
 ```
 
-Alternative naming is acceptable, but semantics must be explicit.
-
-Recommended fields:
-
-```text
-correlation_level
-correlation_score
-correlation_reasons[]
-label_quality
-label_source
-```
-
-Suggested label quality:
-
-```text
-NONE
-WEAK
-STRONG
-GROUND_TRUTH
-```
-
-Only protocol-confirmed or identity-matched samples should be treated as true ground truth by default.
-
-Temporal coincidence alone may be retained as a **weak label**, never silently treated as hard truth.
-
-### Acceptance
-
-- An arbitrary ODID cue does not automatically make the current RF frame ground truth.
-- The server can distinguish weakly correlated vs protocol-confirmed samples.
-- Training code can select only `GROUND_TRUTH`, or optionally `STRONG` + `GROUND_TRUTH`.
-- Existing `verified` can remain temporarily for compatibility, but must be derived/documented rather than ambiguous.
-
----
-
-## P0-3 — ANTSDR is allowed in the contract but not implemented as a receiver
-
-`rf-detection.v1.schema.json` already permits:
-
-```text
-source = hackrf | antsdr | sdr
-```
-
-But acquisition currently only implements:
-
-- HackRF
-- file
-- simulator
-
-ANTSDR must become a first-class runtime source, not just a roadmap sentence.
-
----
-
-## P0-4 — provisioning is HackRF-specific
-
-Migration `038_sensor_class_hackrf.sql` adds only `hackrf` as a sensor class.
-
-The heartbeat also contains a hardcoded receiver label:
-
-```python
-uplink.heartbeat(["hackrf-1"])
-```
-
-Do not add an ever-growing enum of every SDR model if it can be avoided.
-
-Recommended model:
-
-```text
-sensor_class = rf
-receiver_type = hackrf
-receiver_type = hackrf_pro
-receiver_type = antsdr_e200_ad9361
-receiver_type = usrp_b2xx
-receiver_type = bladerf2
-receiver_type = generic_soapy
-```
-
-If changing `sensor_class` is too invasive for this phase, add `antsdr` cleanly and create a follow-up migration toward generic `rf`. Do not make ANTSDR pretend to be HackRF.
-
----
-
-## P0-5 — stage 1 currently over-claims signal identity
-
-`detect/energy.py` currently maps bandwidth/cadence heuristics directly to labels such as:
-
-- `dji_ocusync`
-- `wifi_drone`
-- `fpv_analog`
-
-This is too strong for a generic energy detector.
-
-Normal Wi-Fi can look like a wide OFDM signal. A 20 MHz Wi-Fi transmission can easily resemble the current wideband rule.
-
-### Required semantics
-
-Stage 1 should describe **RF morphology**, not drone identity.
-
-Suggested stage-1 labels:
+Recommended Stage-1 vocabulary:
 
 ```text
 noise
-unknown_narrowband
-unknown_wideband
-burst_wideband
-burst_ofdm_candidate
-continuous_wideband
+narrowband_candidate
+wideband_candidate
+burst_wideband_candidate
+ofdm_candidate
 fhss_candidate
-analog_wideband_candidate
+continuous_wideband_candidate
+analog_candidate
+unknown
 ```
 
-Stage 2 / Stage 3 can then provide higher-level labels:
+Recommended Stage-2 vocabulary can remain higher-level:
 
 ```text
 dji_ocusync
@@ -354,138 +228,711 @@ non_uas
 unknown
 ```
 
-Do not remove the detector score; split **signal candidate confidence** from **drone classification confidence**.
+A Stage-1 event must never be presented as a confirmed drone merely because it is 10–20 MHz wide.
 
 ---
 
-# 3. ANTSDR target architecture
+## 2.3 HackRF cannot watch the entire 2.4 + 5.8 GHz space at once
 
-## Hardware target
+Do not hide this limitation.
 
-Primary hardware:
+The Phase-1 implementation must explicitly use a **scan -> candidate -> lock -> inspect -> rescan** strategy.
+
+High-level behavior:
 
 ```text
-ANTSDR E200 + AD9361
+SCAN
+  2.4 GHz configured range
+  5 GHz / 5.8 GHz configured range
+        ↓
+find persistent/new candidate
+        ↓
+LOCK receiver around candidate
+        ↓
+continuous IQ capture
+        ↓
+detect + classify + decode
+        ↓
+periodically rescan / follow hop
 ```
 
-Do not target the AD9363 variant as the primary AERIX unit because 5.8 GHz is required.
+The exact frequency presets must be configurable. Do not bake one regulatory-region assumption into the detector.
 
-Official ANTSDR documentation currently describes the E200/AD9361 as roughly:
-
-- RF coverage to 6 GHz
-- up to 56 MHz RF/channel bandwidth at the AD9361
-- Zynq XC7Z020
-- 1 GbE host interface
-- external 10 MHz / PPS synchronization input
-- libiio / UHD support
-- practical host-stream bandwidth lower than the RFIC's full analog bandwidth
-
-Relevant docs:
-
-- https://antsdr-docs.microphase.cn/en/latest/device_and_usage_manual/ANTSDR_E_Series_Module/ANTSDR_E200_Reference_Manual/AntsdrE200_Reference_Manual.html
-- https://antsdr-docs.microphase.cn/en/latest/device_and_usage_manual/ANTSDR_E_Series_Module/ANTSDR_E200_Reference_Manual/AntsdrE200_RF_parameters.html
-
-## Public DJI ANTSDR implementation
-
-Reference project:
-
-- https://github.com/alphafox02/antsdr_dji_droneid
-
-Current public behavior documented there:
-
-### O2/O3
-
-Public receiver reports fields including:
-
-- serial
-- model
-- drone GPS
-- pilot GPS
-- home GPS
-- altitude
-- speed
-- RSSI
-
-### O4 public firmware
-
-Public receiver supports encrypted O4 **detection**, with fields such as:
-
-- session/hash identifier
-- frequency
-- RSSI
-
-Position is not available from the public receiver alone.
-
-### DragonScope
-
-DragonScope can enrich O4 with position, but it is licensed/internet-dependent.
-
-AERIX must **not require DragonScope** for basic operation.
-
-It may be supported later as an optional enrichment provider behind a clean interface.
+Provide sensible presets for the test tool, but keep raw start/stop frequencies user-configurable.
 
 ---
 
-# 4. Receiver abstraction
+## 2.4 `hackrf_transfer` window-by-window capture has gaps
 
-Do not implement ANTSDR by scattering `if antsdr:` throughout the pipeline.
+The current `HackrfTransferSource` starts a new CLI process for each capture window.
 
-Create explicit receiver/provider abstractions.
+That is acceptable as a fallback and for simple recordings, but it is not the preferred live Phase-1 detector path because short RF bursts can occur during restart gaps.
 
-Recommended split:
+For test-ready operation:
 
-```text
-ReceiverSource
-├── HackRF IQ source
-├── File IQ source
-├── Sim IQ source
-├── ANTSDR raw-IQ source
-└── ANTSDR protocol-event source
-```
+1. Prefer a continuous SoapySDR/libhackrf stream for locked-channel monitoring.
+2. Keep `hackrf_transfer` as a robust capture/export fallback.
+3. Detect/log stream errors, short reads and overflows.
+4. Never silently treat a partial buffer as a normal full-quality frame.
 
-The important point is that ANTSDR has **two useful operating modes**.
+Add capture-quality metadata to each processed window.
 
-## Mode A — ANTSDR protocol/event backend
+Suggested fields:
 
 ```text
-ANTSDR FPGA/ARM firmware
-        -> TCP/UDP/ZMQ DJI events
-        -> AERIX ANTSDR adapter
-        -> normalized RF event
+expected_samples
+received_samples
+dropped_or_missing_samples
+overflow_count
+capture_complete
+source_backend
 ```
-
-This should be implemented first.
-
-Do not unnecessarily stream raw IQ to Python just to recreate a decoder that the ANTSDR firmware already provides.
-
-## Mode B — ANTSDR generic raw-IQ backend
-
-```text
-AD9361
- -> libiio/UHD IQ
- -> AERIX spectrogram
- -> signal detector
- -> ML classifier
- -> optional local decoder
-```
-
-This is required for:
-
-- non-DJI signals
-- generic RF classification
-- research/training captures
-- unknown protocols
-- future RF localization work
-
-Implement it after the event backend is stable.
 
 ---
 
-# 5. Normalize receiver outputs into events
+# 3. Hardware abstraction — build this now, but only implement HackRF now
 
-Introduce a receiver-independent internal event type instead of making server contracts depend on one device's format.
+We want bladeRF and ANTSDR later without rewriting the DSP engine.
 
-Example internal model (names may be adjusted):
+That does **not** mean implementing those receivers now.
+
+Create/clean up a minimal hardware-neutral IQ source contract.
+
+Example:
+
+```python
+class IQSource:
+    @property
+    def capabilities(self) -> ReceiverCapabilities: ...
+
+    def tune(self, center_freq_hz: float) -> None: ...
+    def windows(self) -> Iterator[IQWindow]: ...
+    def close(self) -> None: ...
+```
+
+A window should carry the IQ and its metadata rather than returning a naked NumPy array forever.
+
+Suggested model:
+
+```python
+@dataclass
+class IQWindow:
+    iq: np.ndarray
+    captured_at: float
+    sample_rate: float
+    center_freq_hz: float
+    receiver_type: str
+    receiver_serial: str | None
+    gain_db: float | None
+    complete: bool
+    dropped_samples: int | None
+    metadata: dict
+```
+
+Suggested capabilities:
+
+```python
+@dataclass
+class ReceiverCapabilities:
+    receiver_type: str
+    min_freq_hz: float
+    max_freq_hz: float
+    max_sample_rate: float
+    max_instantaneous_bw_hz: float
+    channels_rx: int
+    supports_hardware_timestamps: bool
+    supports_external_clock: bool
+    supports_external_pps: bool
+```
+
+### Phase-1 implementations
+
+Implement/use only:
+
+```text
+HackRFSource
+HackrfTransferSource
+FileIQSource
+SimSource
+```
+
+Do not implement bladeRF or ANTSDR source classes now.
+
+### Future rule
+
+Any later SDR must feed the same downstream DSP contracts.
+
+No DSP/classifier/decoder module should contain checks such as:
+
+```python
+if receiver == "hackrf":
+...
+elif receiver == "bladerf":
+...
+```
+
+Receiver-specific behavior belongs in receiver adapters.
+
+---
+
+# 4. PHASE 1 — HackRF local RF test system
+
+## Phase-1 goal
+
+At the end of Phase 1 we must be able to take the HackRF and the test computer/box into the field and perform a repeatable test with two available DJI drones.
+
+One known test aircraft is a DJI Mini. The exact model/version of the second DJI aircraft may be entered in the test metadata before testing.
+
+Phase 1 does **not** require server connectivity.
+
+Phase 1 should answer these questions with real evidence:
+
+1. Can the HackRF find repeatable RF activity associated with Drone A?
+2. Can it find repeatable RF activity associated with Drone B?
+3. Which frequencies/bands are being used?
+4. What RF morphology/cadence do we observe?
+5. Does the classifier distinguish the signal from local Wi-Fi/background?
+6. Can the DJI decoder obtain a CRC-valid real DroneID frame for a supported aircraft?
+7. Can every test be replayed offline and produce materially identical results?
+
+---
+
+## Milestone 1.1 — stabilize the live HackRF pipeline
+
+### Work
+
+- Refactor `IQSource` / `IQWindow` as described above.
+- Make continuous HackRF streaming the preferred live backend.
+- Keep file/sim behavior working.
+- Keep `hackrf_transfer` capture support.
+- Add stream-quality counters.
+- Add receiver metadata.
+- Add clean shutdown/restart behavior.
+
+### Acceptance
+
+- Continuous capture can run for at least 10 minutes without process failure.
+- Any overflow/short-read condition is counted and visible.
+- `--sim` still works.
+- file replay still works.
+- existing tests remain green.
+
+---
+
+## Milestone 1.2 — wire the real classifier into live operation
+
+### Work
+
+- Use `classify_spectrogram()` from the live pipeline when a model is available.
+- Keep the rule path as fallback.
+- Expose classifier source/version/confidence.
+- Do not gate decoder execution on classifier approval.
+- Add an explicit `unknown`/abstain path where practical.
+
+### Sample-rate handling
+
+The current real DroneRF demonstration is at ~40 MS/s while the HackRF deployment path is normally 20 MS/s.
+
+Do not pretend that the 40 MS/s bundle is a calibrated 20 MS/s deployment model.
+
+For Phase 1 either:
+
+1. create a documented preprocessing/resampling path and train a proper 20 MS/s model, or
+2. run the ML output as experimental/advisory while collecting real HackRF test data to build a native model.
+
+Option 2 is acceptable for the first field session.
+
+### Acceptance
+
+- A test model changes live classification.
+- No model -> fallback works.
+- Corrupt model -> fallback works.
+- model/sample-rate mismatch is prominently logged.
+
+---
+
+## Milestone 1.3 — build HackRF scan-and-lock
+
+The existing `sweep_locate.py` is a useful start. Turn the concept into a repeatable field workflow.
+
+### Required operating modes
+
+At minimum:
+
+```text
+baseline
+scan
+lock
+capture
+replay
+```
+
+Suggested commands/API shape; exact CLI names are flexible:
+
+```bash
+# measure environment with test drones off
+uv run aerix-rf baseline --band 2.4 --seconds 30 --out sessions/site-baseline
+
+# search for new/interesting signals
+uv run aerix-rf scan --band 2.4
+uv run aerix-rf scan --band 5.8
+
+# lock to a discovered channel and inspect continuously
+uv run aerix-rf lock --center-mhz 2437 --seconds 60
+
+# save a labelled raw capture
+uv run aerix-rf capture --center-mhz 2437 --seconds 30 \
+    --label drone-a-motors-on --out sessions/test-001
+
+# deterministic offline analysis
+uv run aerix-rf replay sessions/test-001
+```
+
+Do not spend excessive time on perfect CLI ergonomics. A clear test tool is enough.
+
+### Scan algorithm
+
+Use a baseline differential where possible:
+
+```text
+current spectrum - baseline spectrum
+```
+
+Rank candidates using factors such as:
+
+- power increase
+- occupied bandwidth
+- persistence
+- burst behavior
+- cadence
+- frequency hopping behavior
+
+Return multiple candidates, not just the hottest frequency.
+
+### Acceptance
+
+- Baseline can be recorded and reused.
+- Scan returns a ranked candidate list.
+- User can lock onto a candidate without editing code.
+- Locked mode generates spectrogram/detection/classification/decode output.
+- User can return to scanning.
+
+---
+
+## Milestone 1.4 — make capture/replay first-class
+
+Field captures are one of the most valuable outputs of Phase 1.
+
+Every significant test should generate a self-describing session directory.
+
+Recommended structure:
+
+```text
+sessions/
+  2026-09-xx_test_001/
+    session.json
+    iq/
+      capture_0001.cs8
+      capture_0002.cs8
+    spectrograms/
+    detections.jsonl
+    decode.jsonl
+    summary.md
+```
+
+### `session.json`
+
+Capture at least:
+
+```text
+session_id
+started_at
+software_git_sha
+receiver_type
+receiver_serial if available
+sample_rate
+center_frequency / scan range
+gain settings
+antenna description
+location optional
+environment notes
+
+test_label
+drone_manufacturer
+drone_model
+drone_serial if intentionally recorded
+drone_state
+controller_state
+motors_state
+approx_distance_m optional
+operator_notes
+```
+
+Also store per-file:
+
+```text
+SHA256
+sample count
+capture duration
+capture complete/incomplete
+```
+
+### Important label semantics
+
+A human saying "Drone A motors on" is **test-session ground truth about the test condition**.
+
+It does not prove that every RF emitter in the recording belongs to Drone A.
+
+Keep these separate:
+
+```text
+test_condition_label
+RF classifier output
+protocol-confirmed identity
+```
+
+This distinction will matter when Phase 2 creates training labels.
+
+### Acceptance
+
+- A field session is understandable later without relying on memory.
+- Captured IQ can be replayed on another machine.
+- Replay produces the same protocol-decode result and materially equivalent classifier/detector output.
+
+---
+
+## Milestone 1.5 — validate the real DJI decoder
+
+The synthetic decoder work is useful but does not close the decoder task.
+
+### Objective
+
+Obtain and preserve at least one real HackRF recording containing a publicly decodable DJI DroneID transmission, if either available test drone uses a supported format.
+
+### Validation hierarchy
+
+```text
+Level A
+real IQ -> sync candidate
+
+Level B
+real IQ -> OFDM/descramble succeeds
+
+Level C
+real IQ -> Turbo + CRC24A valid
+
+Level D
+parsed serial/position agrees with independently known test information
+```
+
+Only Level C/D should be described as a successful real decode.
+
+### Decoder robustness work
+
+Before/while testing address known TODOs that materially block real capture decoding, particularly:
+
+- integer/multi-subcarrier CFO handling
+- 8-symbol variant if encountered
+- multiple candidate bursts within a longer recording
+- decoding burst-by-burst rather than passing a huge 1-second array blindly through expensive processing
+
+Do not over-engineer unobserved variants before real testing.
+
+### If the available drones are O4
+
+Do not declare Phase 1 failed merely because encrypted O4 position cannot be decoded with the current local decoder.
+
+For an O4 test aircraft, Phase 1 success can be:
+
+```text
+repeatable RF discovery
++ repeatable signal capture
++ repeatable spectral/cadence signature
++ classifier output
++ preserved raw IQ for later O4/ANTSDR work
+```
+
+O4-specific decoding/detection integration is primarily Phase 3 with ANTSDR.
+
+---
+
+## Milestone 1.6 — create a simple local test dashboard/report
+
+Do not build the production AERIX UI yet.
+
+Provide enough local visibility to operate a field test.
+
+Minimum output should show:
+
+```text
+time
+center frequency
+peak frequency
+signal score
+SNR / relative power
+occupied bandwidth
+burst/cadence info
+Stage-1 morphology
+Stage-2 class + confidence + source
+protocol-decode state
+serial/location if CRC-valid decode exists
+capture health
+```
+
+A terminal UI, local HTML page or simple FastAPI page is acceptable.
+
+The goal is **testability**, not visual polish.
+
+Provide a session summary generator that makes a Markdown report after a test session.
+
+---
+
+# 5. PHASE-1 two-drone field test protocol
+
+Do not optimize only against one successful capture. Use a repeatable test matrix.
+
+The two available aircraft should be called:
+
+```text
+DRONE_A = DJI Mini (exact model to be recorded)
+DRONE_B = second DJI aircraft (exact model to be recorded)
+```
+
+Before the test, record exact model and firmware versions if readily available.
+
+## Test 0 — environment baseline
+
+No test drone/control link active.
+
+Record:
+
+- 2.4 GHz baseline
+- configured 5 GHz/5.8 GHz baseline
+- at least 5 minutes of representative local RF conditions
+- nearby Wi-Fi channel activity if observable
+
+Goal:
+
+Establish what the site looks like without the test drones.
+
+Expected:
+
+- plenty of RF candidates may exist
+- zero CRC-valid DJI identity decodes attributable to the test aircraft
+- baseline saved for differential scan
+
+---
+
+## Test 1 — controller only
+
+For each aircraft where practical:
+
+```text
+controller ON
+dr one OFF
+```
+
+Record scan + locked captures.
+
+Goal:
+
+Learn which RF signatures belong to controller/control-link activity versus DroneID transmissions.
+
+---
+
+## Test 2 — aircraft powered, motors not running
+
+For each drone:
+
+```text
+controller ON
+aircraft ON
+motors OFF
+```
+
+Record scan + lock + capture.
+
+Goal:
+
+Separate general OcuSync/control-link RF from the DroneID condition.
+
+Do not assume power-on alone generates the same DroneID transmission as motors-running operation.
+
+---
+
+## Test 3 — motors/normal operational state
+
+Operate the aircraft in a safe test configuration according to the manufacturer's procedures.
+
+For each drone:
+
+- scan 2.4 GHz
+- scan configured 5 GHz/5.8 GHz range
+- identify candidate(s)
+- lock and capture
+- run detector
+- run classifier
+- run protocol decoder
+- preserve at least one long raw capture and several shorter event captures
+
+Repeat at least three times per drone.
+
+---
+
+## Test 4 — distance variation
+
+If the site allows it, repeat at several approximate ranges, for example:
+
+```text
+near
+medium
+farther practical test point
+```
+
+Record actual approximate distance in session metadata.
+
+Do not use these results as calibrated ranging yet. They are for sensitivity/repeatability characterization.
+
+---
+
+## Test 5 — both drones
+
+Optional but strongly useful after single-aircraft tests are understood.
+
+Operate both test systems in a controlled manner and determine:
+
+- can scanning reveal more than one active candidate?
+- does lock-following one signal hide the other?
+- can offline recordings distinguish them?
+- if identities are decodable, can captures be associated correctly?
+
+This test is informational; Phase 1 does not require one HackRF to continuously track both hopping drones simultaneously.
+
+---
+
+# 6. Phase-1 measurements and acceptance criteria
+
+Phase 1 exits only when we have **real test evidence**, not just green unit tests.
+
+## Required software criteria
+
+- [ ] Continuous HackRF live source works reliably.
+- [ ] Capture health/overflow/short-read state is visible.
+- [ ] Scan -> candidate -> lock workflow works without code edits.
+- [ ] Raw IQ session capture works.
+- [ ] Replay works deterministically.
+- [ ] Live ML path is actually wired in when a valid model is supplied.
+- [ ] Rule fallback works without a model.
+- [ ] Stage 1 no longer claims drone identity solely from bandwidth.
+- [ ] Protocol decode is independent from ML approval.
+- [ ] Field session report is generated.
+- [ ] Automated tests remain green.
+
+## Required real-world criteria
+
+For **both available DJI drones**:
+
+- [ ] A repeatable RF change can be found relative to baseline.
+- [ ] At least one candidate frequency/channel can be locked and recorded.
+- [ ] The same behavior can be reproduced in at least 3 independent runs.
+- [ ] Raw IQ is saved with complete metadata.
+- [ ] Offline replay sees the same key RF event(s).
+
+For any test drone using a publicly decodable O2/O3 DroneID format:
+
+- [ ] At least one real frame reaches CRC-valid decode, OR the blocker is isolated with preserved IQ and a specific decoder defect documented.
+- [ ] If CRC-valid, decoded identity/location is compared with known test truth / Remote ID output where available.
+
+For an O4-only aircraft:
+
+- [ ] O4 inability to decrypt position locally is documented as expected rather than treated as a generic detector failure.
+- [ ] Representative IQ is preserved for Phase 3 ANTSDR/O4 comparison.
+
+## False-positive characterization
+
+Run at least a 30-minute local baseline/ambient session after the detector is stable.
+
+Measure separately:
+
+```text
+RF candidate rate
+ML UAS-classification rate
+CRC-valid DJI protocol decode rate
+```
+
+A Stage-1 RF candidate in busy spectrum is not automatically a false drone alert.
+
+The most important safety invariant is:
+
+```text
+normal Wi-Fi must never become a protocol-confirmed DJI drone without a valid decode
+```
+
+---
+
+# 7. Phase-1 deliverables
+
+Claude should finish Phase 1 with these concrete outputs.
+
+## Code
+
+- hardware-neutral `IQSource`/`IQWindow` abstraction
+- stable HackRF continuous source
+- capture-quality metadata
+- live ML integration
+- morphology-vs-identity separation
+- improved scan/lock tooling
+- first-class capture/replay
+- real-burst decoder improvements only as required by captured evidence
+- local test status output
+- session report generator
+
+## Test assets
+
+Do not commit huge IQ data to git.
+
+Provide documented local storage structure and optional small fixtures only.
+
+Expected real test artifacts outside git:
+
+```text
+baseline session
+drone A sessions
+drone B sessions
+controller-only sessions
+motors-off sessions
+motors-on sessions
+representative IQ captures
+session reports
+```
+
+## Documentation
+
+Update `aerix-rf/README.md` after Phase 1 to clearly state:
+
+```text
+what is real-hardware validated
+what is only synthetic validated
+which two aircraft were tested
+which protocols decoded
+which did not
+known sensitivity / false-positive limitations
+exact test commands
+```
+
+Do not claim successful O2/O3/O4 coverage without test evidence.
+
+---
+
+# 8. PHASE 2 — integrate the proven RF engine into AERIX server
+
+Start Phase 2 only after Phase 1 field testing has produced useful real captures.
+
+The goal is to integrate **the proven local RF event model**, not debug raw RF through the server.
+
+## 8.1 Normalize local RF events
+
+Introduce/use a receiver-independent event model, for example:
 
 ```python
 @dataclass
@@ -510,1133 +957,376 @@ class RFEvent:
     protocol_version: str | None
     decode_state: str | None
 
-    identity: ...
-    location: ...
-    timing: ...
-    calibration: ...
-    evidence: ...
+    identity: dict | None
+    location: dict | None
+    evidence: dict | None
+    timing: dict | None
+    calibration: dict | None
 ```
 
-This internal object can later be serialized into the server envelope.
-
-The exact implementation need not copy this literally; preserve the separation of concepts.
+Exact field structure may differ, but keep the semantic separation.
 
 ---
 
-# 6. Extend decoded DJI semantics
+## 8.2 Fix ODID/RF correlation semantics
 
-The current `decoded` structure is too O2-centric.
+The current `verified=true` behavior is too permissive if it simply means an ODID cue occurred in the same loop.
 
-The data model must distinguish:
-
-```text
-identity serial
-```
-
-from:
-
-```text
-O4 session/hash identifier
-```
-
-Never place an O4 session hash into the serial field.
-
-Recommended normalized DJI fields:
-
-```text
-vendor: DJI
-model
-protocol
-protocol_version
-
-decode_state:
-  protocol_detected
-  encrypted_detected
-  decoded
-
-serial
-session_id
-session_hash
-
-drone:
-  lat
-  lon
-  altitude
-  height
-  speed_horizontal
-  speed_vertical
-
-operator:
-  lat
-  lon
-
-home:
-  lat
-  lon
-
-rf:
-  frequency_hz
-  rssi_dbm
-
-decoder:
-  name
-  version
-  firmware_version
-```
-
-For O4 public detection:
-
-```text
-protocol = dji_ocusync
-protocol_version = O4
-decode_state = encrypted_detected
-session_hash = ...
-location = null
-```
-
-That is a valid, useful event.
-
----
-
-# 7. ANTSDR DJI event adapter — first hardware milestone
-
-Implement support for the public `alphafox02/antsdr_dji_droneid` output before implementing raw-IQ ANTSDR capture.
-
-Current public reference receiver supports:
-
-- new firmware: reversed TCP connection to host, default port 52002
-- UDP on 52002 as alternative transport
-- ZMQ publisher on 4221
-- legacy firmware path on 41030
-
-AERIX should not need all modes on day one.
-
-## Minimum implementation
-
-Implement at least one well-supported path first, preferably the normalized host output rather than reimplementing firmware internals.
+Replace/augment it with explicit correlation quality.
 
 Suggested:
 
 ```text
-AntSdrDjiEventSource
-```
-
-with support for either:
-
-1. subscribing to the local ZMQ output, or
-2. parsing the public host receiver output directly.
-
-Choose the lowest-maintenance integration after inspecting the actual public message format.
-
-### Required properties
-
-- reconnect automatically
-- tolerate malformed messages
-- expose firmware/device identity
-- preserve O4 hash separately
-- include exact receive time
-- no duplicate storm after reconnect
-- clear health state when the ANTSDR becomes unavailable
-
-### Acceptance
-
-Provide replay fixtures captured from the public ANTSDR receiver format so tests do not require live hardware.
-
-Tests must cover:
-
-- O2/O3 decoded example
-- O4 detection-only example
-- malformed event
-- reconnect/replay behavior
-- duplicate handling
-
----
-
-# 8. ANTSDR raw-IQ source
-
-After event integration works, implement a generic raw-IQ source.
-
-Preferred APIs:
-
-- libiio first if simplest/stable on E200
-- UHD if it is demonstrably more reliable for this use case
-- Soapy only if it does not introduce needless extra layers
-
-Do not hardcode assumptions from HackRF `cs8` into ANTSDR processing.
-
-ANTSDR is 12-bit-class RF hardware and its sample format/scaling/calibration differs from HackRF.
-
-## Required features
-
-- receiver selection by config
-- center frequency
-- sample rate
-- analog bandwidth
-- gain mode / AGC mode
-- channel selection
-- overflow detection
-- timestamp metadata where available
-- calibration metadata
-- clean close/reconnect
-- replayable capture format
-
-## Important throughput constraint
-
-Do not assume that the complete AD9361 56 MHz RF bandwidth can always be continuously streamed over the E200 host link into Python.
-
-Design the architecture so that:
-
-- protocol-specific FPGA/ARM processing can stay on-device
-- raw IQ can use narrower windows when needed
-- short triggered high-value captures can be retained
-- server never depends on full-band continuous IQ streaming
-
----
-
-# 9. Multi-band strategy
-
-A single narrow live IQ window is not equivalent to continuous coverage of all relevant 2.4/5.x GHz channels.
-
-For ANTSDR DJI firmware, let its supported hopping/scanning mechanism perform DJI-specific coverage where possible.
-
-For generic RF detection, design a configurable scan plan.
-
-Example:
-
-```yaml
-scan_profiles:
-  drone_24:
-    ranges:
-      - [2400e6, 2483.5e6]
-
-  drone_58:
-    ranges:
-      - [5725e6, 5875e6]
-```
-
-Do not implement a naive sweep that spends so little dwell time per channel that short transmissions are systematically missed.
-
-Record scan metadata so the server knows when the receiver was actually observing a frequency.
-
-Suggested fields:
-
-```text
-scan_profile
-center_freq
-observed_start
-observed_end
-dwell_ms
-coverage_fraction
-```
-
-This will matter when interpreting a non-detection.
-
----
-
-# 10. Timing model — prepare now for TDOA
-
-AERIX currently records millisecond-level `captured_at` values. That is enough for map/event correlation but not enough for RF TDOA.
-
-The E200 provides an external 10 MHz/PPS synchronization input, so future synchronized deployment is realistic.
-
-Do **not** claim TDOA accuracy until hardware timestamping and synchronization have been measured.
-
-Add timing metadata now.
-
-Recommended fields:
-
-```text
-capture_start_ns
-capture_end_ns
-sample_index_start
-sample_count
-sample_rate
-
-clock_source:
-  system
-  ntp
-  ptp
-  gps_pps
-  external_pps
-  unknown
-
-clock_locked
-reference_10mhz_locked
-pps_locked
-clock_uncertainty_ns
-```
-
-The implementation should distinguish:
-
-```text
-host arrival timestamp
-```
-
-from:
-
-```text
-RF sample / hardware timestamp
-```
-
-Do not use host socket arrival time as if it were TDOA-grade RF arrival time.
-
----
-
-# 11. O4 localization roadmap
-
-O4 payload decryption is **not** a required dependency for AERIX RF.
-
-AERIX should support several location methods with explicit provenance.
-
-Recommended location result fields:
-
-```text
-location_method
-location_confidence
-location_accuracy_m
-participating_sensor_ids[]
-```
-
-Methods:
-
-```text
-decoded_rf
-remote_id_correlation
-tdoa
-aoa
-rssi_area
-external_enrichment
-```
-
-## Phase 1 — Remote ID fusion
-
-If an O4 RF hit is correlated with a valid BLE/Wi-Fi Remote ID track, use the RID position with explicit provenance.
-
-Do not call this O4-decrypted GPS.
-
-## Phase 2 — RSSI area estimate
-
-Multiple nodes can provide a coarse RF probability area using calibrated RSSI.
-
-Treat this as approximate.
-
-Do not report false precision.
-
-## Phase 3 — TDOA research
-
-Future design:
-
-```text
-same O4 hash/session
-      +
-short synchronized IQ snippets from >= 3 receivers
-      -> cross-correlation
-      -> delta-t measurements
-      -> hyperbolic position solve
-```
-
-The O4 session/hash is useful for associating detections across nodes, but the actual TDOA measurement must come from synchronized waveform/sample timing, not from normal server event timestamps.
-
-### TDOA research deliverables
-
-Later, not P0:
-
-- synchronized capture fixture format
-- cross-correlation tool
-- simulated geometry tests
-- measured PPS lock quality
-- known transmitter field test
-- uncertainty ellipse output
-- minimum geometry checks / GDOP-like quality metric
-
-Do not begin field TDOA claims before the timing layer is implemented and measured.
-
----
-
-# 12. RF calibration model
-
-Current HackRF `rssi_dbm` is approximate and effectively derived from dBFS/gain assumptions.
-
-This is fine for prototype relative strength but insufficient for meaningful cross-sensor comparison.
-
-Add metadata such as:
-
-```text
-receiver_type
-receiver_serial
-rf_channel
-
-gain_mode
-gain_db
-lna_gain_db
-vga_gain_db
-agc_state
-adc_overload
-clipping_detected
-
-antenna_id
-antenna_gain_db
-polarization
-cable_loss_db
-filter_profile
-lna_profile
-
-calibration_id
-calibration_date
-receiver_temperature_c
-```
-
-Not every field must be present for every receiver.
-
-### Calibration principle
-
-Never silently compare RSSI from:
-
-```text
-HackRF A
-ANTSDR B
-ANTSDR C with AGC
-```
-
-as if all values were absolute calibrated dBm.
-
-Expose a quality/provenance flag.
-
----
-
-# 13. Classifier redesign
-
-## Keep the new real-data work
-
-Preserve:
-
-- correct DroneRF DJI vs Parrot labels
-- grouped split by source recording
-- common feature extraction for training/live paths
-
-## Fix live inference
-
-See P0-1.
-
-## Add open-set / abstain behavior
-
-A classifier must be allowed to say:
-
-```text
-unknown
-```
-
-or:
-
-```text
-abstain
-```
-
-Do not force every RF transmission into a known drone class.
-
-## Separate three questions
-
-Recommended hierarchy:
-
-### A. Signal presence
-
-```text
-interesting RF signal vs background/noise
-```
-
-### B. UAS likelihood
-
-```text
-uas_rf
-non_uas_rf
-unknown
-```
-
-### C. Family/vendor/protocol
-
-```text
-dji_ocusync
-wifi_uas
-analog_fpv
-other_uas
-unknown
-```
-
-A future model can add vendor/model identification, but do not make that a prerequisite for initial production detection.
-
-## Model metadata
-
-Model bundle must include at least:
-
-```text
-model_id
-model_version
-trained_at
-feature_version
-training_sample_rate
-training_bandwidth
-classes
-dataset_manifest_hash
-validation_summary
-```
-
-Avoid opaque model files that cannot later be audited.
-
----
-
-# 14. Training datasets / validation program
-
-Current DroneRF work is only a starting point.
-
-Add loaders/evaluation support progressively for public datasets such as:
-
-- DroneRF
-- DroneDetect
-- RFUAV
-- UAVSig
-- CardRF
-- Noisy Drone RF / robust low-SNR datasets
-- additional real AERIX captures
-
-The project does not need to download multi-terabyte datasets automatically.
-
-## Critical validation rule
-
-Do not report random-window validation from the same recording/session as evidence of real-world generalization.
-
-Prefer splits by:
-
-1. recording/session
-2. location/site
-3. day
-4. receiver hardware
-5. drone physical unit
-
-Best validation later:
-
-```text
-train on known sessions/sites
-validate on unseen sessions
-final test on unseen site + unseen physical drone where possible
-```
-
-## Hard negatives are mandatory
-
-Collect and label:
-
-- Wi-Fi AP traffic
-- Wi-Fi client traffic
-- Bluetooth
-- video streaming
-- phones/hotspots
-- nearby industrial RF
-- other ISM-band emitters
-- quiet background
-
-A production RF detector is judged more by rejecting these than by recognizing clean lab drone signals.
-
----
-
-# 15. Field capture mode
-
-Add a deliberate field-test/capture mode.
-
-It should make it easy to create reproducible AERIX RF datasets.
-
-Suggested metadata:
-
-```text
-capture_id
-site_id
-operator test note
-drone manufacturer/model
-physical drone identifier (test-only pseudonym acceptable)
-controller model
-firmware version
-motors state
-flight state
-known drone GPS
-known operator GPS
-receiver position
-receiver config
-antenna config
-weather optional
-start/end time
-```
-
-Do not require personal information beyond what is needed for a controlled test.
-
-Provide a manifest next to IQ files so data never becomes anonymous binary blobs with unknown sample rate/frequency/gain.
-
----
-
-# 16. Real DJI decoder validation
-
-The new Python Turbo/CRC/frame decoder is promising but currently synthetic-only.
-
-This is a dedicated milestone.
-
-## Required validation sequence
-
-1. Obtain a known public or self-captured O2/O3 DroneID IQ recording.
-2. Run the existing public decoder against it where possible.
-3. Run AERIX decoder.
-4. Compare:
-   - CRC outcome
-   - serial
-   - drone position
-   - operator position
-   - home position
-   - sequence
-5. Save a short legal/re-distributable fixture if licensing permits; otherwise save a synthetic fixture plus test instructions for the private real sample.
-
-## Decoder correctness issues to check
-
-Existing TODOs include:
-
-- integer / multi-subcarrier CFO handling
-- 8-symbol variant
-
-Also verify:
-
-- endianness
-- signed coordinate/value conversion
-- altitude/height semantics
-- CRC implementation against real frames
-- malformed frame bounds checking
-
-Do not delete the synthetic encode/decode tests; add real-data validation alongside them.
-
----
-
-# 17. Security hardening
-
-## Local API authentication
-
-Current `local_token` is optional. In the current implementation, an empty token effectively makes local cue/snapshot calls unauthenticated.
-
-That is unsafe once cues influence labels/training/evidence.
-
-### Required behavior
-
-Development/simulation may explicitly allow unauthenticated local API.
-
-Production mode must require authentication.
-
-At minimum:
-
-- mandatory secret/token
-- timestamp
-- replay window or nonce
-
-Prefer mTLS later for appliance-to-appliance communication if practical.
-
-## Training/model supply chain
-
-`joblib`/pickle-style model loading is code-execution capable if the model file is malicious.
-
-Do not blindly auto-download and load arbitrary model files.
-
-For managed deployment implement one of:
-
-- signed model artifacts + pinned hashes
-- a safer serialization/runtime such as ONNX where appropriate
-
-At minimum verify SHA-256 + expected model metadata before activating a model.
-
-## ANTSDR network input
-
-Treat ANTSDR TCP/UDP/ZMQ data as untrusted input:
-
-- length limits
-- field validation
-- malformed messages must not crash service
-- no `eval`
-- no shell interpolation
-- reconnect rate limiting
-
----
-
-# 18. Server contract evolution
-
-Do not break v1 consumers silently.
-
-Prefer either:
-
-- backward-compatible optional fields within the current `1.x` contract, or
-- an explicit `rf-detection.v2` if semantics change incompatibly.
-
-Fields likely needed:
-
-```text
-receiver_type
-receiver_serial
-hardware_revision
-firmware_version
-
-signal_class
-signal_confidence
-classifier_class
-classifier_confidence
-classifier_source
-
-protocol
-protocol_version
-decode_state
-session_hash
-
 correlation_level
-correlation_score
-correlation_reasons
-label_quality
+0 none
+1 temporal coincidence
+2 temporal + site consistency
+3 temporal + RF consistency
+4 protocol-confirmed UAS signal
+5 same identity confirmed by RF decode and ODID
+```
 
+And:
+
+```text
+label_quality = NONE | WEAK | STRONG | GROUND_TRUTH
+```
+
+Only truly strong/protocol-confirmed samples should feed automatic training as hard labels.
+
+Phase-1 manual test-condition labels remain separate from server correlation.
+
+---
+
+## 8.3 RF sensor provisioning
+
+Generalize away from a permanent HackRF-only fleet identity.
+
+Preferred long-term concept:
+
+```text
+sensor_class = rf
+receiver_type = hackrf
+receiver_type = hackrf_pro
+receiver_type = antsdr_e200_ad9361
+receiver_type = bladerf2
+receiver_type = generic_soapy
+```
+
+If a broad sensor-class migration is too invasive, preserve compatibility while adding receiver metadata cleanly.
+
+Remove hard-coded heartbeat identifiers such as:
+
+```python
+["hackrf-1"]
+```
+
+---
+
+## 8.4 Evidence
+
+Server RF events should be able to reference:
+
+```text
+spectrogram
+short IQ evidence clip
+capture metadata
+SHA256
+classifier/model version
+decoder version
+```
+
+Do not upload continuous IQ by default.
+
+Short evidence/event captures are enough for normal operation.
+
+---
+
+## 8.5 Retention and privacy
+
+Preserve the existing RF retention design.
+
+Decoded operator coordinates or other personal data must retain stricter policy handling.
+
+Training-data promotion must be explicit and auditable.
+
+---
+
+## Phase-2 exit criteria
+
+- [ ] HackRF RF node provisions cleanly.
+- [ ] Real Phase-1-style detections reach the server.
+- [ ] Spectrogram/evidence metadata is preserved.
+- [ ] RF and ODID remain distinct source types.
+- [ ] Correlation never silently upgrades temporal coincidence to ground truth.
+- [ ] Protocol-confirmed DJI identity can correlate to the corresponding AERIX track when data exists.
+- [ ] Receiver health/heartbeat is visible.
+- [ ] Retention works for RF rows/evidence.
+
+---
+
+# 9. PHASE 3 — ANTSDR E200 integration
+
+Only begin this after the HackRF pipeline is understood and the server event model is stable.
+
+Primary target:
+
+```text
+ANTSDR E200 AD9361
+```
+
+The ANTSDR should not cause another DSP/server redesign.
+
+It must plug into the abstractions created in Phases 1 and 2.
+
+---
+
+## 9.1 ANTSDR operating modes
+
+ANTSDR should ultimately provide two complementary modes.
+
+### Mode A — DJI protocol-event backend
+
+Use the public ANTSDR DJI receiver ecosystem as an event source.
+
+Reference:
+
+```text
+https://github.com/alphafox02/antsdr_dji_droneid
+```
+
+Target behavior:
+
+```text
+ANTSDR firmware
+ -> public receiver protocol/output
+ -> AntSdrDjiEventSource
+ -> normalized RFEvent
+ -> AERIX
+```
+
+Publicly documented capabilities currently include:
+
+### O2/O3
+
+- serial
+- model
+- drone GPS
+- pilot GPS
+- home GPS
+- altitude/speed
+- RSSI
+
+### O4
+
+- encrypted O4 detection
+- session/hash ID
+- frequency
+- RSSI
+
+Do not put an O4 hash into a serial field.
+
+Represent it separately:
+
+```text
+protocol_version = O4
+decode_state = encrypted_detected
+session_hash = ...
+```
+
+### Optional DragonScope
+
+If supported later, treat it as optional external enrichment.
+
+AERIX must not depend on a licensed/internet service for basic RF detection.
+
+---
+
+## 9.2 ANTSDR raw-IQ backend
+
+After event integration works:
+
+```text
+AD9361
+ -> libiio/UHD
+ -> IQWindow
+ -> exact same DSP/classifier/decoder contracts used by HackRF
+```
+
+Use this for:
+
+- non-DJI RF
+- generic UAS classification
+- unknown signals
+- research captures
+- cross-validation against HackRF
+- future timing/localization work
+
+Do not fork a second AERIX RF detector for ANTSDR.
+
+---
+
+## 9.3 timing groundwork
+
+ANTSDR gives us a future path toward synchronized receivers.
+
+Add/support timing metadata cleanly:
+
+```text
 capture_start_ns
-capture_end_ns
+sample_counter
 clock_source
 clock_uncertainty_ns
 pps_locked
 reference_10mhz_locked
-
-calibration_id
-rssi_quality
-
-location_method
-location_accuracy_m
-participating_sensor_ids
 ```
 
-Avoid storing the same meaning under several ambiguous fields.
+Do not claim TDOA accuracy before synchronized multi-node measurements prove it.
+
+TDOA is a later milestone built on this metadata.
 
 ---
 
-# 19. AERIX server fusion behavior
+## Phase-3 exit criteria
 
-Do not create a new independent map track for every 1-second RF frame.
+- [ ] ANTSDR can produce normalized AERIX RF events.
+- [ ] Public O2/O3 events map correctly.
+- [ ] Public O4 detections map correctly without pretending to have position.
+- [ ] ANTSDR health is visible through the same fleet model.
+- [ ] Raw-IQ ANTSDR mode can feed the same detector/classifier path as HackRF.
+- [ ] HackRF still works after ANTSDR is added.
+- [ ] No server schema is coupled specifically to ANTSDR firmware output.
 
-Add/prepare an RF event-to-track fusion layer.
+---
 
-Potential association keys:
+# 10. bladeRF — deliberately later
 
-1. decoded serial — strongest
-2. O4 session/hash — strong within session
-3. ODID identity correlation
-4. frequency/hopping fingerprint + time
-5. spatial/RSSI consistency
-6. classifier signature
+Do **not** implement bladeRF during Phases 1–3 unless specifically requested.
 
-Recommended track state:
+The architecture should make later support easy.
+
+Desired later implementation should be approximately:
 
 ```text
-rf_track_id
-first_seen
-last_seen
-protocol/vendor
-identity/session hash
-best location + provenance
-participating sensors
-confidence
-last RF frequencies
+BladeRFSource
+ -> IQWindow
+ -> existing DSP
+ -> existing classifier
+ -> existing decoder
+ -> existing RFEvent
 ```
 
-Do not merge two nearby unknown emitters solely because they have similar RSSI.
+Prefer a standard backend such as SoapySDR where it gives adequate access to required bladeRF features.
+
+A successful architecture means bladeRF support is mostly a receiver adapter plus hardware-specific configuration/tests, not a rewrite of detection logic.
+
+The same should be true for a future USRP or other SDR.
 
 ---
 
-# 20. Health / fleet management
+# 11. Testing philosophy
 
-ANTSDR must appear as a proper AERIX sensor in fleet management.
+## Never optimize only for synthetic data
 
-Heartbeat should report dynamic capabilities, not `hackrf-1`.
+Synthetic tests are useful for regression and decoder correctness.
 
-Example:
+They are not evidence of real RF performance.
 
-```json
-{
-  "receiver_type": "antsdr_e200_ad9361",
-  "receiver_serial": "...",
-  "capabilities": [
-    "rf_iq",
-    "dji_o2_decode",
-    "dji_o3_decode",
-    "dji_o4_detect",
-    "pps_sync"
-  ],
-  "firmware_version": "...",
-  "clock_locked": false,
-  "temperature_c": null,
-  "last_rf_event_at": "..."
-}
-```
-
-Health states should distinguish:
+Maintain three distinct levels:
 
 ```text
-host service healthy
-receiver connected
-RF stream healthy
-DJI decoder source healthy
-server uplink healthy
-clock sync healthy
+unit/synthetic tests
+recorded-IQ replay tests
+live hardware field tests
 ```
 
----
-
-# 21. Suggested implementation order
-
-Claude should work in this order unless a concrete dependency requires adjustment.
-
-## Milestone 0 — audit / cleanup
-
-- [ ] Run current full test suite and record baseline.
-- [ ] Fix stale decoder docstrings that still say Turbo decode is not implemented.
-- [ ] Update README wording that says only OcuSync <=2 is decodable if public ANTSDR support is now broader for O2/O3.
-- [ ] Do not change behavior unnecessarily in this milestone.
-
-## Milestone 1 — correctness of current live system
-
-- [ ] Wire `classify_spectrogram()` into live runtime.
-- [ ] Preserve rule fallback.
-- [ ] Emit classifier source/confidence.
-- [ ] Separate signal detection confidence from classifier confidence.
-- [ ] Add tests proving live inference uses installed model.
-
-## Milestone 2 — safe correlation / labels
-
-- [ ] Replace ambiguous `verified` semantics with correlation/label quality.
-- [ ] Implement time-window checks using cue timestamp.
-- [ ] Add site/sensor scope checks.
-- [ ] Preserve weak labels separately.
-- [ ] Update schema, ingest writer, DB migration and tests.
-
-## Milestone 3 — receiver abstraction
-
-- [ ] Create receiver capability/type abstraction.
-- [ ] Remove hardcoded `hackrf-1` heartbeat.
-- [ ] Preserve HackRF functionality.
-- [ ] Add ANTSDR configuration namespace.
-
-## Milestone 4 — ANTSDR DJI event integration
-
-- [ ] Inspect current `alphafox02/antsdr_dji_droneid` message format.
-- [ ] Add replay fixtures.
-- [ ] Implement `AntSdrDjiEventSource`.
-- [ ] Map O2/O3 fields.
-- [ ] Map O4 hash/frequency/RSSI without fake serial/location.
-- [ ] Add reconnect/dedup/health behavior.
-- [ ] Feed normalized events into RF server path.
-
-## Milestone 5 — contract / server normalization
-
-- [ ] Extend `decoded`/RF contract for protocol version, decode state, O4 hash.
-- [ ] Add receiver metadata.
-- [ ] Add location provenance.
-- [ ] Add migrations with backward-compatible reads where required.
-
-## Milestone 6 — real decoder validation
-
-- [ ] Validate Python O2/O3 decode against real IQ.
-- [ ] Compare with public reference decoder.
-- [ ] Fix CFO / 8-symbol support if real captures require it.
-- [ ] Add regression fixture or documented private fixture process.
-
-## Milestone 7 — ANTSDR raw IQ
-
-- [ ] Implement libiio/UHD source.
-- [ ] Add gain/bandwidth/channel config.
-- [ ] Handle overflow.
-- [ ] Preserve source sample metadata.
-- [ ] Add ANTSDR replay format tests.
-
-## Milestone 8 — RF detector taxonomy
-
-- [ ] Make stage 1 morphology-only.
-- [ ] Add open-set/unknown behavior.
-- [ ] Keep stage 2 UAS classification separate.
-- [ ] Add hard-negative Wi-Fi/BT tests.
-
-## Milestone 9 — timing/calibration
-
-- [ ] Add hardware/host timestamp distinction.
-- [ ] Add PPS/10 MHz status fields.
-- [ ] Add calibration metadata.
-- [ ] Do not implement fake TDOA from millisecond timestamps.
-
-## Milestone 10 — dataset expansion
-
-- [ ] Deployment-rate DroneRF model.
-- [ ] DroneDetect loader validation.
-- [ ] RFUAV loader/evaluation.
-- [ ] hard-negative AERIX capture set.
-- [ ] site/session/hardware holdout evaluation.
-
-## Milestone 11 — RF track fusion
-
-- [ ] Aggregate per-frame events.
-- [ ] O4 hash/session association.
-- [ ] Remote ID correlation with provenance.
-- [ ] confidence decay / track expiry.
-
-## Milestone 12 — localization research
-
-- [ ] synchronized IQ capture format.
-- [ ] PPS timing characterization.
-- [ ] cross-correlation prototype.
-- [ ] simulated TDOA solve.
-- [ ] known-transmitter field trial.
-- [ ] uncertainty output.
+All three matter.
 
 ---
 
-# 22. Definition of done for the ANTSDR phase
+## Prevent data leakage
 
-The first ANTSDR production milestone is complete when all of the following are true:
+For ML evaluation:
 
-1. HackRF regression path still passes.
-2. ANTSDR E200 can be configured as an AERIX RF receiver without pretending to be HackRF.
-3. AERIX receives public ANTSDR DJI events continuously and reconnects after failure.
-4. O2/O3 fields are normalized correctly.
-5. O4 produces a valid detection with session/hash + RF data and **no fabricated location**.
-6. The live ML model actually runs when installed.
-7. Stage-1 signal score and stage-2 classifier confidence are distinct.
-8. ODID coincidence alone cannot create ground-truth RF training data.
-9. Receiver/firmware/capability health is visible in heartbeat/fleet management.
-10. Local cue endpoints are authenticated in production mode.
-11. Contract/database migrations are covered by tests.
-12. README describes actual current capabilities and limitations.
-13. Full test suite is green.
-14. At least one real ANTSDR hardware integration test has been documented.
+- split by recording/session, not arbitrary neighboring windows
+- ideally split by separate collection session/day/site
+- later, validate on drone hardware not present in the training set
+
+Do not headline near-100% validation accuracy if train and validation contain adjacent windows from the same recording.
 
 ---
 
-# 23. Test strategy
+## Unknown must remain a valid answer
 
-Every milestone must add tests before being considered finished.
-
-Required categories:
-
-## Unit
-
-- signal morphology
-- classifier fallback
-- model live path
-- correlation scoring
-- ANTSDR parser
-- O4 mapping
-- DJI frame parser
-- timing metadata validation
-
-## Fixture/replay
-
-- HackRF `.cs8`
-- ANTSDR O2/O3 event
-- ANTSDR O4 event
-- malformed ANTSDR input
-- duplicated ANTSDR input
-- model mismatch
-
-## Integration
+The RF system should be allowed to say:
 
 ```text
-source -> local processing -> envelope -> ingest validation
+interesting wideband RF: high confidence
+UAS likelihood: moderate
+vendor/model: unknown
 ```
 
-for:
-
-- sim
-- file replay
-- HackRF where hardware CI is available
-- ANTSDR replay
-
-## Field/manual
-
-Document commands and expected results for:
-
-- known DJI O2/O3 drone
-- known DJI O4 drone
-- drone OFF / Wi-Fi-heavy environment
-- receiver disconnect/reconnect
-- server uplink loss/recovery
+That is better than confidently assigning DJI to Wi-Fi.
 
 ---
 
-# 24. Performance / resource constraints
+# 12. Claude execution instructions
 
-Do not optimize blindly, but measure:
+Claude Code should work through this document sequentially.
+
+## Start here now
+
+The next work session should implement **Phase 1 Milestone 1.1 first**.
+
+Order:
+
+1. inspect current `sdr/capture.py`, `main.py`, tests and CLI entrypoint
+2. introduce the smallest useful `IQWindow`/capabilities abstraction without breaking replay/sim
+3. make continuous HackRF streaming the preferred test path
+4. expose stream health
+5. add/adjust tests
+6. run full test suite
+7. update this document with completed checkboxes/notes
+8. commit
+9. then continue to Milestone 1.2
+
+Do not start server migrations, ANTSDR code, bladeRF code, TDOA or UI product work during this first task.
+
+---
+
+# 13. Definition of overall success
+
+The project should progress through evidence rather than roadmap claims.
+
+## First success
 
 ```text
-CPU %
-RAM
-IQ buffer growth
-processing latency
-lost/overflow samples
-events/s
-uplink bytes/s
+HackRF + two real DJI drones
+ -> find RF
+ -> capture RF
+ -> distinguish it from ambient RF
+ -> decode when protocol allows
+ -> replay exact evidence offline
 ```
 
-For each receiver mode.
-
-Targets should favor reliable capture/detection over PNG generation.
-
-Spectrogram PNGs are evidence/UI products, not the primary signal-processing format.
-
-Do not continuously upload raw IQ.
-
-Retain/upload IQ only according to configured evidence/training policies.
-
----
-
-# 25. Documentation requirements
-
-Keep these documents aligned with actual implementation:
-
-- `aerix-rf/README.md`
-- this project scope
-- `aerix_rf/classify/train/README.md`
-- contract schema comments
-- migration comments
-
-Document:
-
-- supported receivers
-- ANTSDR firmware assumptions
-- O2/O3/O4 capability matrix
-- installation
-- network ports
-- security settings
-- model activation
-- field capture
-- calibration
-- known limitations
-
-Never document synthetic validation as real-hardware validation.
-
----
-
-# 26. External references to use
-
-Claude should inspect current upstream code before implementing adapters; do not code from assumptions in this document if upstream changed.
-
-### ANTSDR DJI
-
-- https://github.com/alphafox02/antsdr_dji_droneid
-- https://github.com/alphafox02/DroneID
-- https://github.com/alphafox02/DragonSync
-
-### DJI DroneID decoding
-
-- https://github.com/RUB-SysSec/DroneSecurity
-- https://github.com/proto17/dji_droneid
-- https://github.com/anarkiwi/samples2djidroneid
-
-### RF classification
-
-- https://github.com/IQTLabs/RFClassification
-- https://github.com/IQTLabs/gamutRF
-- https://github.com/kitoweeknd/RFUAV
-
-### ANTSDR hardware/API
-
-- https://antsdr-docs.microphase.cn/en/latest/device_and_usage_manual/ANTSDR_E_Series_Module/ANTSDR_E200_Reference_Manual/AntsdrE200_Reference_Manual.html
-- https://antsdr-docs.microphase.cn/en/latest/device_and_usage_manual/ANTSDR_E_Series_Module/ANTSDR_E200_Reference_Manual/AntsdrE200_RF_parameters.html
-
----
-
-# 27. Working rules for Claude
-
-1. **Read the existing implementation before replacing anything.** There is already meaningful work here.
-2. **Do not delete HackRF support.** ANTSDR is additive and becomes primary.
-3. **Do not merge RF detections into ODID observations.**
-4. **Do not label temporal coincidence as ground truth.**
-5. **Do not fabricate O4 location.** Null + provenance is better than false precision.
-6. **Do not require licensed DragonScope for core AERIX functionality.**
-7. **Do not claim TDOA until real synchronized timing has been measured.**
-8. **Do not treat RSSI across devices as calibrated without calibration metadata.**
-9. **Do not train/evaluate using leaked windows from the same recording on both sides of a split.**
-10. **Keep uncertainty explicit.** `unknown` is a valid result.
-11. **Every changed server contract requires tests and migration consideration.**
-12. **Every hardware parser must have replay fixtures.**
-13. **Update README/status after each completed milestone.**
-14. **Prefer small, reviewable commits by milestone.**
-15. **Before declaring a phase done, run dependency/syntax, security/input, and execution-simulation checks in addition to unit tests.**
-
----
-
-# 28. First task to execute now
-
-Start with Milestones 0–2 only.
-
-Do not jump directly into raw ANTSDR IQ support.
-
-### First implementation batch
-
-1. Run baseline tests and record exact count/results.
-2. Fix stale decoder documentation.
-3. Wire the actual trained classifier into `main.py`.
-4. Split signal detection score from classifier result/confidence.
-5. Add live-inference regression tests.
-6. Design and implement safe correlation/label-quality semantics.
-7. Extend schema/database/uplink only as required for that correlation change.
-8. Keep backward compatibility where practical.
-9. Run full tests.
-10. Commit.
-
-Then proceed to receiver abstraction and ANTSDR DJI event integration.
-
----
-
-# 29. Expected end-state architecture
+## Second success
 
 ```text
-                           AERIX RF NODE
-
-   ┌─────────────────────────────────────────────────────────┐
-   │                                                         │
-   │  HackRF              ANTSDR E200                        │
-   │    │                ┌───────────────┐                   │
-   │    │ IQ             │ DJI FPGA/ARM  │                   │
-   │    │                │ event output  │                   │
-   │    │                └──────┬────────┘                   │
-   │    │                       │                            │
-   │    │                O2/O3 decoded                       │
-   │    │                O4 hash/RSSI/freq                   │
-   │    │                       │                            │
-   │    ▼                       ▼                            │
-   │ Raw IQ source       Protocol event source               │
-   │    │                       │                            │
-   │    ▼                       │                            │
-   │ Spectrogram                │                            │
-   │    │                       │                            │
-   │ Signal detector            │                            │
-   │    │                       │                            │
-   │ ML classifier              │                            │
-   │    │                       │                            │
-   │ Optional decoder           │                            │
-   │    └──────────────┬────────┘                            │
-   │                   ▼                                     │
-   │             NORMALIZED RF EVENT                         │
-   │                   │                                     │
-   │         ┌─────────┴───────────┐                         │
-   │         │                     │                         │
-   │     ODID/RID cues       local RF correlation            │
-   │         │                     │                         │
-   │         └─────────┬───────────┘                         │
-   │                   ▼                                     │
-   │             RF EVENT / TRACK                            │
-   │                   │                                     │
-   │          IQ/evidence retention                          │
-   └───────────────────┼─────────────────────────────────────┘
-                       │
-                       ▼
-                   AERIX SERVER
-                       │
-          identity / location / RF fusion
-                       │
-      ┌────────────────┼─────────────────┐
-      │                │                 │
-  decoded RF      Remote ID         future TDOA
-   location       correlation      synchronized RF
+that proven local RF engine
+ -> AERIX server
+ -> trustworthy RF/ODID correlation
+ -> evidence and retention
 ```
 
-The core principle is:
+## Third success
 
-> **Protocol decode, RF classification, Remote ID correlation, and RF localization are independent evidence sources that converge into one AERIX track. None is allowed to masquerade as another.**
+```text
+ANTSDR
+ -> same AERIX contracts
+ -> better DJI protocol coverage
+ -> O4 detection
+ -> generic IQ path
+ -> timing foundation
+```
+
+Only after that should additional SDR hardware such as bladeRF be integrated.
