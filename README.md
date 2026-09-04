@@ -22,8 +22,9 @@ decodable Remote ID at all. It is posted to `/v1/rf-detections:batch` and stored
 - **Stage 2 — classify** (`classify/model.py`, `classify/train/`): `signature_class`. Rule-based
   today; a scikit-learn model trained on real datasets drops in behind the same interface.
 - **Stage 3 — DJI DroneID decode** (`decode/`): best-effort serial + drone/operator GPS for
-  OcuSync ≤ 2.0. Front end (ZC sync, resample, CFO, OFDM demod, equalize, QPSK, LTE descramble)
-  is implemented and synthetic-verified; Turbo decode / field extraction is the remaining stage.
+  OcuSync ≤ 2.0. Full chain: ZC sync, resample, CFO, OFDM demod, equalize, QPSK, LTE descramble,
+  de-rate-match, LTE Turbo decode (max-log-MAP), CRC24A gate, DJI frame parse. Synthetic-verified
+  (exact serial + GPS round-trip down to 5 dB SNR); not yet validated on a real capture.
 
 **Two server paths, both producing an RF image (spectrogram):**
 - **Path 2** — the box's own detector fired → per-second frame `{location, probability, RSSI,
@@ -163,10 +164,13 @@ uv run --extra train python -m aerix_rf.classify.train.train --dataset dronerf -
 ## Status
 
 - **Software:** box detection chain, server RF path (contract + migrations 038/039 + ingest
-  route + writer + retention), classifier pipeline, DroneID decode front end, sweep locator —
-  all built and integrated; 31 tests green.
+  route + writer + retention), classifier pipeline, full DroneID decode chain (incl. Turbo),
+  sweep locator — all built and integrated; 42 tests green.
 - **Verified on real HackRF:** full end-to-end (live capture → detect → spectrogram → ingest →
   `rf_detections`) proven on ambient RF; real-time (~155 ms/window).
+- **Classifier on real data:** trained on a DroneRF subset (`classify/train/fetch_dronerf.py`);
+  real drone vs real background separates cleanly (binary val 1.00). Bench demonstrator at the
+  dataset's 40 MS/s — deployment needs a retrain from IQ decimated to the box's 20 MS/s.
 - **Not yet done:** a real drone RF detection (needs a transmitting drone found via the sweep
-  locator); DroneID Turbo decode + field extraction; classifier trained on real data (synthetic
-  models don't reject Wi-Fi); `odid-cues` site-scoping; ESP-side `/cue` sender firmware.
+  locator); decode validated against a real DroneID burst; 20 MS/s classifier retrain;
+  `odid-cues` site-scoping; ESP-side `/cue` sender firmware.
