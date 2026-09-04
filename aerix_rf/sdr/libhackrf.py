@@ -9,8 +9,11 @@ Design:
     The callback only copies the bytes into a bounded queue and returns; all
     conversion happens in the consumer thread (``read_window``).
   * If the consumer falls behind and the queue is full, the buffer is DROPPED and
-    counted (``overflow_count``) -- the affected window is stamped incomplete with
-    the number of lost samples rather than silently shortened or stitched.
+    counted (``overflow_count``). Every transfer carries a sequence number, so a
+    window is stamped incomplete (with the number of lost samples) exactly when a
+    dropped transfer falls *between* its first and last chunk -- a drop that
+    happens while the consumer is busy between windows is a gap between windows
+    (visible as a rising ``overflow_count``), not a hole inside one.
   * Retuning while streaming is supported by libhackrf; ``tune()`` records the new
     centre and flushes buffered (old-frequency) data so the next window is clean.
 """
@@ -123,7 +126,10 @@ class HackRFStream:
         _check(self.lib, self.lib.hackrf_set_amp_enable(self.dev, 1 if self.amp else 0), "set_amp")
 
         max_chunks = max(8, int(_QUEUE_MAX_S * self.sample_rate * 2 / _TRANSFER_BYTES))
-        self._q: queue.Queue[tuple[bytes, float, float]] = queue.Queue(maxsize=max_chunks)
+        self._q: queue.Queue[tuple[bytes, float, float, int]] = queue.Queue(maxsize=max_chunks)
+        self._seq = 0                  # transfer sequence number (counts dropped ones too)
+        self._leftover_seq = -1        # seq of the transfer the leftover bytes came from
+        self._last_window_seq = None   # last seq handed out, to size the gap to the next window
         self._lock = threading.Lock()
         self._leftover = b""
         self._leftover_center = self.center_freq_hz
@@ -162,11 +168,26 @@ class HackRFStream:
             return 0
         data = ctypes.string_at(t.buffer, n)      # one memcpy, then hand off
         self.received_bytes += n
+        seq = self._seq
+        self._seq += 1
+        item = (data, time.time(), self.center_freq_hz, seq)
         try:
-            self._q.put_nowait((data, time.time(), self.center_freq_hz))
+            self._q.put_nowait(item)
         except queue.Full:
+            # Drop the OLDEST transfer, not this one: the queue then always
+            # holds the most recent, mutually contiguous stretch of stream, so a
+            # window assembled from it is complete and the loss shows up as a
+            # gap *between* windows (gap_before_samples) instead of a hole.
             with self._lock:
                 self.overflow_count += 1
+            try:
+                self._q.get_nowait()
+            except queue.Empty:
+                pass
+            try:
+                self._q.put_nowait(item)
+            except queue.Full:
+                pass
         return 0
 
     def start(self) -> None:
@@ -206,28 +227,39 @@ class HackRFStream:
         have = 0
         t_first = None
         center = self.center_freq_hz
-        overflow_before = self.overflow_count
+        first_seq = last_seq = None
+        n_chunks = 0
 
         with self._lock:
             if self._leftover:
                 parts.append(self._leftover)
                 have = len(self._leftover)
                 center = self._leftover_center
+                first_seq = last_seq = self._leftover_seq
+                n_chunks = 1
                 self._leftover = b""
         while have < want:
             remaining = deadline - time.time()
             if remaining <= 0:
                 break
             try:
-                data, ts, c = self._q.get(timeout=min(remaining, 0.5))
+                data, ts, c, seq = self._q.get(timeout=min(remaining, 0.5))
             except queue.Empty:
                 if not self.is_streaming():
                     return None
                 continue
-            if t_first is None:
+            if first_seq is not None and n_chunks == 1 and parts and seq != first_seq + 1:
+                # The leftover bytes predate a drop: start the window fresh here
+                # rather than stitch across the hole.
+                parts, have, n_chunks, first_seq = [], 0, 0, None
+            if t_first is None or have == 0:
                 t_first = ts - len(data) / 2 / self.sample_rate
             if c != center and have == 0:
                 center = c
+            if first_seq is None:
+                first_seq = seq
+            last_seq = seq
+            n_chunks += 1
             parts.append(data)
             have += len(data)
 
@@ -236,15 +268,26 @@ class HackRFStream:
             with self._lock:
                 self._leftover = buf[want:]
                 self._leftover_center = center
+                self._leftover_seq = last_seq if last_seq is not None else -1
             buf = buf[:want]
 
         raw = np.frombuffer(buf, dtype=np.int8)
         iq = (raw[0::2].astype(np.float32) + 1j * raw[1::2].astype(np.float32)) / 128.0
         iq = iq.astype(np.complex64)
 
-        overflowed = self.overflow_count - overflow_before
-        dropped = overflowed * (_TRANSFER_BYTES // 2) + max(0, n_samples - iq.size)
-        complete = overflowed == 0 and iq.size >= n_samples
+        # Transfers missing between the first and last chunk of this window.
+        missing = 0
+        if first_seq is not None and last_seq is not None:
+            missing = max(0, (last_seq - first_seq + 1) - n_chunks)
+        dropped = missing * (_TRANSFER_BYTES // 2) + max(0, n_samples - iq.size)
+        complete = missing == 0 and iq.size >= n_samples
+        # Stream lost between the previous window and this one (consumer slower
+        # than real time): not a hole in this window, but the operator should know.
+        gap_before = 0
+        if first_seq is not None and self._last_window_seq is not None:
+            gap_before = max(0, first_seq - self._last_window_seq - 1) * (_TRANSFER_BYTES // 2)
+        if last_seq is not None:
+            self._last_window_seq = last_seq
         if iq.size < n_samples:
             with self._lock:
                 self.short_reads += 1
@@ -260,6 +303,7 @@ class HackRFStream:
             "complete": bool(complete),
             "dropped_samples": int(dropped),
             "overflow_count": int(self.overflow_count),
+            "gap_before_samples": int(gap_before),
             "short_reads": int(self.short_reads),
             "stream_rate_ratio": round(float(ratio), 4),
         }

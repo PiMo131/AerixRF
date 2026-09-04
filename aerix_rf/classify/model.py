@@ -1,23 +1,37 @@
-"""Stage-2 classifier interface.
+"""Stage-2 classifier = probabilistic UAS identity.
 
-Two entry points, one contract -- both return a ``Classification(label,
-confidence, source)`` so nothing downstream changes:
+Stage 1 (``detect.energy``) only describes RF *shape* (``Detection.morphology``).
+This module turns that shape -- plus, when a trained bundle is available, the
+spectrogram itself -- into an identity claim in the stage-2 vocabulary::
 
-  * ``classify(det)``             -- the original, rule-based path driven by the
-                                     energy detector's shape heuristics. Kept
-                                     exactly as-is for existing callers
-                                     (``main.py``). Never depends on a model file.
-  * ``classify_spectrogram(spec)`` -- the ML path. Loads a trained model bundle
-                                     (from ``$AERIX_RF_MODEL`` or the default
-                                     ``models/signature.joblib``) and predicts
-                                     from spectrogram features produced by the
-                                     *same* extractor used in training. Falls
-                                     back to the rule-based logic when no model
-                                     is present, or if the model fails to load.
+    dji_ocusync   wifi_uas   analog_fpv   other_uas   non_uas   unknown
 
-The model is trained by ``aerix_rf.classify.train`` on the public RF drone
-datasets (DroneRF / DroneDetect / DroneRFb-Spectra) or the synthetic fallback.
-scikit-learn / joblib are imported lazily so the box runtime never needs them.
+Entry points (all return a ``Classification``):
+
+  * ``classify(det)``                      rule-based stage 2 from a Detection.
+                                           Never touches a model file.
+  * ``classify_spectrogram(spec, f, det)`` ML when a bundle loads, else rules.
+  * ``classify_window(spec, det, f)``      what the live loop calls: ML if
+                                           available, else rules.
+
+Live behaviour required by the plan (2.1 / milestone 1.2)::
+
+    no model            -> rule fallback            source == "rule"
+    valid model         -> ML classifier            source == "sklearn:<ver>"
+    broken model        -> warn once, rule fallback, service continues
+    low-confidence ML   -> "unknown", abstained=True
+    sample-rate mismatch-> WARNING once per bundle; Classification flags it
+
+The rules are deliberately conservative: at 2.4 GHz ambient Wi-Fi is a 20 MHz
+wideband OFDM emitter, so "wideband" alone is never a drone. Only a *cadenced*
+(300-1000 ms) ~10 MHz burst train earns ``dji_ocusync``, and even then with
+confidence <= 0.6. Deterministic confirmation is stage 3 (protocol decode);
+never gate the decoder on this output.
+
+Model bundles are produced by ``aerix_rf.classify.train``. Their labels are
+canonicalised here (``wifi_drone`` -> ``wifi_uas`` etc.), so the dataset
+labels never need renaming. scikit-learn / joblib are imported lazily so the box
+runtime never needs them.
 """
 
 from __future__ import annotations
@@ -36,25 +50,93 @@ log = logging.getLogger("aerix.rf.classify")
 _PKG_ROOT = Path(__file__).resolve().parents[2]      # .../aerix-rf
 DEFAULT_MODEL_PATH = _PKG_ROOT / "models" / "signature.joblib"
 
+STAGE2_CLASSES = ("dji_ocusync", "wifi_uas", "analog_fpv", "other_uas", "non_uas", "unknown")
+
+# Below this predicted-class probability the ML path abstains ("unknown").
+ABSTAIN_THRESHOLD = 0.5
+
+# Model / dataset labels -> stage-2 vocabulary. Anything not listed maps to
+# "unknown" (the raw label is still carried in Classification.model_label).
+LEGACY_LABELS = {
+    "dji_ocusync": "dji_ocusync",
+    "wifi_drone": "wifi_uas",       # train/data.py CLASSES
+    "fpv_analog": "analog_fpv",
+    "noise": "non_uas",
+    "drone": "other_uas",           # binary models (to_binary)
+    "unknown": "unknown",
+    **{c: c for c in STAGE2_CLASSES},
+}
+
+# Rule thresholds (stage-2 identity; stage-1 shape thresholds live in energy.py).
+DJI_CADENCE_MS = (300.0, 1000.0)    # DroneID / OcuSync beacon cadence window
+DJI_BW_MHZ = (6.0, 16.0)            # ~10 MHz burst; 20 MHz is Wi-Fi territory
+DJI_MAX_CONFIDENCE = 0.6
+# A DroneID-style beacon is SPARSE: a few sub-ms bursts per second. Ambient
+# Wi-Fi with 150+ packets/s can still produce a "cadence" estimate in the
+# 300-1000 ms window (seen live, 2 of 504 ambient windows), so the rule also
+# requires few bursts and a low duty cycle.
+DJI_MAX_BURSTS_PER_S = 8
+DJI_MAX_DUTY = 0.2
+ANALOG_CONFIDENCE = 0.3
+
 
 @dataclass
 class Classification:
-    signature_class: str
-    confidence: float
-    source: str          # "rule" | "sklearn:<version>" | "cnn:<version>"
+    signature_class: str                 # stage-2 vocabulary (STAGE2_CLASSES)
+    confidence: float                    # P(label); 0.0 for a rule "unknown"
+    source: str                          # "rule" | "sklearn:<version>" | "cnn:<version>"
+    model_version: str | None = None     # bundle version when source is a model
+    model_label: str | None = None       # raw model label before canonicalisation
+    abstained: bool = False              # ML confidence < ABSTAIN_THRESHOLD -> "unknown"
+    sample_rate_mismatch: bool = False   # model trained at another rate: advisory only
 
+
+def canonical_label(label: str) -> str:
+    """Map a model/dataset label to the stage-2 vocabulary."""
+    return LEGACY_LABELS.get(str(label), "unknown")
+
+
+# --- rule-based stage 2 --------------------------------------------------------
 
 def classify(det: Detection) -> Classification:
-    # Rule-based path (unchanged): reuse the detector's shape heuristics;
-    # confidence tracks the detection score so the field is populated
-    # end-to-end. Independent of any trained model -- works with or without one.
-    return Classification(signature_class=det.signature_class,
-                          confidence=det.score, source="rule")
+    """Conservative rules from stage-1 morphology. Never depends on a model.
+
+    Rule table (first match wins):
+
+      noise                                              -> non_uas
+      ofdm/burst_wideband, cadence 300-1000 ms,
+          6 <= bw < 16 MHz, 2..8 bursts, duty < 0.2     -> dji_ocusync (<= 0.6)
+      analog_candidate (>= 18 MHz continuous)            -> analog_fpv (0.3)
+      anything else (narrowband, wideband w/o cadence,
+          continuous wideband, fhss, unknown)            -> unknown (0.0)
+    """
+    morph = getattr(det, "morphology", None) or "unknown"
+    if morph == "noise" or det.signature_class == "noise":
+        conf = float(min(0.95, max(0.5, 1.0 - det.score)))
+        return Classification("non_uas", conf, "rule")
+
+    cad = det.cadence_ms
+    cadenced = cad is not None and DJI_CADENCE_MS[0] <= cad <= DJI_CADENCE_MS[1]
+    bw_ok = DJI_BW_MHZ[0] <= det.occupied_bw_mhz < DJI_BW_MHZ[1]
+    sparse = (2 <= det.burst_count <= DJI_MAX_BURSTS_PER_S
+              and float(getattr(det, "duty_cycle", 0.0)) < DJI_MAX_DUTY)
+    if (morph in ("ofdm_candidate", "burst_wideband_candidate")
+            and cadenced and bw_ok and sparse):
+        conf = float(min(DJI_MAX_CONFIDENCE, 0.35 + 0.25 * det.score))
+        return Classification("dji_ocusync", conf, "rule")
+
+    if morph == "analog_candidate":
+        return Classification("analog_fpv", ANALOG_CONFIDENCE, "rule")
+
+    # Wideband without cadence is exactly what ambient Wi-Fi looks like; a
+    # hopper could be Bluetooth or an RC link; narrowband is anything. No claim.
+    return Classification("unknown", 0.0, "rule")
 
 
 # --- model loading (lazy, cached by path+mtime, never fatal) --------------------
 
 _model_cache: dict = {"key": None, "bundle": None}
+_warned: set[tuple] = set()      # (kind, bundle key, ...) already logged at WARNING
 
 
 def _model_path() -> Path:
@@ -63,17 +145,18 @@ def _model_path() -> Path:
 
 
 def _reset_model_cache() -> None:
-    """Drop the cached bundle. For tests that swap ``$AERIX_RF_MODEL``."""
+    """Drop the cached bundle and warn-once state. For tests that swap ``$AERIX_RF_MODEL``."""
     _model_cache["key"] = None
     _model_cache["bundle"] = None
+    _warned.clear()
 
 
 def _load_bundle():
     """Return the trained bundle dict, or None. Cached on (path, mtime).
 
     Any failure (missing file, no joblib/sklearn, unpicklable/version-skewed
-    bundle) logs once and returns None so the caller falls back to rules -- the
-    1 Hz loop must never die on a bad model file.
+    bundle) logs once per (path, mtime) and returns None so the caller falls
+    back to rules -- the 1 Hz loop must never die on a bad model file.
     """
     path = _model_path()
     try:
@@ -97,6 +180,8 @@ def _load_bundle():
         log.warning("aerix model load failed (%s): %s; using rules", path, exc)
         bundle = None
 
+    # A failed load is cached too (bundle=None) so the warning fires once per
+    # file version, not every window.
     _model_cache["key"], _model_cache["bundle"] = key, bundle
     return bundle
 
@@ -105,51 +190,81 @@ def model_available() -> bool:
     return _load_bundle() is not None
 
 
-def classify_spectrogram(spec, center_freq_mhz: float = 0.0) -> Classification:
+def _warn_once(tag: tuple, msg: str, *args) -> None:
+    if tag in _warned:
+        log.debug(msg, *args)
+        return
+    _warned.add(tag)
+    log.warning(msg, *args)
+
+
+# --- ML stage 2 with rule fallback ---------------------------------------------
+
+def classify_spectrogram(spec, center_freq_mhz: float = 0.0,
+                         det: Detection | None = None) -> Classification:
     """ML classification from a spectrogram, with a rule-based fallback.
 
-    Uses the trained bundle when present; otherwise runs the energy detector on
-    the spectrogram and returns its rule-based class, so this entry point is
-    always safe to call.
+    Uses the trained bundle when present; otherwise (or on any model failure)
+    runs the rules on ``det`` -- computed from ``spec`` if not given -- so this
+    entry point is always safe to call.
     """
     bundle = _load_bundle()
     if bundle is None:
-        return _rule_fallback(spec, center_freq_mhz)
+        return _rule_fallback(spec, center_freq_mhz, det)
 
+    key = _model_cache["key"]
+    version = str(bundle.get("version", "?"))
+    src = f"{bundle.get('kind', 'sklearn')}:{version}"
     try:
         from .train import features as feat
 
-        if spec.sample_rate != bundle.get("sample_rate"):
-            log.debug("model trained at %.3g S/s but frame is %.3g S/s; PSD is "
-                      "fractional-band so results may drift",
-                      bundle.get("sample_rate", float("nan")), spec.sample_rate)
+        model_sr = bundle.get("sample_rate")
+        mismatch = model_sr is not None and float(model_sr) != float(spec.sample_rate)
+        if mismatch:
+            _warn_once(("sr", key, float(spec.sample_rate)),
+                       "aerix model %s was trained at %.3g S/s but live frames are %.3g S/s: "
+                       "PSD features are a fraction of the captured band, so this model is "
+                       "UNCALIBRATED at this rate -- treat its labels as advisory only "
+                       "(train a native model at %.3g S/s to clear this)",
+                       key[0], float(model_sr), float(spec.sample_rate), float(spec.sample_rate))
 
         x = feat.extract(spec, bundle.get("feature_kind", "psd"),
                          psd_bins=bundle.get("psd_bins", feat.PSD_BINS),
                          spec_shape=tuple(bundle.get("spec_shape", feat.SPEC_SHAPE)))
         x = x.reshape(1, -1)
         model = bundle["model"]
-        label = str(model.predict(x)[0])
-        conf = _confidence(model, x, label)
-        src = f"{bundle.get('kind', 'sklearn')}:{bundle.get('version', '?')}"
-        return Classification(signature_class=label, confidence=conf, source=src)
+        raw = str(model.predict(x)[0])
+        conf = _confidence(model, x, raw)
+        label = canonical_label(raw)
+        abstained = conf < ABSTAIN_THRESHOLD
+        if abstained:
+            label = "unknown"
+        return Classification(signature_class=label, confidence=conf, source=src,
+                              model_version=version, model_label=raw,
+                              abstained=abstained, sample_rate_mismatch=mismatch)
     except Exception as exc:  # noqa: BLE001
-        log.warning("aerix model inference failed: %s; using rules", exc)
-        return _rule_fallback(spec, center_freq_mhz)
+        _warn_once(("infer", key), "aerix model inference failed (%s): %s; using rules",
+                   key[0], exc)
+        return _rule_fallback(spec, center_freq_mhz, det)
+
+
+def classify_window(spec, det: Detection, center_freq_mhz: float) -> Classification:
+    """Live-loop entry: ML if a bundle is available, else the rules on ``det``."""
+    return classify_spectrogram(spec, center_freq_mhz, det=det)
 
 
 def _confidence(model, x, label: str) -> float:
     """Predicted-class probability if the estimator exposes one, else 1.0."""
     try:
         proba = model.predict_proba(x)[0]
-        classes = list(model.classes_)
+        classes = [str(c) for c in model.classes_]
         return float(proba[classes.index(label)])
     except Exception:  # noqa: BLE001 -- e.g. an estimator without predict_proba
         return 1.0
 
 
-def _rule_fallback(spec, center_freq_mhz: float) -> Classification:
-    from ..detect.energy import detect
-    det = detect(spec, center_freq_mhz)
-    return Classification(signature_class=det.signature_class,
-                          confidence=det.score, source="rule")
+def _rule_fallback(spec, center_freq_mhz: float, det: Detection | None = None) -> Classification:
+    if det is None:
+        from ..detect.energy import detect
+        det = detect(spec, center_freq_mhz)
+    return classify(det)

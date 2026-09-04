@@ -816,17 +816,64 @@ Phase 1 exits only when we have **real test evidence**, not just green unit test
 
 ## Required software criteria
 
-- [ ] Continuous HackRF live source works reliably.
-- [ ] Capture health/overflow/short-read state is visible.
-- [ ] Scan -> candidate -> lock workflow works without code edits.
-- [ ] Raw IQ session capture works.
-- [ ] Replay works deterministically.
-- [ ] Live ML path is actually wired in when a valid model is supplied.
-- [ ] Rule fallback works without a model.
-- [ ] Stage 1 no longer claims drone identity solely from bandwidth.
-- [ ] Protocol decode is independent from ML approval.
-- [ ] Field session report is generated.
-- [ ] Automated tests remain green.
+Status as of 2026-09-04 (branch `aerix-rf`, HackRF Pro serial `…7313`, this laptop as the box):
+
+- [x] Continuous HackRF live source works reliably. — `LibHackRFSource` (ctypes libhackrf, no
+      SoapySDR). 10-minute ambient soak on 2440 MHz: 504 windows, no process failure, stream rate
+      ratio 0.999. Ring-style queue (drop-oldest) so a slow consumer costs *gaps between*
+      windows, never holes inside one; every transfer carries a sequence number and a window
+      is `complete` only if its chunks are consecutive.
+- [x] Capture health/overflow/short-read state is visible. — `IQWindow.health()` in every
+      `detections.jsonl` record and the status line (`cap=ok | INCOMPLETE(-n) | gap=…ms`);
+      summary.md shows complete/incomplete, cumulative overflow, stream lost between windows,
+      min stream-rate ratio.
+- [x] Scan -> candidate -> lock workflow works without code edits. — `aerix-rf baseline | scan |
+      lock | capture` (`aerix_rf/scan/*`, hackrf_sweep based, ranked candidates with rise over
+      baseline / persistence / burstiness / hop detection). Live-verified on ambient Wi-Fi.
+- [x] Raw IQ session capture works. — `sessions/<utc>_<label>/{session.json, iq/*.cs8,
+      spectrograms/, detections.jsonl, decode.jsonl, summary.md}`, sha256 per IQ file, disk
+      guard + `--max-gb` cap.
+- [x] Replay works deterministically. — `aerix-rf replay <session>`: sim session replays with
+      score delta 0.000 and identical class/decode; the .cs8 codec is bit-exact for hardware
+      windows (int8/128 both ways). Tampered IQ raises `SessionIntegrityError`.
+- [x] Live ML path is actually wired in when a valid model is supplied. — `classify_window()`
+      loads `$AERIX_RF_MODEL` / `models/signature.joblib`; label/confidence/source/model
+      version in every record; abstains to `unknown` below 0.5; sample-rate mismatch → one
+      prominent WARNING + `model_sample_rate_mismatch: true` on every record (advisory only,
+      per option 2 in M1.2). **No model was used in the 2026-09-04 runs** (rule path).
+- [x] Rule fallback works without a model. — and with a corrupt bundle (tested).
+- [x] Stage 1 no longer claims drone identity solely from bandwidth. — Stage 1 emits a
+      *morphology* (`noise | narrowband_candidate | wideband_candidate | burst_wideband_candidate |
+      ofdm_candidate | fhss_candidate | continuous_wideband_candidate | analog_candidate |
+      unknown`); identity lives in Stage 2 (`dji_ocusync | wifi_uas | analog_fpv | other_uas |
+      non_uas | unknown`). The rule for `dji_ocusync` (≤ 0.6) needs OFDM/burst morphology,
+      300–1000 ms cadence, 6–16 MHz, **2–8 sparse bursts with duty < 0.2** — the last clause
+      was added after 2 of 504 ambient windows (157 Wi-Fi packets/s with a spurious 630 ms
+      "cadence") were labelled dji_ocusync in the soak.
+- [x] Protocol decode is independent from ML approval. — `pipeline.process_window` runs
+      `decode_all()` on any non-noise window regardless of the Stage-2 label.
+- [x] Field session report is generated. — `summary.md` per session (`aerix-rf report`).
+- [x] Automated tests remain green. — see commit message for the count.
+
+**What is real-hardware validated vs synthetic only (2026-09-04):**
+
+| Component | Real HackRF | Synthetic |
+|---|---|---|
+| Continuous stream, health counters, retune | yes (10 min soak, ambient) | – |
+| DC-spike removal (48 dB spike at f_c without it) | yes | test |
+| Sweep baseline / differential scan / ranking | yes (ambient Wi-Fi ch 3/6/9 found) | 14 tests |
+| Stage-1 morphology on ambient | yes (`fhss_candidate` / `burst_wideband_candidate`) | tests |
+| Stage-2 rule labels | ambient only → `unknown`, 0 `dji_ocusync` after rule fix | tests |
+| DroneID decode levels A/B/C, integer CFO, multi-burst | **no real burst yet** | 37 tests, CRC-valid on encoded synthetic bursts |
+| Session store / replay / report | yes (sessions written from hardware) | 6 tests |
+| ML classifier live path | not exercised (no model) | tests with a dummy bundle |
+
+**Known limitations going into the field test:** a busy 2.4 GHz band makes almost every
+window `plausible` (score is "interesting", not "drone"); the differential scan against a
+baseline and the per-window morphology/cadence are what separate a drone from Wi-Fi, and only
+a CRC-valid decode attributes identity. The laptop keeps up with the radio only while the
+per-window pipeline stays under ~1 s (decode is budgeted at 0.25 s/window); if it does not,
+`gap=` on the status line says how much stream was skipped between windows.
 
 ## Required real-world criteria
 
@@ -1291,6 +1338,14 @@ Order:
 9. then continue to Milestone 1.2
 
 Do not start server migrations, ANTSDR code, bladeRF code, TDOA or UI product work during this first task.
+
+### Execution log
+
+- **2026-09-04** — Milestones 1.1–1.6 implemented on branch `aerix-rf` (see §6 "Required
+  software criteria" for what is hardware- vs synthetic-validated). Field-test commands are in
+  `README.md` → "Field test". Next: the two-drone protocol in §5 (Test 0 → Test 3, ≥ 3 runs
+  per drone). No server, ANTSDR, bladeRF, TDOA or UI work was started; Phase 1 runs entirely
+  without the server.
 
 ---
 

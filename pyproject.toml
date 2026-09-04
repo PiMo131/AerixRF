@@ -34,7 +34,7 @@ train-cnn = [
 # NOT pip. The code imports it lazily so the box runs in --sim mode without it.
 
 [project.scripts]
-aerix-rf = "aerix_rf.main:main"
+aerix-rf = "aerix_rf.cli:main"
 
 [build-system]
 requires = ["hatchling"]

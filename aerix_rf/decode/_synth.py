@@ -174,6 +174,12 @@ def make_encoded_burst(fields: dict | None = None, *,
     chunks = scrambled.reshape(len(data_rows), dci.size * 2)
     for r, row in enumerate(data_rows):
         tx_bits[row] = chunks[r]
+    # Symbol 1 (the leading, non-payload symbol) gets random QPSK: all-zero bits
+    # would put the same point on every carrier and IFFT into a single impulse
+    # (|x|^2 ~ 500x the mean), which no real burst has and which would skew the
+    # envelope/peak-power stage. Drawn from a child stream so the noise draw
+    # order below is unchanged for a given seed.
+    tx_bits[0] = np.random.default_rng([seed, 1]).integers(0, 2, dci.size * 2).astype(np.int8)
 
     rng = np.random.default_rng(seed)
     iq = _tx_bits_to_iq(tx_bits, fs, fft_size, schedule, dci,

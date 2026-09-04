@@ -21,6 +21,31 @@ log = logging.getLogger("aerix.rf.uplink")
 
 SCHEMA_VERSION = "1.0.0"
 
+# contracts/rf-detection.v1.schema.json: signature_class enum. The box's stage-2
+# vocabulary (classify.model.STAGE2_CLASSES) is richer; it is folded into the
+# server enum here and only here. Phase 2 extends the contract (morphology,
+# source/version, capture health); until then nothing else may be added to the
+# envelope (additionalProperties: false).
+CONTRACT_CLASSES = ("dji_ocusync", "wifi_drone", "fpv_analog", "noise", "unknown")
+
+_STAGE2_TO_CONTRACT = {
+    "dji_ocusync": "dji_ocusync",
+    "wifi_uas": "wifi_drone",
+    "analog_fpv": "fpv_analog",
+    "non_uas": "noise",
+    "other_uas": "unknown",     # the v1 enum has no "some drone" bucket
+    "unknown": "unknown",
+    # legacy / contract labels pass straight through
+    "wifi_drone": "wifi_drone",
+    "fpv_analog": "fpv_analog",
+    "noise": "noise",
+}
+
+
+def to_contract_class(stage2_label: str) -> str:
+    """Stage-2 label -> rf-detection.v1 ``signature_class`` enum (never raises)."""
+    return _STAGE2_TO_CONTRACT.get(str(stage2_label), "unknown")
+
 
 class Uplink:
     def __init__(self, cfg: Config) -> None:
@@ -75,7 +100,7 @@ class Uplink:
             "band": self.cfg.band,
             "center_freq_mhz": round(det.peak_freq_mhz, 3),
             "bandwidth_mhz": round(det.occupied_bw_mhz, 2),
-            "signature_class": signature_class,
+            "signature_class": to_contract_class(signature_class),
             "snr_db": round(det.snr_db, 1),
             "verified": verified,
         }

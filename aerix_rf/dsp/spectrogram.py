@@ -49,14 +49,25 @@ class Spectrogram:
     hop: int | None = None  # samples between STFT frames (time-axis step)
 
 
+# Zero-IF receivers (HackRF included) put a DC / LO-leak spike at the centre
+# bin that can sit 40+ dB above the floor with no antenna attached. Left in, it
+# is a permanent "detection" at exactly the tuned frequency. We subtract the
+# window mean and then blank the centre +-_DC_BLANK_BINS bins by interpolating
+# their neighbours (58 kHz of 20 MHz at fft 1024 -- nothing we care about).
+_DC_BLANK_BINS = 1
+
+
 def compute(iq: np.ndarray, sample_rate: float, fft_size: int = 1024,
-            hop: int | None = None) -> Spectrogram:
+            hop: int | None = None, remove_dc: bool = True) -> Spectrogram:
     """STFT of complex IQ -> [time, freq] dB power matrix (two-sided, centred).
 
     ``hop`` defaults to a value that caps the frame count (see module docstring);
-    pass an explicit ``hop`` to force a specific time resolution.
+    pass an explicit ``hop`` to force a specific time resolution. ``remove_dc``
+    suppresses the receiver's DC spike (see ``_DC_BLANK_BINS``).
     """
     iq = np.asarray(iq, dtype=np.complex64)
+    if remove_dc and iq.size:
+        iq = iq - np.mean(iq).astype(np.complex64)
     if iq.size < fft_size:
         iq = np.pad(iq, (0, fft_size - iq.size))
     n = iq.size
@@ -74,6 +85,13 @@ def compute(iq: np.ndarray, sample_rate: float, fft_size: int = 1024,
     scale = np.float32(1.0 / (fft_size * fft_size))
     power = (spec.real * spec.real + spec.imag * spec.imag) * scale
     power_db = (10.0 * np.log10(power + np.float32(1e-12))).astype(np.float32, copy=False)
+    if remove_dc and fft_size >= 8:
+        c = fft_size // 2
+        k = _DC_BLANK_BINS
+        left = power_db[:, c - k - 3:c - k]
+        right = power_db[:, c + k + 1:c + k + 4]
+        fill = 0.5 * (left.mean(axis=1) + right.mean(axis=1))
+        power_db[:, c - k:c + k + 1] = fill[:, None]
 
     freqs = np.fft.fftshift(np.fft.fftfreq(fft_size, d=1.0 / sample_rate))
     return Spectrogram(freqs_hz=freqs.astype(np.float64),

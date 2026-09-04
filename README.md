@@ -128,24 +128,19 @@ Decisions we made and why:
 ```sh
 uv sync
 
-# No hardware — synthetic IQ, one JSON status line per second:
-uv run aerix-rf --sim
+# No hardware -- synthetic IQ, one JSON status line per second:
+uv run aerix-rf run --sim
 
-# Real HackRF (after `sudo apt install hackrf`): uses hackrf_transfer capture
-uv run aerix-rf
+# Real HackRF (libhackrf, continuous stream). Bare `aerix-rf` == `aerix-rf run`.
+uv run aerix-rf info
+uv run aerix-rf run --human
 
 # With server uplink + sensor position:
 AERIX_RF_SERVER_URL=https://host:8180 AERIX_RF_SENSOR_ID=sdr-... AERIX_RF_TOKEN='sdr-...~secret' \
-AERIX_RF_LAT=52.1 AERIX_RF_LON=5.1 uv run aerix-rf
+AERIX_RF_LAT=52.1 AERIX_RF_LON=5.1 uv run aerix-rf run
 ```
 
 Provision a `hackrf` sensor once: `POST /v1/sensors:provision {"class":"hackrf"}`.
-
-**Find a drone across the band:**
-```sh
-python -m aerix_rf.tools.sweep_locate baseline 2400 2485 base_24.csv   # drone OFF
-python -m aerix_rf.tools.sweep_locate find     2400 2485 base_24.csv   # drone ON -> candidate channel
-```
 
 **Local cue (Path 1b):**
 ```sh
@@ -157,20 +152,81 @@ curl -XPOST http://aerix-rf.local:8770/cue -H "X-Local-Token: $TOKEN" \
 ```sh
 uv run --extra train python -m aerix_rf.classify.train.train --dataset dronerf --data-root <path> \
   --sample-rate 20e6 --out models/signature.joblib
+# then: AERIX_RF_MODEL=models/signature.joblib uv run aerix-rf run   (default path: models/signature.joblib)
 ```
+
+---
+
+## Field test (Phase 1: scan -> lock -> capture -> replay -> report)
+
+Everything below works **without the server**. Sessions land in `./sessions/<UTC>_<label>/`
+(override with `--session-root` or `$AERIX_RF_SESSIONS`); each is self-describing:
+`session.json` (receiver, gains, sample rate, software git sha, sha256 of every IQ file,
+operator test labels), `iq/capture_NNNN.cs8` (raw int8 IQ), `spectrograms/*.png`,
+`detections.jsonl`, `decode.jsonl`, `summary.md`. **Do not commit `sessions/`** (it is
+gitignored; a 60 s lock is 2.4 GB).
+
+The `--label/--drone-*/--motors-state/...` flags are *operator ground truth about the test
+set-up*. They are stored under `test` in `session.json` and shown in the report as such; they
+never feed the detector/classifier and never attribute an individual emitter.
+
+```sh
+# Test 0 -- baseline, drones + controllers OFF (30 s per band, 5 min is better)
+uv run aerix-rf baseline --band 2.4 --seconds 60 --out sessions/base_24
+uv run aerix-rf baseline --band 5.8 --seconds 60 --out sessions/base_58
+uv run aerix-rf capture --seconds 300 --label "test0 baseline 2440" --center-mhz 2440
+
+# Test 1/2/3 -- power the controller / aircraft / motors, then find what changed:
+uv run aerix-rf scan --band 2.4 --baseline sessions/base_24 --rounds 3
+uv run aerix-rf scan --band 5.8 --baseline sessions/base_58 --rounds 3
+#   -> ranked candidates (centre, span, rise over baseline, persistence, burstiness, hopping)
+
+# Lock the top candidate and record everything the pipeline sees:
+uv run aerix-rf lock --center-mhz 2437 --seconds 60 \
+    --label "test3 droneA motors on" --drone-manufacturer DJI --drone-model "Mini 4 Pro" \
+    --drone-state flying --controller-state on --motors-state on --distance-m 20 \
+    --antenna "stock 2.4 whip" --notes "run 1 of 3"
+#   `capture` is the same but keeps *every* window's IQ (lock keeps only plausible windows
+#   unless --record-all). Ctrl-C stops early; the session is finalised either way.
+
+# Afterwards, offline -- must reproduce the same detections/decodes from the stored IQ:
+uv run aerix-rf replay sessions/<session>            # -> sessions/<session>/replays/<...>/
+uv run aerix-rf report sessions/<session> --print    # regenerate summary.md
+```
+
+Band presets: `2.4` (2400-2500), `5.8` (5725-5875), `5.2` (5150-5350), `900`; or `lo:hi` in MHz.
+Radio flags on `lock/capture`: `--sample-rate --lna --vga --amp --backend libhackrf|hackrf_transfer|soapy`.
+
+Status line fields: `score` = how *interesting* the RF is (0..1, **not** "is a drone"),
+`morph` = stage-1 shape, `cls` = stage-2 label with confidence and source (`rule` or the
+model version), `dec` = best decode level this window (`none/A/B/C`; `C` = CRC-valid frame,
+prints serial + position), `cap` = capture health (`ok` or `INCOMPLETE(-n)`; the cumulative
+`overflow_count` is in `detections.jsonl`).
 
 ---
 
 ## Status
 
-- **Software:** box detection chain, server RF path (contract + migrations 038/039 + ingest
-  route + writer + retention), classifier pipeline, full DroneID decode chain (incl. Turbo),
-  sweep locator — all built and integrated; 42 tests green.
-- **Verified on real HackRF:** full end-to-end (live capture → detect → spectrogram → ingest →
-  `rf_detections`) proven on ambient RF; real-time (~155 ms/window).
-- **Classifier on real data:** trained on a DroneRF subset (`classify/train/fetch_dronerf.py`);
-  real drone vs real background separates cleanly (binary val 1.00). Bench demonstrator at the
-  dataset's 40 MS/s — deployment needs a retrain from IQ decimated to the box's 20 MS/s.
-- **Not yet done:** a real drone RF detection (needs a transmitting drone found via the sweep
-  locator); decode validated against a real DroneID burst; 20 MS/s classifier retrain;
-  `odid-cues` site-scoping; ESP-side `/cue` sender firmware.
+- **Software (Phase 1 of `AERIX_RF_ANTSDR_PROJECT.md`, 2026-09-04):** hardware-neutral
+  `IQSource`/`IQWindow`, continuous libhackrf stream with health counters, DC-spike removal,
+  Stage-1 morphology / Stage-2 identity / Stage-3 decode separation, live ML path with rule
+  fallback, scan→lock workflow, self-describing sessions with sha256 + deterministic replay,
+  burst-by-burst DroneID decoder with integer-CFO search and a per-window time budget,
+  Markdown session reports. Server RF path (contract + migrations 038/039 + ingest + retention)
+  unchanged from before. 98 tests green.
+- **Verified on real HackRF (ambient only, no drone yet):** 10-minute continuous soak (504
+  windows, no failure, stream-rate ratio 0.999); 30 s lock runs in real time (~0.3 s/window,
+  all windows complete); baseline/scan finds ambient Wi-Fi channels vs baseline; sessions
+  written from hardware and replayed. Ambient 2.4 GHz gives `fhss_candidate` /
+  `burst_wideband_candidate` morphologies, Stage-2 `unknown`, **0 CRC-valid decodes** — as it
+  must.
+- **Synthetic only:** the DroneID decoder (levels A/B/C, CRC-valid on encoded synthetic
+  bursts); the ML classifier live path (dummy bundle). The DroneRF-trained bundle is a 40 MS/s
+  bench demonstrator — if used live at 20 MS/s it is flagged `model_sample_rate_mismatch`.
+- **Aircraft tested:** none yet — the two-drone field protocol (§5 of the project doc) is the
+  next step. **Protocols decoded:** none yet. Do not read any of the above as O2/O3/O4 coverage.
+- **Known limitations:** one 20 MHz slice at a time; in a busy 2.4 GHz band nearly every window
+  is `plausible` (score = "interesting RF", not "drone"), so use the differential scan and the
+  morphology/cadence fields — only a CRC-valid decode attributes identity; RSSI is uncalibrated;
+  the laptop must keep the per-window pipeline under ~1 s or windows are skipped (reported as
+  `gap=`). Not done: `odid-cues` site-scoping; ESP-side `/cue` sender firmware.

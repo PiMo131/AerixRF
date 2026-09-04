@@ -12,10 +12,14 @@ from aerix_rf.decode import ofdm
 from aerix_rf.decode import turbo as T
 from aerix_rf.decode import frame as F
 from aerix_rf.decode._synth import make_burst, make_encoded_burst
+from aerix_rf.decode import droneid
 from aerix_rf.decode.droneid import (
-    decode, available, demodulate, generate_scrambler_seq, descramble_payload,
+    decode, decode_all, find_burst_candidates, available, demodulate,
+    generate_scrambler_seq, descramble_payload,
 )
-from aerix_rf.decode.zc import zc_time_domain, find_zc_symbol_start, normalized_xcorr
+from aerix_rf.decode.zc import (
+    zc_time_domain, find_zc_symbol_start, find_zc_symbol_start_int_cfo, normalized_xcorr,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -300,3 +304,269 @@ def test_encode_decode_none_on_corruption():
     d2 = replace(d, descrambled_bits=corrupted)
     from aerix_rf.decode.droneid import decode_frame
     assert decode_frame(d2) is None
+
+
+# ---------------------------------------------------------------------------
+# Window-level decoding: 1 s @ 20 MS/s HackRF-style captures, burst by burst
+# ---------------------------------------------------------------------------
+
+_FS_IN = 20e6
+_ONE_SECOND = int(_FS_IN)
+
+
+def _noise_window(n: int, noise_power: float, seed: int) -> np.ndarray:
+    rng = np.random.default_rng(seed)
+    iq = rng.standard_normal(n, dtype=np.float32) + 1j * rng.standard_normal(n, dtype=np.float32)
+    iq *= np.float32(np.sqrt(noise_power / 2.0))
+    return iq.astype(np.complex64)
+
+
+def _embed(window: np.ndarray, burst_iq: np.ndarray, burst_fs: float, offset: int) -> int:
+    """Resample a (unit-power, zero-padded) 15.36 MHz burst to 20 MS/s and add it in.
+
+    Returns the input-rate index of the burst's first sample.
+    """
+    up = ofdm.resample_to(burst_iq.astype(np.complex128), burst_fs, _FS_IN).astype(np.complex64)
+    window[offset:offset + up.size] += up
+    return offset
+
+
+def _window_with_bursts(bursts, *, snr_db: float, seed: int, n: int = _ONE_SECOND):
+    """`bursts` = [(offset_samples, EncodedBurst)], bursts are unit power -> SNR in dB."""
+    w = _noise_window(n, 10.0 ** (-snr_db / 10.0), seed)
+    for off, b in bursts:
+        _embed(w, b.iq, b.sample_rate, off)
+    return w
+
+
+_PAD = 600     # zero pad (snr_db=None) on both sides so resampling has no edge transient
+
+
+def test_find_burst_candidates_two_bursts_in_one_second():
+    b1 = make_encoded_burst(_FIELDS, snr_db=None, pad_start=_PAD, pad_end=_PAD, seed=21)
+    b2 = make_encoded_burst(_FIELDS, snr_db=None, pad_start=_PAD, pad_end=_PAD, seed=22)
+    rng = np.random.default_rng(23)
+    offs = sorted(int(v) for v in rng.integers(100_000, _ONE_SECOND - 100_000, 2))
+    assert offs[1] - offs[0] > 50_000
+    w = _window_with_bursts([(offs[0], b1), (offs[1], b2)], snr_db=10.0, seed=23)
+
+    cands = find_burst_candidates(w, _FS_IN)
+    assert len(cands) == 2
+    burst_in = ofdm.burst_length(ofdm.NOMINAL_SAMPLE_RATE) * _FS_IN / ofdm.NOMINAL_SAMPLE_RATE
+    pad_in = _PAD * _FS_IN / ofdm.NOMINAL_SAMPLE_RATE
+    for (start, end, peak), off in zip(sorted(cands), offs):
+        assert abs(start - (off + pad_in)) < 1000          # within ~2 envelope blocks
+        assert abs((end - start) - burst_in) < 1500
+        assert 0.5 < peak < 2.0                             # unit-power burst + noise
+
+
+def test_decode_all_two_bursts_one_second_window_10db():
+    fields2 = dict(_FIELDS, serial="SECONDDRONE00001", drone_lat=51.9, drone_lon=4.4)
+    b1 = make_encoded_burst(_FIELDS, snr_db=None, pad_start=_PAD, pad_end=_PAD, seed=31)
+    b2 = make_encoded_burst(fields2, snr_db=None, pad_start=_PAD, pad_end=_PAD, seed=32)
+    rng = np.random.default_rng(33)
+    offs = sorted(int(v) for v in rng.integers(100_000, _ONE_SECOND - 100_000, 2))
+    assert offs[1] - offs[0] > 50_000
+    w = _window_with_bursts([(offs[0], b1), (offs[1], b2)], snr_db=10.0, seed=33)
+
+    import time
+    t0 = time.perf_counter()
+    attempts = decode_all(w, _FS_IN)
+    elapsed = time.perf_counter() - t0
+    # Measured ~0.14 s on the dev laptop (0.3 s under load); spec target < 1.5 s.
+    assert elapsed < 1.5, f"decode_all took {elapsed:.2f}s"
+
+    assert len(attempts) >= 2
+    good = [a for a in attempts if a.level == "C"]
+    assert len(good) == 2
+    assert [a.error for a in attempts] == [None] * len(attempts)
+    for a, off, f in zip(good, offs, (_FIELDS, fields2)):
+        assert a.crc_ok and a.result is not None
+        assert a.result.serial == f["serial"]
+        assert abs(a.result.drone_lat - f["drone_lat"]) < _COORD_TOL
+        assert abs(a.result.drone_lon - f["drone_lon"]) < _COORD_TOL
+        assert a.integer_cfo_bins == 0
+        assert abs(a.cfo_hz) < 500.0
+        assert a.zc_score > 0.8 and a.zc6_score > 0.8
+        assert 0.6 < a.duration_ms < 0.7
+        assert a.snr_db is not None and 8.0 < a.snr_db < 14.0
+        # Reported span refined to the synchronized burst (input-rate samples).
+        expect_start = off + _PAD * _FS_IN / ofdm.NOMINAL_SAMPLE_RATE
+        assert abs(a.start_sample - expect_start) < 10
+
+    # decode() is the first CRC-valid result in time order.
+    res = decode(w, _FS_IN)
+    assert res is not None and res.serial == _FIELDS["serial"]
+
+
+@pytest.mark.parametrize("cfo_bins,expect_k", [(2.3, 2), (-1.7, -2)])
+def test_decode_all_integer_cfo(cfo_bins, expect_k):
+    inject = cfo_bins * ofdm.CARRIER_SPACING_HZ                     # +34.5 kHz / -25.5 kHz
+    b = make_encoded_burst(_FIELDS, snr_db=None, pad_start=_PAD, pad_end=_PAD,
+                           seed=41, cfo_hz=inject)
+    w = _window_with_bursts([(1_500_000, b)], snr_db=12.0, seed=42, n=3_000_000)
+    attempts = decode_all(w, _FS_IN)
+    assert len(attempts) == 1
+    a = attempts[0]
+    assert a.error is None
+    assert a.level == "C" and a.crc_ok and a.result.serial == _FIELDS["serial"]
+    assert a.integer_cfo_bins == expect_k
+    assert abs(a.cfo_hz - inject) < 500.0
+    assert a.demod is not None and a.demod.integer_cfo_bins == expect_k
+
+
+def test_demodulate_integer_cfo_half_bin_wrap():
+    # +0.49 and -0.51 subcarriers straddle the fractional estimator's +/-7.5 kHz
+    # wrap: the integer search must absorb the wrap (k=0 vs k=-1) transparently.
+    for bins, expect_k in ((0.49, 0), (-0.51, -1), (3.9, 4), (-4.0, -4)):
+        inject = bins * ofdm.CARRIER_SPACING_HZ
+        b = make_encoded_burst(_FIELDS, snr_db=20.0, seed=43, cfo_hz=inject)
+        d = demodulate(b.iq, b.sample_rate)
+        assert d is not None, bins
+        assert d.integer_cfo_bins == expect_k, bins
+        assert abs(d.cfo_hz - inject) < 400.0, bins
+        assert droneid.decode_frame(d) is not None, bins
+
+
+def test_zc_bank_is_ambiguous_without_second_pilot():
+    # Documents why sym-6 disambiguation exists: a ZC shifted by k bins still
+    # correlates ~0.9+ with the unshifted taps (at a slightly different lag).
+    b = make_burst(snr_db=None, pad_start=500, seed=44)
+    fft_size = ofdm.fft_size_for(b.sample_rate)
+    _p, _s, _k, per_shift, per_peaks = find_zc_symbol_start_int_cfo(
+        b.iq.astype(complex), fft_size, 4, shifts=range(-4, 5))
+    assert per_shift[4] > 0.99                     # true k = 0
+    assert per_shift.min() > 0.85                  # every wrong k also "matches"
+    assert np.ptp(per_peaks) <= 20                 # ...within a few samples
+
+
+def test_decode_all_pure_noise_is_empty_and_fast():
+    w = _noise_window(_ONE_SECOND, 0.1, seed=51)
+    import time
+    t0 = time.perf_counter()
+    attempts = decode_all(w, _FS_IN)
+    elapsed = time.perf_counter() - t0
+    # Envelope only (no ZC search): measured ~0.05 s; spec target < 0.3 s.
+    assert elapsed < 0.3, f"decode_all on noise took {elapsed:.2f}s"
+    assert all(a.level in ("none", "A") for a in attempts)
+    assert attempts == []
+    assert decode(w, _FS_IN) is None
+
+
+def test_decode_all_corrupted_burst_no_exception():
+    # Second half of the burst replaced by same-power noise (keeps the envelope
+    # DroneID-shaped): ZC sym 4 still syncs, sym 6 cannot confirm, CRC fails.
+    b = make_encoded_burst(_FIELDS, snr_db=None, pad_start=_PAD, pad_end=_PAD, seed=61)
+    bad = b.iq.copy()
+    half = _PAD + (bad.size - 2 * _PAD) // 2
+    rng = np.random.default_rng(62)
+    m = bad.size - half
+    bad[half:] = ((rng.standard_normal(m) + 1j * rng.standard_normal(m)) / np.sqrt(2)).astype(np.complex64)
+    w = _noise_window(3_000_000, 0.1, seed=63)
+    _embed(w, bad, b.sample_rate, 1_200_000)
+
+    attempts = decode_all(w, _FS_IN)
+    assert len(attempts) == 1
+    a = attempts[0]
+    assert a.error is None
+    assert a.level in ("A", "B")
+    assert a.crc_ok is False and a.result is None
+    assert a.zc_score > 0.8
+    assert a.zc6_score < droneid.ZC6_CONFIRM_THRESHOLD
+    assert decode(w, _FS_IN) is None
+
+    # Zeroed second half on a short pre-cut slice: same contract, no exception.
+    zeroed = b.iq.copy()
+    zeroed[half:] = 0
+    short = decode_all(zeroed, b.sample_rate)
+    assert len(short) == 1 and short[0].level in ("A", "B") and not short[0].crc_ok
+    assert short[0].error is None
+    assert decode(zeroed, b.sample_rate) is None
+
+
+def test_decode_all_isolates_per_burst_exceptions(monkeypatch):
+    b1 = make_encoded_burst(_FIELDS, snr_db=None, pad_start=_PAD, pad_end=_PAD, seed=71)
+    b2 = make_encoded_burst(_FIELDS, snr_db=None, pad_start=_PAD, pad_end=_PAD, seed=72)
+    w = _window_with_bursts([(500_000, b1), (2_000_000, b2)], snr_db=12.0, seed=73, n=3_000_000)
+
+    real = droneid.decode_frame
+    calls = []
+
+    def flaky(demod, iterations=8):
+        calls.append(1)
+        if len(calls) == 1:
+            raise RuntimeError("boom")
+        return real(demod, iterations)
+
+    monkeypatch.setattr(droneid, "decode_frame", flaky)
+    attempts = decode_all(w, _FS_IN)
+    assert len(attempts) == 2
+    # Candidates are processed strongest-first, so either burst may have hit
+    # the exception; exactly one did, and it did not stop the other.
+    failed = [a for a in attempts if a.error is not None]
+    ok = [a for a in attempts if a.error is None]
+    assert len(failed) == 1 and failed[0].error == "RuntimeError: boom"
+    assert failed[0].level == "B" and not failed[0].crc_ok
+    assert len(ok) == 1 and ok[0].level == "C" and ok[0].result.serial == _FIELDS["serial"]
+
+
+def test_decode_short_slice_keeps_old_contract():
+    # Pre-cut bursts (<= 4 burst lengths) skip segmentation: same answers as before.
+    b = make_encoded_burst(_FIELDS, snr_db=15.0, seed=81)
+    attempts = decode_all(b.iq, b.sample_rate)
+    assert len(attempts) == 1 and attempts[0].level == "C"
+    assert attempts[0].result.serial == _FIELDS["serial"]
+    assert abs(attempts[0].start_sample - b.burst_start) <= 2
+    # Unencoded burst: front end fine (B), CRC fails, decode() -> None.
+    u = make_burst(snr_db=None, seed=82)
+    att = decode_all(u.iq, u.sample_rate)
+    assert len(att) == 1 and att[0].level == "B" and not att[0].crc_ok
+    assert decode(u.iq, u.sample_rate) is None
+
+
+def _ambient_window(seed: int, n_bursts: int = 12, n: int = _ONE_SECOND) -> np.ndarray:
+    """Ambient 2.4 GHz stand-in: noise plus Wi-Fi/BT-like noise bursts of 0.5-1.0 ms."""
+    rng = np.random.default_rng(seed)
+    w = _noise_window(n, 0.05, seed)
+    for i in range(n_bursts):
+        off = 200_000 + i * ((n - 400_000) // n_bursts)
+        m = int(rng.integers(10_000, 20_000))
+        p = 0.05 * 10 ** (rng.uniform(8, 15) / 10)
+        w[off:off + m] += ((rng.standard_normal(m) + 1j * rng.standard_normal(m))
+                           * np.sqrt(p / 2)).astype(np.complex64)
+    return w
+
+
+def test_decode_all_ambient_non_droneid_bursts_are_cheap():
+    # Live-HackRF finding: ambient Wi-Fi/BT yields ~8 candidates per second, all
+    # level "none"; each must be rejected by the single-correlation gate cheaply.
+    w = _ambient_window(seed=91)
+    assert len(find_burst_candidates(w, _FS_IN)) == 8          # max_bursts cap hit
+    import time
+    decode_all(w, _FS_IN)                                       # warm-up (FFT plans etc.)
+    t0 = time.perf_counter()
+    attempts = decode_all(w, _FS_IN)
+    elapsed = time.perf_counter() - t0
+    # Measured ~0.11 s (8 gated rejects + envelope); coordinator target < 0.25 s.
+    assert elapsed < 0.35, f"ambient decode_all took {elapsed:.2f}s"
+    assert len(attempts) == 8
+    assert all(a.level == "none" and a.result is None and a.error is None for a in attempts)
+    assert all(a.zc_score < droneid.DEFAULT_CORRELATION_THRESHOLD for a in attempts)
+    assert all(0.4 <= a.duration_ms <= 1.5 for a in attempts)
+
+
+def test_decode_all_budget_skips_weaker_candidates():
+    b1 = make_encoded_burst(_FIELDS, snr_db=None, pad_start=_PAD, pad_end=_PAD, seed=101)
+    b2 = make_encoded_burst(_FIELDS, snr_db=None, pad_start=_PAD, pad_end=_PAD, seed=102)
+    w = _noise_window(3_000_000, 0.1, seed=103)
+    _embed(w, b1.iq, b1.sample_rate, 500_000)
+    _embed(w, (b2.iq * np.float32(1.5)), b2.sample_rate, 2_000_000)   # stronger
+    full = decode_all(w, _FS_IN, budget_s=None)
+    assert [a.level for a in full] == ["C", "C"]
+    assert all(a.error is None for a in full)
+
+    capped = decode_all(w, _FS_IN, budget_s=1e-9)
+    assert len(capped) == 1                                    # strongest one only
+    assert capped[0].level == "C" and capped[0].start_sample > 1_900_000
+    assert capped[0].error is not None and "1 weaker candidate(s) not attempted" in capped[0].error
+    assert "budget_s=1e-09 exceeded" in capped[0].error

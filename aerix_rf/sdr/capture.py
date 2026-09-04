@@ -81,6 +81,8 @@ class IQWindow:
             "received_samples": int(self.iq.size),
             "dropped_or_missing_samples": int(self.dropped_samples or 0) + max(0, int(exp) - int(self.iq.size)),
             "overflow_count": int(self.metadata.get("overflow_count", 0)),
+            "gap_before_samples": int(self.metadata.get("gap_before_samples", 0)),
+            "stream_rate_ratio": self.metadata.get("stream_rate_ratio"),
             "capture_complete": bool(self.complete),
             "source_backend": self.receiver_type,
         }
@@ -130,6 +132,11 @@ class SimSource(IQSource):
 
     receiver_type = "sim"
 
+    # synth_iq() produces unit-RMS noise; a HackRF delivers int8/128, i.e. a
+    # noise floor of a few LSB. Scale to that so sim windows survive the .cs8
+    # round trip (session store / replay) without clipping.
+    SCALE = 1.0 / 24.0
+
     def __init__(self, cfg: Config, drone_period: int = 3) -> None:
         self.cfg = cfg
         self.drone_period = drone_period
@@ -147,7 +154,8 @@ class SimSource(IQSource):
         while True:
             drone = (self._i % self.drone_period) != 0
             t0 = time.time()
-            iq = synth_iq(self.cfg.sample_rate, self.cfg.window_s, drone=drone, seed=self._i)
+            iq = (synth_iq(self.cfg.sample_rate, self.cfg.window_s, drone=drone, seed=self._i)
+                  * self.SCALE).astype(np.complex64)
             yield IQWindow(iq=iq, captured_at=t0, sample_rate=self.cfg.sample_rate,
                            center_freq_hz=self._center_hz, receiver_type="sim",
                            gain_db=self.cfg.gain_db, expected_samples=iq.size,
@@ -165,11 +173,14 @@ def _read_cs8(path: str, offset_samples: int, n_samples: int) -> np.ndarray:
 
 
 def to_cs8(iq: np.ndarray) -> bytes:
-    """complex64 in +-1 -> int8 interleaved I,Q bytes (the hackrf_transfer format)."""
+    """complex64 in +-1 -> int8 interleaved I,Q bytes (the hackrf_transfer format).
+
+    Scale is 128 in BOTH directions (matches ``_read_cs8`` and the radio's own
+    int8 samples), so a window read from hardware round-trips bit-exactly."""
     x = np.asarray(iq, dtype=np.complex64)
     out = np.empty(x.size * 2, dtype=np.int8)
-    out[0::2] = np.clip(np.round(x.real * 127.0), -128, 127).astype(np.int8)
-    out[1::2] = np.clip(np.round(x.imag * 127.0), -128, 127).astype(np.int8)
+    out[0::2] = np.clip(np.round(x.real * 128.0), -128, 127).astype(np.int8)
+    out[1::2] = np.clip(np.round(x.imag * 128.0), -128, 127).astype(np.int8)
     return out.tobytes()
 
 
@@ -341,6 +352,7 @@ class LibHackRFSource(IQSource):
                            dropped_samples=info["dropped_samples"],
                            metadata={"backend": "libhackrf", "gapped": False,
                                      "overflow_count": info["overflow_count"],
+                                     "gap_before_samples": info.get("gap_before_samples", 0),
                                      "short_reads": info["short_reads"],
                                      "stream_rate_ratio": info["stream_rate_ratio"],
                                      "lna_gain": self.cfg.lna_gain, "vga_gain": self.cfg.vga_gain,

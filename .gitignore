@@ -5,3 +5,6 @@ __pycache__/
 iq_store/
 *.pyc
 data/
+sessions/
+*.cs8
+*.npz

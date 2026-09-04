@@ -52,6 +52,59 @@ def zc_time_domain(fft_size: int, symbol_index: int) -> np.ndarray:
     return np.fft.ifft(np.fft.fftshift(freq))
 
 
+def zc_taps_bank(fft_size: int, symbol_index: int, shifts) -> np.ndarray:
+    """Golden ZC taps pre-shifted by integer subcarrier offsets.
+
+    Row ``i`` holds ``zc[n] * exp(+j 2 pi shifts[i] n / fft_size)``, i.e. the
+    time-domain ZC symbol as it would be received with a carrier offset of
+    ``shifts[i]`` whole subcarriers. Correlating the received signal against row
+    ``i`` is (up to a per-lag unit phase) identical to correcting the signal by
+    ``-shifts[i]`` bins and correlating against the unshifted taps -- so one
+    correlation bank evaluates every integer-CFO hypothesis at once.
+    """
+    taps = zc_time_domain(fft_size, symbol_index)
+    n = np.arange(fft_size)
+    shifts = np.asarray(list(shifts), dtype=np.int64)
+    return taps[None, :] * np.exp(1j * 2 * np.pi * shifts[:, None] * n[None, :] / fft_size)
+
+
+def normalized_xcorr_bank(samples: np.ndarray, taps_bank: np.ndarray) -> np.ndarray:
+    """Normalized cross-correlation of `samples` against every row of `taps_bank`.
+
+    Returns ``[rows, len(samples) - taps_len]`` scores in [0, 1]. The numerator
+    is computed with one FFT of the samples shared by all rows; the sliding-window
+    energy (denominator) is computed once with cumulative sums.
+    """
+    from scipy import fft as sfft
+
+    samples = np.asarray(samples, dtype=np.complex128)
+    taps_bank = np.atleast_2d(np.asarray(taps_bank, dtype=np.complex128))
+    rows, n = taps_bank.shape
+    m = samples.size - n
+    if m <= 0:
+        return np.zeros((rows, 0))
+
+    t0 = taps_bank - taps_bank.mean(axis=1, keepdims=True)
+    t_norm = np.sqrt(np.sum(np.abs(t0) ** 2, axis=1))          # [rows]
+    t_norm = np.where(t_norm == 0, np.inf, t_norm)
+
+    # Linear correlation via FFT: lags 0..m never wrap when L >= len(samples).
+    L = sfft.next_fast_len(samples.size)
+    S = sfft.fft(samples, L)
+    T = sfft.fft(t0, L, axis=1)
+    num = sfft.ifft(S[None, :] * np.conj(T), axis=1)[:, :m]
+
+    # Sliding-window energy: ||w0||^2 = sum|w|^2 - n*|mean(w)|^2.
+    cs = np.concatenate(([0.0], np.cumsum(np.abs(samples) ** 2)))
+    csum = np.concatenate(([0.0 + 0j], np.cumsum(samples)))
+    win_e = cs[n : n + m] - cs[:m]                          # sum|w|^2 per window
+    win_s = csum[n : n + m] - csum[:m]                      # sum(w) per window
+    win_var_e = win_e - (np.abs(win_s) ** 2) / n            # = ||w0||^2
+    win_norm = np.sqrt(np.maximum(win_var_e, 1e-12))
+
+    return np.abs(num) / (win_norm[None, :] * t_norm[:, None])
+
+
 def normalized_xcorr(samples: np.ndarray, taps: np.ndarray) -> np.ndarray:
     """Normalized cross-correlation; peaks point to the START of `taps` in `samples`.
 
@@ -62,31 +115,7 @@ def normalized_xcorr(samples: np.ndarray, taps: np.ndarray) -> np.ndarray:
     numerator is a plain correlation computed by FFT; the denominator's sliding
     energy is computed with cumulative sums.
     """
-    samples = np.asarray(samples, dtype=np.complex128)
-    taps = np.asarray(taps, dtype=np.complex128)
-    n = taps.size
-    m = samples.size - n
-    if m <= 0:
-        return np.zeros(0)
-
-    t0 = taps - taps.mean()
-    t_norm = np.sqrt(np.sum(np.abs(t0) ** 2))
-    if t_norm == 0:
-        return np.zeros(m)
-
-    # Numerator: correlation of samples with t0 at each lag 0..m.
-    # np.correlate(samples, t0, 'valid')[k] = sum(samples[k:k+n] * conj(t0)).
-    num = np.correlate(samples, t0, mode="valid")[: m]
-
-    # Sliding-window energy: ||w0||^2 = sum|w|^2 - n*|mean(w)|^2.
-    cs = np.concatenate(([0.0], np.cumsum(np.abs(samples) ** 2)))
-    csum = np.concatenate(([0.0 + 0j], np.cumsum(samples)))
-    win_e = cs[n : n + m] - cs[:m]                          # sum|w|^2 per window
-    win_s = csum[n : n + m] - csum[:m]                      # sum(w) per window
-    win_var_e = win_e - (np.abs(win_s) ** 2) / n            # = ||w0||^2
-    win_norm = np.sqrt(np.maximum(win_var_e, 1e-12))
-
-    return np.abs(num) / (win_norm * t_norm)
+    return normalized_xcorr_bank(samples, np.asarray(taps)[None, :])[0]
 
 
 def find_zc_symbol_start(iq: np.ndarray, fft_size: int, symbol_index: int = 4,
@@ -97,9 +126,36 @@ def find_zc_symbol_start(iq: np.ndarray, fft_size: int, symbol_index: int = 4,
     Returns ``(offset, score)`` where `offset` is the sample index of the peak
     (start of the ZC symbol's fft_size data samples) and `score` in [0, 1].
     """
-    taps = zc_time_domain(fft_size, symbol_index)
-    scores = normalized_xcorr(iq, taps)
-    if scores.size == 0:
-        return 0, 0.0
-    peak = int(np.argmax(scores))
-    return peak, float(scores[peak])
+    peak, score, _k, _scores, _peaks = find_zc_symbol_start_int_cfo(
+        iq, fft_size, symbol_index, shifts=(0,))
+    return peak, score
+
+
+def find_zc_symbol_start_int_cfo(iq: np.ndarray, fft_size: int, symbol_index: int = 4,
+                                 shifts=range(-4, 5),
+                                 ) -> tuple[int, float, int, np.ndarray, np.ndarray]:
+    """ZC symbol search over time for each integer-subcarrier CFO hypothesis.
+
+    Returns ``(offset, score, best_shift, per_shift_scores, per_shift_peaks)``:
+    the correlation peak position/score for the highest-scoring hypothesis, the
+    integer CFO (in subcarriers) that produced it, and the peak score / peak
+    position for every hypothesis in `shifts`. The received signal is assumed to
+    be *fractionally* CFO-corrected already.
+
+    CAUTION -- the per-shift scores alone do NOT identify the integer CFO: a
+    Zadoff-Chu sequence shifted by k subcarriers is (nearly) a time-shifted copy
+    of itself, so every hypothesis peaks at ~0.9-1.0 a few samples apart. Callers
+    must disambiguate with the second pilot (root 147 in symbol 6), whose
+    time-shift-per-bin differs -- see ``droneid._select_integer_cfo``.
+    """
+    shifts = list(shifts)
+    bank = zc_taps_bank(fft_size, symbol_index, shifts)
+    scores = normalized_xcorr_bank(iq, bank)
+    if scores.shape[1] == 0:
+        z = np.zeros(len(shifts))
+        return 0, 0.0, 0, z, z.astype(np.int64)
+    per_shift_peaks = scores.argmax(axis=1)
+    per_shift = scores[np.arange(len(shifts)), per_shift_peaks]
+    best = int(np.argmax(per_shift))
+    return (int(per_shift_peaks[best]), float(per_shift[best]), int(shifts[best]),
+            per_shift, per_shift_peaks.astype(np.int64))

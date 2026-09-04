@@ -140,6 +140,53 @@ def estimate_cfo(iq: np.ndarray, sample_rate: float, burst_start: int) -> float:
     return float(offset_radians * sample_rate / (2 * np.pi))
 
 
+def estimate_cfo_blind(iq: np.ndarray, sample_rate: float,
+                       region: tuple[int, int] | None = None) -> float:
+    """Timing-free *fractional* CFO estimate (Hz) from CP self-similarity.
+
+    Sums ``conj(x[n]) * x[n + fft_size]`` over the whole `region` (default: all of
+    `iq`). Only cyclic-prefix/tail pairs add coherently; every other product has a
+    random phase and averages out, so the phase of the sum is ``2 pi f N / fs``
+    without knowing where the symbols start. Unambiguous range is +/- half a
+    subcarrier (+/-7.5 kHz @ 15 kHz spacing); the integer part is found separately
+    by the ZC correlation bank (see :func:`zc.find_zc_symbol_start_int_cfo`).
+    Accuracy is a few hundred Hz -- enough to make the ZC search reliable; the
+    residual is cleaned up afterwards by :func:`estimate_cfo` on a known CP.
+    """
+    fft_size = fft_size_for(sample_rate)
+    lo, hi = (0, iq.size) if region is None else region
+    seg = np.asarray(iq[max(0, lo):min(iq.size, hi)], dtype=np.complex128)
+    if seg.size <= fft_size + 1:
+        return 0.0
+    # einsum rather than np.vdot: a ~10k-element BLAS zdotc costs 1-5 ms per call
+    # while OpenBLAS's thread pool warms up under load (first ~100 calls of a
+    # process), which dominated the reject path; einsum is a flat ~30 us.
+    c = np.einsum("i,i->", np.conj(seg[:-fft_size]), seg[fft_size:])
+    if c == 0:
+        return 0.0
+    return float(np.angle(c) / fft_size * sample_rate / (2 * np.pi))
+
+
+def zc_confirm_score(freq_symbol: np.ndarray, channel_taps: np.ndarray,
+                     fft_size: int, symbol_index: int) -> float:
+    """Normalized match of an equalized received symbol against a golden ZC (0..1).
+
+    Applies the zero-forcing taps (from the *other* ZC symbol) to the data
+    carriers of `freq_symbol` and correlates with the expected ZC values. A
+    real DroneID burst gives ~1 (both pilots see the same channel); noise gives
+    ~1/sqrt(600). Used to confirm that the OFDM structure is really present.
+    """
+    from .zc import zc_data_values
+
+    dci = data_carrier_indices(fft_size)
+    eq = freq_symbol[dci] * channel_taps
+    gold = zc_data_values(symbol_index)
+    denom = np.linalg.norm(eq) * np.linalg.norm(gold)
+    if denom == 0:
+        return 0.0
+    return float(np.abs(np.vdot(gold, eq)) / denom)
+
+
 def apply_cfo(iq: np.ndarray, sample_rate: float, cfo_hz: float) -> np.ndarray:
     """Remove a carrier-frequency offset of `cfo_hz` from `iq`."""
     iq = np.asarray(iq, dtype=np.complex128)
