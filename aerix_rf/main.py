@@ -48,8 +48,9 @@ def run(cfg: Config, once: bool = False) -> None:
     recent_cues: dict[str, float] = {}   # serial -> last handled ts, for dedup
 
     try:
-        for iq in source.windows():
-            captured_at = time.time()
+        for win in source.windows():
+            iq = win.iq
+            captured_at = win.captured_at or time.time()
             iso = _iso(captured_at)
 
             spec = spectrogram.compute(iq, cfg.sample_rate, cfg.fft_size)
