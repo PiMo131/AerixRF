@@ -24,7 +24,8 @@ decodable Remote ID at all. It is posted to `/v1/rf-detections:batch` and stored
 - **Stage 3 — DJI DroneID decode** (`decode/`): best-effort serial + drone/operator GPS for
   OcuSync ≤ 2.0. Full chain: ZC sync, resample, CFO, OFDM demod, equalize, QPSK, LTE descramble,
   de-rate-match, LTE Turbo decode (max-log-MAP), CRC24A gate, DJI frame parse. Synthetic-verified
-  (exact serial + GPS round-trip down to 5 dB SNR); not yet validated on a real capture.
+  (exact serial + GPS round-trip down to 5 dB SNR) and **hardware-validated on a DJI Mini 3**
+  (CRC-valid bursts at 2429.5 MHz, on the ground; see Status).
 
 **Two server paths, both producing an RF image (spectrogram):**
 - **Path 2** — the box's own detector fired → per-second frame `{location, probability, RSSI,
@@ -213,18 +214,36 @@ prints serial + position), `cap` = capture health (`ok` or `INCOMPLETE(-n)`; the
   fallback, scan→lock workflow, self-describing sessions with sha256 + deterministic replay,
   burst-by-burst DroneID decoder with integer-CFO search and a per-window time budget,
   Markdown session reports. Server RF path (contract + migrations 038/039 + ingest + retention)
-  unchanged from before. 98 tests green.
+  unchanged from before. 102 tests green.
 - **Verified on real HackRF (ambient only, no drone yet):** 10-minute continuous soak (504
   windows, no failure, stream-rate ratio 0.999); 30 s lock runs in real time (~0.3 s/window,
   all windows complete); baseline/scan finds ambient Wi-Fi channels vs baseline; sessions
   written from hardware and replayed. Ambient 2.4 GHz gives `fhss_candidate` /
   `burst_wideband_candidate` morphologies, Stage-2 `unknown`, **0 CRC-valid decodes** — as it
   must.
-- **Synthetic only:** the DroneID decoder (levels A/B/C, CRC-valid on encoded synthetic
-  bursts); the ML classifier live path (dummy bundle). The DroneRF-trained bundle is a 40 MS/s
-  bench demonstrator — if used live at 20 MS/s it is flagged `model_sample_rate_mismatch`.
-- **Aircraft tested:** none yet — the two-drone field protocol (§5 of the project doc) is the
-  next step. **Protocols decoded:** none yet. Do not read any of the above as O2/O3/O4 coverage.
+- **Verified with aircraft (field test 2026-09-04, DJI Mini 3 + DJI Avata, stock antenna):**
+  first **CRC-valid DJI DroneID decodes** from a real capture — Mini 3 on the ground, DroneID
+  channel 2429.5 MHz inside a 2437 MHz window, four bursts on the 640 ms cadence, serial and
+  consecutive sequence numbers consistent across windows, coordinates 0.0 (no GPS fix indoors).
+  Decoded offline first, then live-equivalent after the decoder fix below; `aerix-rf replay`
+  of that session reproduces `dec=C` in ~0.36 s/window. Also characterised from IQ: the Mini 3
+  RC uplink (2 MHz hops, ~0.5 ms, 2 MHz raster) and video downlink (10–13 MHz OFDM, ~3 ms,
+  20/40/60 ms period, channel moves in flight).
+- **Decoder lesson from the field:** the DroneID burst was ~20 dB *below* the RC hops and the
+  neighbours' Wi-Fi beacons in the same window and 7.5 MHz off the window centre, so
+  "strongest 8 bursts, assumed at DC" never reached it. `decode_all` now screens up to 256
+  envelope candidates by per-burst PSD shape (occupied 4–14 MHz = DroneID-shaped; the RC's
+  2 MHz and Wi-Fi's 18 MHz are not), tries shaped ones first and mixes each to DC by its own
+  centre (window-edge-clipped bands handled). `decode.jsonl` carries `center_offset_mhz`,
+  `occupied_bw_mhz`, `droneid_shaped`.
+- **Not yet seen:** a DroneID burst *in flight* (all Mini 3 flight windows at 2412/2437/2455/
+  2475 MHz: no ZC hit, so no coordinates decoded yet), and the Avata (O3) — its 5.8 GHz link is
+  below the stock antenna's floor and 2400–2412 MHz was never captured. **Protocols decoded:**
+  OcuSync 2 DroneID (Mini 3). Do not read this as O3/O4 coverage.
+- **Synthetic only:** the ML classifier live path (dummy bundle). The DroneRF-trained bundle is
+  a 40 MS/s bench demonstrator — if used live at 20 MS/s it is flagged
+  `model_sample_rate_mismatch`. Stage-1/2 mislabel fixed-channel links as `fhss_candidate` and
+  do not yet discount 102.4 ms Wi-Fi beacon sources or BLE advertising channels.
 - **Known limitations:** one 20 MHz slice at a time; in a busy 2.4 GHz band nearly every window
   is `plausible` (score = "interesting RF", not "drone"), so use the differential scan and the
   morphology/cadence fields — only a CRC-valid decode attributes identity; RSSI is uncalibrated;

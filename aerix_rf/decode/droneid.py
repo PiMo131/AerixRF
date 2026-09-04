@@ -66,6 +66,21 @@ CANDIDATE_MARGIN_BURSTS = 0.25
 # decode_all stops starting new candidates once this much wall time was spent.
 DEFAULT_BUDGET_S = 0.25
 
+# Per-candidate spectral shape (field lesson, Mini 3 2026-09-04): the window's
+# strongest bursts are Wi-Fi beacons (~18 MHz) and the RC uplink hops (~2 MHz),
+# both 20 dB above the DroneID burst, which sits anywhere inside the window --
+# e.g. 2429.5 MHz in a 2437 MHz window. So each candidate's coarse centre and
+# occupied bandwidth are measured from its own PSD; DroneID-shaped candidates
+# (~9 MHz occupied, less when clipped by the window edge) are tried first and
+# each is mixed to DC by its own centre before the front end.
+BURST_SPECTRUM_FFT = 1024             # 19.5 kHz bins at 20 MS/s: band edges to ~1 bin
+BURST_SPECTRUM_SMOOTH_BINS = 3
+BURST_SPECTRUM_FLOOR_DB = -10.0       # occupied band = contiguous bins within this of the peak
+BURST_SPECTRUM_EDGE_BINS = 2          # band reaching this close to the window edge = clipped
+DRONEID_MIN_OCCUPIED_HZ = 4.0e6
+DRONEID_MAX_OCCUPIED_HZ = 14.0e6
+CANDIDATE_POOL_FACTOR = 32            # envelope candidates spectrally screened per attempted burst
+
 
 @dataclass
 class DroneIdResult:
@@ -129,6 +144,9 @@ class DecodeAttempt:
     snr_db: float | None = None      # peak block power over the window's median floor
     zc6_score: float = 0.0
     demod: DroneIdDemod | None = field(default=None, repr=False)
+    center_offset_hz: float = 0.0    # burst centre relative to the window centre (PSD centroid)
+    occupied_bw_hz: float = 0.0      # contiguous band within BURST_SPECTRUM_FLOOR_DB of the peak
+    droneid_shaped: bool = False     # occupied_bw within the DroneID range -> tried first
 
 
 def generate_scrambler_seq(num_bits: int, x2_init: np.ndarray = _X2_INIT) -> np.ndarray:
@@ -429,6 +447,86 @@ def _segment_envelope(env: np.ndarray, block: int, sample_rate: float, *,
     return cands[:max_bursts]
 
 
+def burst_spectrum(iq: np.ndarray, sample_rate: float) -> tuple[float, float]:
+    """Coarse ``(center_offset_hz, occupied_bw_hz)`` of one burst slice.
+
+    Averaged Hann-windowed |FFT|^2 over the slice, smoothed over a few bins; the
+    occupied band is the contiguous run of bins within BURST_SPECTRUM_FLOOR_DB of
+    the peak (2-bin gaps bridged so the DroneID DC null does not split it) and
+    the centre is the midpoint of its edges -- an OFDM spectrum's edges are sharp,
+    so this holds to ~20 kHz at 5 dB SNR where a power centroid wanders by
+    +/-70 kHz with the data. A band that reaches the window edge is clipped, so
+    its centre is placed half the nominal DroneID occupied width in from the
+    visible edge (a 2429.5 MHz channel in a 2437 MHz window: visible -10..-3 MHz,
+    centre -7.5 MHz). A HackRF DC spike is clipped to its neighbours first.
+    """
+    n = BURST_SPECTRUM_FFT
+    x = np.asarray(iq)
+    frames = x.size // n
+    if frames == 0:
+        return 0.0, 0.0
+    x = np.asarray(x[:frames * n], dtype=np.complex64).reshape(frames, n)
+    x = x * np.hanning(n).astype(np.float32)
+    psd = np.fft.fftshift(np.mean(np.abs(np.fft.fft(x, axis=1)) ** 2, axis=0))
+    mid = n // 2
+    psd[mid - 1:mid + 2] = np.minimum(psd[mid - 1:mid + 2], max(psd[mid - 2], psd[mid + 2]))
+    k = BURST_SPECTRUM_SMOOTH_BINS
+    if k > 1:
+        psd = np.convolve(psd, np.ones(k) / k, mode="same")
+    peak = float(psd.max())
+    if peak <= 0.0:
+        return 0.0, 0.0
+    above = psd > peak * 10.0 ** (BURST_SPECTRUM_FLOOR_DB / 10.0)
+    gap = 2
+    imax = int(np.argmax(psd))
+    lo = imax
+    while lo > 0 and above[max(0, lo - gap):lo].any():
+        lo -= 1
+    hi = imax
+    while hi < n - 1 and above[hi + 1:hi + 1 + gap].any():
+        hi += 1
+    df = sample_rate / n
+    f_lo = (lo - mid) * df
+    f_hi = (hi + 1 - mid) * df
+    bw = f_hi - f_lo
+    clipped_lo = lo <= BURST_SPECTRUM_EDGE_BINS
+    clipped_hi = hi >= n - 1 - BURST_SPECTRUM_EDGE_BINS
+    fft_size = ofdm.fft_size_for(ofdm.NOMINAL_SAMPLE_RATE)
+    nominal = ofdm.data_carrier_indices(fft_size).size * ofdm.CARRIER_SPACING_HZ
+    if clipped_lo and not clipped_hi and bw < nominal:
+        center = f_hi - nominal / 2.0
+    elif clipped_hi and not clipped_lo and bw < nominal:
+        center = f_lo + nominal / 2.0
+    else:
+        center = (f_lo + f_hi) / 2.0
+    return float(center), float(bw)
+
+
+def _rank_candidates(iq: np.ndarray, sample_rate: float,
+                     cands: list[tuple[int, int, float]], max_bursts: int,
+                     ) -> list[tuple[int, int, float, float, float, bool]]:
+    """Measure each envelope candidate's spectrum and order DroneID-shaped first.
+
+    Returns ``(start, end, peak, center_offset_hz, occupied_bw_hz, shaped)`` for
+    the `max_bursts` best: shaped candidates by power, then the rest by power.
+    """
+    measured = []
+    for start, end, peak in cands:
+        center, bw = burst_spectrum(iq[start:end], sample_rate)
+        shaped = DRONEID_MIN_OCCUPIED_HZ <= bw <= DRONEID_MAX_OCCUPIED_HZ
+        measured.append((start, end, peak, center, bw, shaped))
+    measured.sort(key=lambda c: (not c[5], -c[2]))
+    return measured[:max_bursts]
+
+
+def _mix(iq: np.ndarray, sample_rate: float, offset_hz: float) -> np.ndarray:
+    """Shift a slice by ``-offset_hz`` (complex128: a float32 phase ramp drifts)."""
+    if abs(offset_hz) < 1.0:
+        return iq
+    t = np.arange(iq.size, dtype=np.float64) / sample_rate
+    return np.asarray(iq, dtype=np.complex128) * np.exp(-2j * np.pi * offset_hz * t)
+
+
 def _grade(demod: DroneIdDemod | None, info: dict, threshold: float) -> str:
     if info.get("zc_score", 0.0) < threshold:
         return "none"
@@ -450,8 +548,18 @@ def decode_all(iq: np.ndarray, sample_rate: float, *, max_bursts: int = 8,
     its own, so cost scales with the number of bursts, not the window length.
     Short inputs (<= 4 burst lengths, e.g. a pre-cut burst) are treated as a single
     candidate without segmentation. A failing candidate never stops the others:
-    exceptions are captured in ``error``. Candidates are tried strongest-first;
-    once `budget_s` of wall time has been spent no further candidate is started
+    exceptions are captured in ``error``.
+
+    The burst need not sit at the window centre: up to ``CANDIDATE_POOL_FACTOR *
+    max_bursts`` envelope candidates get a PSD measurement (:func:`burst_spectrum`),
+    DroneID-shaped ones (occupied bandwidth in the DroneID range) are tried first,
+    and each candidate is mixed to DC by its own centre before the front end, so
+    a DroneID channel anywhere inside the window decodes even when ambient Wi-Fi
+    or the RC link is 20 dB stronger. ``cfo_hz`` is the total offset from the
+    window centre (mix + front-end residual); ``center_offset_hz`` is the PSD
+    centroid alone.
+
+    Once `budget_s` of wall time has been spent no further candidate is started
     (the weakest are skipped) and the last attempt's ``error`` says how many were
     skipped. ``budget_s=None`` disables the cap. Attempts are returned in time order.
     """
@@ -468,15 +576,17 @@ def decode_all(iq: np.ndarray, sample_rate: float, *, max_bursts: int = 8,
     env = _block_envelope(iq, block)                    # one pass over the window
     floor = float(np.median(env)) if env.size else 0.0
     if n <= 4 * in_burst:
-        cands = [(0, n, float(env.max()) if env.size else 0.0)]
+        pool = [(0, n, float(env.max()) if env.size else 0.0)]
     else:
-        cands = _segment_envelope(env, block, sample_rate, max_bursts=max_bursts,
-                                  min_len_s=DEFAULT_MIN_BURST_S,
-                                  max_len_s=DEFAULT_MAX_BURST_S,
-                                  threshold_db=threshold_db)
+        pool = _segment_envelope(env, block, sample_rate,
+                                 max_bursts=max_bursts * CANDIDATE_POOL_FACTOR,
+                                 min_len_s=DEFAULT_MIN_BURST_S,
+                                 max_len_s=DEFAULT_MAX_BURST_S,
+                                 threshold_db=threshold_db)
+    cands = _rank_candidates(iq, sample_rate, pool, max_bursts)
 
     attempts: list[DecodeAttempt] = []
-    for ci, (start, end, peak) in enumerate(cands):
+    for ci, (start, end, peak, center_hz, bw_hz, shaped) in enumerate(cands):
         elapsed = time.perf_counter() - t_start
         if budget_s is not None and ci > 0 and elapsed >= budget_s:
             skipped = len(cands) - ci
@@ -494,12 +604,18 @@ def decode_all(iq: np.ndarray, sample_rate: float, *, max_bursts: int = 8,
             duration_ms=(end - start) / sample_rate * 1e3,
             peak_power_db=float(peak_db), level="none", zc_score=0.0, cfo_hz=0.0,
             integer_cfo_bins=0, crc_ok=False, result=None, error=None, snr_db=snr_db,
+            center_offset_hz=float(center_hz), occupied_bw_hz=float(bw_hz),
+            droneid_shaped=bool(shaped),
         )
+        # Offsets the front end's own CFO search can absorb are left to it (it
+        # resolves them to sub-Hz); larger ones are mixed out here.
+        mix_hz = center_hz if abs(center_hz) > max_integer_cfo_bins * ofdm.CARRIER_SPACING_HZ else 0.0
         try:
-            demod, info = _demodulate(iq[lo:hi], sample_rate, correlation_threshold,
+            slice_iq = _mix(iq[lo:hi], sample_rate, mix_hz)
+            demod, info = _demodulate(slice_iq, sample_rate, correlation_threshold,
                                       max_integer_cfo_bins, region=(start - lo, end - lo))
             attempt.zc_score = float(info["zc_score"])
-            attempt.cfo_hz = float(info["cfo_hz"])
+            attempt.cfo_hz = float(mix_hz + info["cfo_hz"])
             attempt.integer_cfo_bins = int(info["integer_cfo_bins"])
             attempt.zc6_score = float(info.get("zc6_score", 0.0))
             attempt.demod = demod

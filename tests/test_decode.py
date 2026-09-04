@@ -570,3 +570,72 @@ def test_decode_all_budget_skips_weaker_candidates():
     assert capped[0].level == "C" and capped[0].start_sample > 1_900_000
     assert capped[0].error is not None and "1 weaker candidate(s) not attempted" in capped[0].error
     assert "budget_s=1e-09 exceeded" in capped[0].error
+
+
+# ---------------------------------------------------------------------------
+# Field lesson (Mini 3, 2026-09-04): the DroneID channel sits off the window
+# centre and 20 dB below the RC hops / Wi-Fi beacons in the same window.
+# ---------------------------------------------------------------------------
+
+def _embed_offset(window: np.ndarray, burst_iq: np.ndarray, burst_fs: float,
+                  offset: int, offset_hz: float) -> None:
+    """Add a burst at `offset_hz` from the window centre, clipped by a real
+    front end (built at 40 MS/s, mixed, then decimated to 20 MS/s so the part
+    outside +/-10 MHz is filtered away rather than aliased)."""
+    up = ofdm.resample_to(burst_iq.astype(np.complex128), burst_fs, 2 * _FS_IN)
+    t = np.arange(up.size) / (2 * _FS_IN)
+    up = up * np.exp(2j * np.pi * offset_hz * t)
+    down = ofdm.resample_to(up, 2 * _FS_IN, _FS_IN).astype(np.complex64)
+    window[offset:offset + down.size] += down
+
+
+def _band_noise_burst(rng, n: int, center_hz: float, bw_hz: float, power: float) -> np.ndarray:
+    x = (rng.standard_normal(n) + 1j * rng.standard_normal(n)).astype(np.complex64)
+    f = np.fft.fftfreq(n, 1.0 / _FS_IN)
+    X = np.fft.fft(x)
+    X[np.abs(f - center_hz) > bw_hz / 2] = 0
+    x = np.fft.ifft(X)
+    return (x / np.sqrt(np.mean(np.abs(x) ** 2)) * np.sqrt(power)).astype(np.complex64)
+
+
+@pytest.mark.parametrize("offset_mhz", [-7.5, 5.0, 0.0])
+def test_decode_all_off_centre_droneid_under_stronger_ambient(offset_mhz):
+    b = make_encoded_burst(_FIELDS, snr_db=None, pad_start=_PAD, pad_end=_PAD, seed=111)
+    rng = np.random.default_rng(112)
+    w = _noise_window(_ONE_SECOND, 0.1, seed=112)                      # DroneID SNR 10 dB
+    _embed_offset(w, b.iq, b.sample_rate, 7_000_000, offset_mhz * 1e6)
+    # Wi-Fi beacon look-alikes: 18 MHz wide, 1 ms, 15 dB above the DroneID burst.
+    for off in (1_000_000, 3_050_000, 5_100_000, 12_000_000, 16_000_000):
+        w[off:off + 20_000] += _band_noise_burst(rng, 20_000, 0.0, 18e6, 10 ** 1.5)
+    # RC uplink hops: 2 MHz wide, 0.5 ms, 15 dB up, on a 2 MHz raster.
+    for i, off in enumerate(range(200_000, _ONE_SECOND - 200_000, 1_400_000)):   # ~70 ms per hop
+        fc = (-5 + (i % 6)) * 2e6 + 1e6
+        w[off:off + 10_000] += _band_noise_burst(rng, 10_000, fc, 2e6, 10 ** 1.5)
+
+    attempts = decode_all(w, _FS_IN)
+    good = [a for a in attempts if a.level == "C"]
+    assert len(good) == 1, [(a.level, a.center_offset_hz, a.occupied_bw_hz) for a in attempts]
+    a = good[0]
+    assert a.result.serial == _FIELDS["serial"]
+    assert abs(a.result.drone_lat - _FIELDS["drone_lat"]) < _COORD_TOL
+    assert a.droneid_shaped
+    assert abs(a.center_offset_hz - offset_mhz * 1e6) < 150e3
+    assert abs(a.cfo_hz - offset_mhz * 1e6) < 1e3
+    if offset_mhz == -7.5:
+        assert a.occupied_bw_hz < 8e6                     # clipped at the window edge
+    else:
+        assert 8.5e6 < a.occupied_bw_hz < 9.6e6
+    assert all(a.error is None for a in attempts)
+    # The stronger ambient bursts were examined but ranked behind the shaped one.
+    assert not any(x.droneid_shaped for x in attempts if x is not a)
+
+
+def test_burst_spectrum_shapes():
+    rng = np.random.default_rng(5)
+    wifi = _band_noise_burst(rng, 20_000, 0.0, 18e6, 1.0)
+    c, bw = droneid.burst_spectrum(wifi, _FS_IN)
+    assert bw > 16e6 and abs(c) < 0.5e6
+    rc = _band_noise_burst(rng, 10_000, 3e6, 2e6, 1.0)
+    c, bw = droneid.burst_spectrum(rc, _FS_IN)
+    assert 1.5e6 < bw < 2.8e6 and abs(c - 3e6) < 0.1e6
+    assert droneid.burst_spectrum(np.zeros(0, dtype=np.complex64), _FS_IN) == (0.0, 0.0)

@@ -1346,6 +1346,28 @@ Do not start server migrations, ANTSDR code, bladeRF code, TDOA or UI product wo
   `README.md` → "Field test". Next: the two-drone protocol in §5 (Test 0 → Test 3, ≥ 3 runs
   per drone). No server, ANTSDR, bladeRF, TDOA or UI work was started; Phase 1 runs entirely
   without the server.
+- **2026-09-04, field test 1** (laptop + HackRF Pro, stock antenna, at home; DJI Mini 3 with
+  RC-N1, DJI Avata with Goggles 2 + motion controller; Test 0/3 style runs, captured to
+  `sessions/`, not committed). Results:
+  - **First success reached in part:** find → capture → distinguish → **decode** → replay all
+    demonstrated on the Mini 3: four CRC-valid OcuSync 2 DroneID bursts at 2429.5 MHz (640 ms
+    cadence, serial + sequence 18/19/20 consistent, coordinates 0.0 = no GPS fix), replayed
+    bit-exactly from the session IQ. First found offline by a brute-force ZC scan of the known
+    DroneID centres; the live decoder then missed it because the burst sat 7.5 MHz off the
+    window centre and 20 dB under the RC hops / Wi-Fi beacons. Fixed (per-burst PSD shape
+    screening + per-burst mixing to DC); `replay` of the session now yields `dec=C` live-fast.
+  - **Not achieved:** no DroneID burst seen in any Mini 3 *flight* window (2412/2437/2455/
+    2475 MHz steps) — so no real coordinates yet; the Avata was not unambiguously captured
+    (5.8 GHz flat with the stock antenna, 2400–2412 MHz never covered).
+  - **Mis-attribution caught by the all-off reference:** the strong 18 MHz / 102.4 ms bursts
+    at 2413–2431 MHz first read as "goggles uplink" were the FRITZ!Box on Wi-Fi channel 3.
+    Absolute `score` saturates at 1.0 in this band; only the differential scan and CRC-valid
+    decodes are evidence. Stage 1/2 retune needed (fixed-channel links are not `fhss`; discount
+    beacon-period and BLE-advertising sources; the `dji_ocusync` rule needs the RC-hop and
+    video-frame signatures).
+  - **Next field session:** Mini 3 in flight with a GPS fix, lock on 2437 (covers 2429.5 and
+    2444.5) and on 2412/2455 for the other two centres; Avata with lock on 2402 plus a fresh
+    all-off reference; 5.8 GHz needs a proper antenna/LNA.
 
 ---
 
