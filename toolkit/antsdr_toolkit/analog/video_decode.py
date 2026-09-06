@@ -53,9 +53,12 @@ What this does not do
 ---------------------
 * **Colour.** Only luma is recovered.  Chroma is a quadrature subcarrier at
   3.579545 MHz (NTSC) or 4.43361875 MHz (PAL) which needs a burst-locked
-  oscillator; separating it is a further piece of work, and at the 10 MSPS an
-  E200 is comfortable with on the stock firmware the NTSC subcarrier is only
-  just inside Nyquist.  Every frame here is greyscale.
+  oscillator.  Every frame here is greyscale.
+* **Anything captured below about 13 MSPS.**  See
+  :data:`MIN_SAMPLE_RATE_HZ`: the FM deviation is wider than that, so peak
+  white folds back into the band.  The failure is quiet, because sync
+  survives and the line rate still measures right, which is why
+  :func:`decode_from_iq` warns rather than leaving it to be discovered.
 * **True interlace.** Fields are decoded independently, each giving a picture
   of half the frame height.  :func:`weave` interleaves consecutive fields into
   a full-height frame, which is correct for a genuinely interlaced source and
@@ -74,6 +77,7 @@ follows the reference decoder in ``zubon2003/5G8atv-rf-hackrf-decoder``.
 from __future__ import annotations
 
 import struct
+import warnings
 import zlib
 from collections.abc import Iterator, Sequence
 from dataclasses import dataclass
@@ -84,6 +88,7 @@ import numpy as np
 from .fpv import BLANKING_LEVEL, SYNC_LEVEL, WHITE_LEVEL, fm_demod
 
 __all__ = [
+    "MIN_SAMPLE_RATE_HZ",
     "SLICE_LEVEL",
     "STANDARDS",
     "SYNC_WIDTH_RANGE",
@@ -174,6 +179,36 @@ class DecodedField:
 #: interval's pulse shapes: for NTSC, sync is 4.7 us against equalising pulses
 #: of 2.3 us (ratio 0.49) and broad pulses of 27.1 us (ratio 5.8).
 SYNC_WIDTH_RANGE = (0.6, 2.0)
+
+#: Below this the FM cannot be discriminated without aliasing, whatever the
+#: line rate says.
+#:
+#: The demodulator scaling is 106.25 MHz per unit, so the sync tip at -0.040
+#: is -4.25 MHz of deviation and peak white at +0.060 is +6.38 MHz. Nyquist
+#: has to clear the larger of those, which needs more than 12.75 MSPS. Below
+#: that the white end of the picture folds back into the band and the decode
+#: is worthless, while the sync pulses survive well enough that the line rate
+#: still measures correctly. That combination is the dangerous one: a decoder
+#: that trusts the line rate alone reports a confident, complete, wrong
+#: picture. Measured against a synthetic test pattern, correlation with the
+#: source picture runs:
+#:
+#: ===========  =========  =========  ==========
+#: Sample rate  low noise  3x noise   6x noise
+#: ===========  =========  =========  ==========
+#: 8 MSPS       no lock    no lock    no lock
+#: 10 MSPS      -0.01      no lock    no lock
+#: 12 MSPS      -0.06      0.33       no lock
+#: 15.36 MSPS   1.00       0.90       0.
+#: 20 MSPS      1.00       0.97       0.21
+#: 30.72 MSPS   1.00       0.99       0.22
+#: ===========  =========  =========  ==========
+#:
+#: So 20 MSPS is the right capture rate, which is also what ``fpv-sdr`` uses
+#: as its own E200 default. Note that the stock IIO firmware streams only
+#: 11-13 MSPS continuously, so analog video is a snapshot capture there, or a
+#: job for the UHD personality (``ADR-0004``).
+MIN_SAMPLE_RATE_HZ = 12.75e6
 
 #: Where to slice sync from picture: halfway down the sync excursion.
 #:
@@ -443,6 +478,13 @@ def decode_from_iq(
     detection only needs the sync pulses whereas a picture needs the luma
     bandwidth.  Both are inside the +/-4.5 MHz an FPV carrier occupies.
     """
+    if float(sample_rate_hz) <= MIN_SAMPLE_RATE_HZ:
+        warnings.warn(
+            f"{float(sample_rate_hz) / 1e6:g} MSPS is at or below "
+            f"{MIN_SAMPLE_RATE_HZ / 1e6:g} MSPS, so peak white aliases and any "
+            f"picture decoded here is wrong even where the line rate measures "
+            f"correctly. Capture analog FPV at 20 MSPS.",
+            RuntimeWarning, stacklevel=2)
     demod = fm_demod(x, sample_rate_hz, lowpass_hz=lowpass_hz)
     if demod.size == 0:
         return [], None

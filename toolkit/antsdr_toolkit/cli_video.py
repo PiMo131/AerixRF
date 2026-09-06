@@ -17,11 +17,19 @@ short by many is a weak or interfered signal.
 
 Sample rate
 -----------
-20 MSPS is the right default: an FPV carrier keeps over 99 % of its energy
-within about +/-4.5 MHz, and the luma needs a good few megahertz of that.
-10 to 12 MSPS still gives a legible picture and is what the stock IIO firmware
-can stream continuously; below about 8 MSPS the picture softens badly.  The
-capture does not have to be at a special rate the way DroneID does.
+**Capture at 20 MSPS.**  This is not a preference, it is a floor with a
+little headroom: the FM deviation reaches +6.4 MHz at peak white, so anything
+at or below 12.75 MSPS aliases the white end of the picture back into the
+band.  Measured correlation against a known source picture is essentially
+perfect at 15.36 MSPS and above and near zero at 12 MSPS and below.
+
+The failure is quiet, and that is the point.  Sync pulses survive the
+aliasing, so the line rate still measures correctly and a naive decoder
+reports a complete NTSC field full of nonsense.  This command warns instead.
+
+That rate is above what the stock IIO firmware streams continuously (11 to
+13 MSPS), so analog video is a snapshot capture on that personality, or a job
+for the UHD firmware.  See ADR-0004.
 """
 
 from __future__ import annotations

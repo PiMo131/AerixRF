@@ -267,3 +267,51 @@ def test_slice_level_sits_between_blanking_and_the_sync_tip():
         fpv.BLANKING_LEVEL - vd.SLICE_LEVEL)
     # And further from black than the detector's own threshold is.
     assert (fpv.BLANKING_LEVEL - vd.SLICE_LEVEL) > (fpv.BLANKING_LEVEL - fpv.SYNC_THRESHOLD)
+
+
+# --------------------------------------------------------------- sample rate
+
+
+def test_a_rate_too_low_for_the_deviation_warns():
+    """The quiet failure: sync survives aliasing, so the picture lies.
+
+    Below MIN_SAMPLE_RATE_HZ peak white folds back into the band, but the sync
+    pulses are still periodic, so the line rate measures correctly and a
+    decoder that trusts it alone returns a confident, complete, wrong field.
+    """
+    source = vs.test_pattern(480, 320)
+    low = 10e6
+    iq = vs.video_from_image(source, low, standard="ntsc", n_fields=2)
+    with pytest.warns(RuntimeWarning, match="aliases"):
+        fields, name = vd.decode_from_iq(iq, low, width=320)
+    # It still "works", which is exactly why the warning has to exist.
+    assert name == "ntsc" and fields
+    frame = next(vd.weave(fields), None)
+    if frame is not None and frame.shape == source.shape:
+        assert abs(_correlation(frame, source)) < 0.5
+
+
+def test_no_warning_at_a_usable_rate():
+    import warnings as _warnings
+    iq = vs.video_from_image(vs.test_pattern(480, 320), 20e6, standard="ntsc", n_fields=2)
+    with _warnings.catch_warnings():
+        _warnings.simplefilter("error", RuntimeWarning)
+        fields, name = vd.decode_from_iq(iq, 20e6, width=320)
+    assert name == "ntsc" and len(fields) == 2
+
+
+def test_the_minimum_rate_matches_the_deviation_it_is_derived_from():
+    """The constant is arithmetic, not a guess, so check the arithmetic."""
+    from antsdr_toolkit.analog import fpv
+    peak_deviation = max(abs(fpv.SYNC_LEVEL), abs(fpv.WHITE_LEVEL)) * fpv.QUAD_DEMOD_DIVISOR_HZ
+    assert vd.MIN_SAMPLE_RATE_HZ == pytest.approx(2 * peak_deviation, rel=1e-6)
+
+
+@pytest.mark.parametrize("rate", [15.36e6, 20e6, 30.72e6])
+def test_every_rate_above_the_floor_decodes_the_picture(rate):
+    source = vs.test_pattern(480, 320)
+    iq = vs.video_from_image(source, rate, standard="ntsc", n_fields=2,
+                             rng=np.random.default_rng(5))
+    fields, name = vd.decode_from_iq(iq, rate, width=320)
+    assert name == "ntsc" and len(fields) == 2
+    assert _correlation(next(vd.weave(fields)), source) > 0.99
