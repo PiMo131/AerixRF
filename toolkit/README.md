@@ -12,6 +12,7 @@ Ethernet). Passive receive only.
 | `antsdr_toolkit.scan` | Band plans, dwell planner, sweeper, and the provisional RF detection event schema |
 | `antsdr_toolkit.classify` | The signature table (26 link families with their sources) and the heuristic scorer |
 | `antsdr_toolkit.droneid` | DJI DroneID: constants, Zadoff-Chu pilots, coding, a burst synthesiser and a receiver that decodes |
+| `antsdr_toolkit.analog` | Analog 5.8 GHz FPV: the channel plan, the width and envelope gates, and a line-rate lock that names the video standard |
 | `antsdr_toolkit.bridges` | Parser and transports for the E200 DroneID firmware's own output |
 
 ### Commands

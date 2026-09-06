@@ -71,8 +71,11 @@ information may not be passed to third parties and that recording or saving is n
 The same search surfaced community disagreement about the decoding half. This page is undated and
 possibly obsolete; it is quoted here only because its "no recording, no sharing" claim, if it did
 reflect current law, would collide head-on with an observation network that stores and republishes
-detections. It does not collide with storing Remote ID, which is a broadcast the law itself requires
-to be receivable by anyone (section 3).
+detections. It does not collide with storing Remote ID, which the research characterises as a
+legally mandated one-way public broadcast that any third party may receive
+([EASA Remote ID primer](https://www.elsight.com/blog/primer-on-easa-remote-id-regulations/),
+snippet, cited only as a research key finding), and which is therefore the legally safest data class
+for AERIX (section 3).
 
 ### 1.3 What could not be established
 
@@ -105,7 +108,7 @@ risk ordering to drive the toolkit's defaults.
 | DJI legacy Wi-Fi DroneID IE (OUI `26:37:12`) | Same field set inside 802.11 beacons ([Kismet dot11_ie_221_dji_droneid.h](https://github.com/kismetwireless/kismet/blob/master/dot11_parsers/dot11_ie_221_dji_droneid.h)) | Broadcast in a management frame | No | As above |
 | RC and video link **metadata** (centre frequency, bandwidth, hop timing, RSSI, burst shape) | Physical-layer observables, no payload | Not applicable | Not applicable, no content is recovered | Lowest-risk non-RID class: nothing "transmitted data" is recorded, only measurements of the channel |
 | Analog FPV video | Unencrypted wideband FM composite video, demodulable to a picture *(verified: verdict 5)*, see [landscape.md](landscape.md) section 4.1 | No, it is a point-to-point link | No | Content of somebody else's link. Received by radio, so arguably exempt, but this is where "systematic recording with more than one apparatus" bites hardest |
-| RC link payload (for example decoded ELRS channels) | Content of a control link | No | Not by default; ELRS CRC seeding is obfuscation, not encryption ([ExpressLRS OTA.h](https://github.com/ExpressLRS/ExpressLRS)) | As above |
+| RC link payload (for example decoded ELRS channels) | Content of a control link | No | Not encrypted; the CRC seed, the FLRC sync word and the IQ inversion are all derived from the binding UID ([ExpressLRS OTA.h and SX1280.cpp](https://github.com/ExpressLRS/ExpressLRS)) | As above |
 | Digital video payload (OcuSync, WPA2 Wi-Fi links) | Content, encrypted | No | Yes | Out of scope: recovering it needs key material, and intercepting encryption keys is named as a "special effort" ([Ius Mentis](https://www.iusmentis.com/beveiliging/hacken/computercriminaliteit/aftappengegevens/)) |
 | DJI O4 encrypted DroneID | Encrypted proprietary broadcast *(verified: verdict 4)* | Broadcast | Yes | Detect-only. Decryption, including via a paid third-party service, is a different legal question and is declined by default ([ADR-0006](../docs/decisions/ADR-0006-dji-three-tiers.md), Q6) |
 | Raw IQ recordings | Everything above, undifferentiated, replayable | Mixed | Mixed | Highest risk, because a recording preserves content the toolkit never decoded. proto17 declines to publish his DroneID recordings precisely because they "likely contain GPS information" ([proto17/dji_droneid](https://github.com/proto17/dji_droneid)) |
@@ -266,7 +269,13 @@ mandatory, O = optional, R = recommended, blank = not addressed):
 | Transmission interval (Basic ID, Location, System) | 1 s | | 1 s or 3 s | 1 s |
 | Transmission time | take-off to shutdown | | when airborne | when airborne |
 
-Two footnotes from that table matter to a receiver design. Location is always at 1 s intervals; and
+Two qualifications carried by the README's own footnotes: the operational/emergency status is not
+required for add-on modules, and under the EU rule an add-on may broadcast the take-off location
+instead of the operator's dynamic position (under the FAA rule the take-off location is required
+instead) ([opendroneid-core-c](https://github.com/opendroneid/opendroneid-core-c)). So an add-on
+equipped legacy drone yields a static operator position, not a moving one.
+
+Two further footnotes matter to a receiver design. Location is always at 1 s intervals; and
 if any channel other than 2.4 GHz channel 6 or 5 GHz channel 149 is used, the transmission rate must
 rise to 5 Hz ([opendroneid-core-c](https://github.com/opendroneid/opendroneid-core-c)). That is why
 channel 6 and channel 149 are the two channels a scanner must cover first.
@@ -325,12 +334,12 @@ to broadcast nothing in Europe *(verified: verdict 7)*.
 
 | Model | Reported EU / general behaviour | Source, confidence |
 |---|---|---|
-| Mavic 3 | Broadcasts; appeared in the OpenDroneID app from firmware 01.00.0800 regardless of FCC/CE region; a firmware trick to disable it circulates | [MavicPilots 132574](https://mavicpilots.com/threads/bad-news-to-everyone-rid-was-already-active-in-01-00-0800-firmware-and-the-drone-appears-in-opendroneid-app.132574/), [MavicPilots 148094](https://mavicpilots.com/threads/how-to-disable-remote_id-on-dh-mavic-3-works.148094/), snippet |
+| Mavic 3 | Broadcasts; appeared in the OpenDroneID app from firmware 01.00.0800 regardless of FCC/CE region; a firmware trick to disable it circulates | [MavicPilots 132574](https://mavicpilots.com/threads/bad-news-to-everyone-rid-was-already-active-in-01-00-0800-firmware-and-the-drone-appears-in-opendroneid-app.132574/page-5), [MavicPilots 148094](https://mavicpilots.com/threads/how-to-disable-remote_id-on-dh-mavic-3-works.148094/), snippet |
 | Mavic 3 Enterprise | Beacon (Wi-Fi) confirmed in a receiver log | [receiver-android 99](https://github.com/opendroneid/receiver-android/issues/99), verified |
 | Mini 3 (C0) | "Remote ID on Mini 3 is turned OFF in Europe. It was ON with early firmwares, but DJI disconnected this" | [MavicPilots 151947](https://mavicpilots.com/threads/does-the-dji-mini-3-pro-have-remoteid-in-the-eu-that-broadcasts-the-location-and-altitude.151947/), snippet |
 | Mini 3 Pro | Broadcasts only after firmware update; one user received EASA-format RID over Wi-Fi NAN which appears disabled in later firmware | [MavicPilots 151947](https://mavicpilots.com/threads/does-the-dji-mini-3-pro-have-remoteid-in-the-eu-that-broadcasts-the-location-and-altitude.151947/), [forum.dji.com 279235](https://forum.dji.com/thread-279235-1-1.html), snippet |
 | Air 2S | Gained RID by firmware, and a C1 label later | [receiver-android 93](https://github.com/opendroneid/receiver-android/issues/93) verified, [DroneDJ](https://dronedj.com/2024/04/18/dji-air-2s-c1-label/) snippet |
-| Mini 4 Pro | Can be upgraded to C1 with a pilot-ID menu in DJI Fly; in the US it broadcasts only with the heavier (over 249 g) battery | [MavicPilots 151947](https://mavicpilots.com/threads/does-the-dji-mini-3-pro-have-remoteid-in-the-eu-that-broadcasts-the-location-and-altitude.151947/), [dronexl](https://dronexl.co/2024/02/09/remote-id-update-dji-mini-4-pro/), snippet |
+| Mini 4 Pro | Reported upgradeable to C1 with a pilot-ID menu in DJI Fly; in the US it broadcasts only with the heavier (over 249 g) battery. The verification pass instead groups the Mini 4 Pro with the C0-exempt models *(verified: verdict 7)*, so these reports conflict | [MavicPilots 151947](https://mavicpilots.com/threads/does-the-dji-mini-3-pro-have-remoteid-in-the-eu-that-broadcasts-the-location-and-altitude.151947/), [dronexl](https://dronexl.co/2024/02/09/remote-id-update-dji-mini-4-pro/), snippet |
 | Mini 5 Pro | Reported to broadcast RID | [MavicPilots 155240](https://mavicpilots.com/threads/question-about-rid-on-my-mini-5-pro.155240/), snippet |
 | Neo, Flip (C0 class) | No evidence of RID in the EU; assumed silent by extension from the C0 exemption | inference recorded in *(verified: verdict 7)* |
 
@@ -355,7 +364,7 @@ and the AERIX observation contract must not merge them
 
 | Lens | Content | Receiver | Legal/observation note |
 |---|---|---|---|
-| Standard RID (Wi-Fi Beacon) | Serial or session ID, positions, operator ID and operator position | Monitor-mode Wi-Fi NIC (section 5) | Mandated broadcast, present only for C1 and above |
+| Standard RID (Wi-Fi Beacon) | Serial or session ID, positions, operator ID and operator position | Monitor-mode Wi-Fi NIC (section 6) | Mandated broadcast, present only for C1 and above |
 | DJI DroneID in the clear (O2/O3) | Serial, model, drone/pilot/home GPS, altitude, speed, RSSI | E200 with MicroPhase's DroneID firmware, or open decoders for OcuSync 2 *(verified: verdict 4)* | Proprietary, unauthenticated, contains the pilot's position |
 | DJI DroneID encrypted (O4 and later: Air 3, Mini 4 Pro, Avata 2, Neo, Flip, Mini 5 Pro, Mavic 4 Pro, Avata 360) | A per-session hash, frequency and RSSI only | E200 firmware, detection tier | Never label it an identity; the hash is a transient track key *(verified: verdict 4)* |
 
@@ -391,11 +400,15 @@ published 26 July 2022 and accepted by the FAA through a Notification of Availab
 the operator Remote ID requirement began 16 March 2024 after a grace period, and drones upgraded by
 firmware must carry the label `ASTM F3411-22a-RID-B`
 ([DJI FAQ on FAA Remote ID compliance](https://support.dji.com/help/content?customId=en-us03400007747&spaceId=34&re=US&lang=en),
-snippet). Because both the EU and the US sit on the same F3411 v1.1 wire format (protocol version 2),
-**one decoder covers FAA- and EU-configured aircraft**; only the mandated field set differs
-(section 3.3). The FAA also allows a rotating Session ID instead of a serial number, which the EU
-rule does not use ([opendroneid-core-c](https://github.com/opendroneid/opendroneid-core-c)); a
-receiver must therefore treat the Basic ID type as significant rather than assuming a serial.
+snippet). Because ASD-STAN prEN 4709-002 was written against the ASTM F3411 v1.1 draft and the
+delta between protocol versions 1 and 2 is only three enum values plus a System-message timestamp
+([opendroneid-core-c](https://github.com/opendroneid/opendroneid-core-c)), **one decoder covers
+FAA- and EU-configured aircraft**; what differs is the mandated field set (section 3.3). The FAA
+allows a rotating Session ID instead of a serial number, and add-ons are not allowed to use it,
+while the EU column of the comparison table is blank for Session ID (blank meaning the document
+says nothing specific about it)
+([opendroneid-core-c](https://github.com/opendroneid/opendroneid-core-c)); a receiver must
+therefore treat the Basic ID type as significant rather than assuming a serial.
 
 ### 5.2 Japan
 
@@ -433,9 +446,10 @@ three from one pcap stream. Two cautions: the two open GB 46750 implementations 
 timestamp encoding (6-byte Unix milliseconds against 4-byte seconds since 2019-01-01), so the
 standard text is needed before shipping a decoder ([XC-RemoteID](https://github.com/luolitao/XC-RemoteID)),
 and whether any China-market DJI aircraft actually emits these frames in Europe is unknown. The
-5.8 GHz Wi-Fi option is interesting for the E200 specifically, because none of the open receivers
-found listens there ([CSDN parsing guide](https://blog.csdn.net/qq_41126242/article/details/143920008),
-snippet). A known-good Chinese test emitter is available as an ESP32 build
+5.8 GHz Wi-Fi option is a blind spot in every open receiver surveyed, which listens on 2.4 GHz
+channel 6 only ([CSDN parsing guide](https://blog.csdn.net/qq_41126242/article/details/143920008),
+snippet; [esp32-crid](https://github.com/luolitao/esp32-crid) defaults to channel 6 at 1 Hz).
+A known-good Chinese test emitter is available as an ESP32 build
 ([esp32-crid-sim](https://github.com/luolitao/esp32-crid-sim), MIT) or as a commercial "C-RID"
 module ([bilibili tutorial](https://www.bilibili.com/video/BV1RRtEzvEZS/), snippet), usable into a
 cable only, per section 2.
@@ -470,12 +484,12 @@ The required table. "E200" means the ANTSDR E200 in some firmware personality; s
 
 | Transport | Where it is mandated | E200 capability | Best receiver for AERIX | Why |
 |---|---|---|---|---|
-| **Wi-Fi Beacon 2.4 GHz (ch 6)** | Mandatory-one-of under ASD-STAN DRI, ASTM MoC and GB 42590 ([opendroneid-core-c](https://github.com/opendroneid/opendroneid-core-c)) | Poor. openwifi supports `antsdr_e200` but is OFDM-only and cannot demodulate 802.11b DSSS/CCK, which is what reference RID transmitters use for beacons *(verified: verdict 6)* | **Commodity monitor-mode Wi-Fi NIC** (for example the rtl8812au tested by [unix_rid_capture](https://github.com/sxjack/unix_rid_capture)) | An openwifi E200 will most likely miss mainstream 2.4 GHz Beacon RID; a EUR 15-class USB NIC does not |
+| **Wi-Fi Beacon 2.4 GHz (ch 6)** | Mandatory-one-of under ASD-STAN DRI, ASTM MoC and GB 42590 ([opendroneid-core-c](https://github.com/opendroneid/opendroneid-core-c)) | Poor. openwifi supports `antsdr_e200` but is OFDM-only and cannot demodulate 802.11b DSSS/CCK, which is what reference RID transmitters use for beacons *(verified: verdict 6)* | **Commodity monitor-mode Wi-Fi NIC** (for example the rtl8812au tested by [unix_rid_capture](https://github.com/sxjack/unix_rid_capture)) | An openwifi E200 will most likely miss mainstream 2.4 GHz Beacon RID; an ordinary USB NIC that speaks 802.11b does not |
 | **Wi-Fi Beacon 5 GHz (ch 149)** | Same | Possible in principle: 5 GHz beacons are OFDM at 6 Mbps or above *(verified: verdict 6)* | Same commodity NIC (dual-band) | The NIC covers both channels and hops; openwifi watches only one 20 MHz channel at a time *(verified: verdict 6)* |
 | **Wi-Fi NAN 2.4 / 5 GHz** | Mandatory-one-of under ASD-STAN DRI ([opendroneid-core-c](https://github.com/opendroneid/opendroneid-core-c)) | Unverified. NAN service discovery rides Action frames (subtype 13) ([luolitao/remoteid](https://github.com/luolitao/remoteid)); whether openwifi passes them in monitor mode and at what PHY rate was not tested *(verified: verdict 6)* | Commodity NIC with NAN-capable capture, or a phone for spot checks | Android NAN reception is documented as working only on some devices ([receiver-android](https://github.com/opendroneid/receiver-android)) |
 | **Bluetooth 4 legacy advertising** | Optional under DRI, mandatory (with BT5) under the ASTM MoC ([opendroneid-core-c](https://github.com/opendroneid/opendroneid-core-c)) | Marginal. [ice9-bluetooth-sniffer](https://github.com/mikeryan/ice9-bluetooth-sniffer) channelises 4-60 MHz into 2 MHz channels and links against libuhd, so it might run through MicroPhase's `antsdr_uhd` fork, untested; [BTLE](https://github.com/JiaoXianjun/BTLE) is HackRF/bladeRF and 1M PHY only | **CC2652P dongle running [Sniffle](https://github.com/nccgroup/Sniffle)**, or a bluez HCI adapter ([unix_rid_capture](https://github.com/sxjack/unix_rid_capture)) | Cheap, reliable, captures all three primary advertising channels with one sniffer |
 | **Bluetooth 5 Long Range (Coded PHY, extended advertising)** | Mandatory-one-of under DRI, and the transport add-on modules such as Dronetag use ([Dronavia](https://www.dronavia.com/2024/04/04/drone-remote-identification-european-union/), [Dronetag](https://help.dronetag.com/drone-scanner/)) | **None.** No surveyed open SDR tool decodes Coded PHY: ice9 documents BR and BLE 1M only, BTLE is 1M only | **[Sniffle](https://github.com/nccgroup/Sniffle) on TI CC26x2R / CC2652RB / CC1352 / SONOFF CC2652P / Catsniffer**, or an nRF52840 dongle with sniffer firmware | Sniffle supports "all BT5 PHY modes (regular 1M, 2M, and coded modes)", follows extended-advertising auxiliary pointers (`-e`) and exports PCAP; the OpenDroneID project recommends it and validated BT5 capture with the nRF52840 ([wireshark-dissector](https://github.com/opendroneid/wireshark-dissector)) |
-| **GB 46750-2025 broadcast (BLE 5.0+ extended advertising or Wi-Fi 2.4/5.8 GHz)** | China, effective 2026-05-01 ([libopendroneidcn](https://github.com/opendroneid/opendroneid-core-c)) | Wi-Fi side only, and only at 5.8 GHz would the E200 add anything the NIC lacks | Same NIC plus Sniffle pair, with a `0xFF`-first parser ([esp32-crid](https://github.com/luolitao/esp32-crid), [luolitao/remoteid](https://github.com/luolitao/remoteid)) | Same radios, different parser; the marginal case for the E200 is the 5725-5829 MHz Wi-Fi option no open receiver covers |
+| **GB 46750-2025 broadcast (BLE 5.0+ extended advertising or Wi-Fi 2.4/5.8 GHz)** | China, effective 2026-05-01 ([libopendroneidcn](https://github.com/opendroneid/opendroneid-core-c)) | Wi-Fi side only, and nothing the commodity radios cannot also hear | Same NIC plus Sniffle pair, with a `0xFF`-first parser ([esp32-crid](https://github.com/luolitao/esp32-crid), [luolitao/remoteid](https://github.com/luolitao/remoteid)) | Same radios, different parser. Note that the surveyed open receivers only listen on 2.4 GHz channel 6, so the 5.8 GHz option has to be covered deliberately ([CSDN parsing guide](https://blog.csdn.net/qq_41126242/article/details/143920008), snippet) |
 | **GB 42590-2023 broadcast (Wi-Fi IE 221 or Bluetooth)** | China, effective 2024-06-01 | As above | As above | Shares the ASTM OUI, so it costs only a header check ([luolitao/remoteid](https://github.com/luolitao/remoteid)) |
 | **French e-ID beacon (OUI `6A:5C:35`)** | France national regime ([Dronavia](https://www.dronavia.com/2024/04/04/drone-remote-identification-european-union/)) | Same as Wi-Fi Beacon | Commodity NIC | Parser addition only ([opendroneid-core-c wifi.c](https://github.com/opendroneid/opendroneid-core-c)) |
 | **DJI legacy Wi-Fi DroneID IE (OUI `26:37:12`)** | Not mandated; DJI Wi-Fi-link aircraft (Spark, Mavic Air, Tello class) | Same as Wi-Fi Beacon | Commodity NIC with [Kismet](https://github.com/kismetwireless/kismet) or the [DeFliTeam](https://github.com/DeFliTeam/DroneDetection) approach | It is an 802.11 beacon IE, so an SDR adds nothing |
@@ -572,9 +586,9 @@ never merging DroneID hashes with RID serials
 2. **Remote ID is the safe data class; treat it as personal data anyway**, because the EU rule
    mandates operator registration ID and operator position
    ([opendroneid-core-c](https://github.com/opendroneid/opendroneid-core-c)).
-3. **Metadata by default, raw IQ on explicit opt-in.** A recording preserves content nothing
-   decoded, and the reference project in this field withholds its own recordings for exactly that
-   reason ([proto17/dji_droneid](https://github.com/proto17/dji_droneid),
+3. **Metadata by default, raw IQ on explicit opt-in.** A recording preserves content that the
+   pipeline never decoded, and the reference project in this field withholds its own recordings for
+   exactly that reason ([proto17/dji_droneid](https://github.com/proto17/dji_droneid),
    [ADR-0002](../docs/decisions/ADR-0002-sigmf-recordings.md)).
 4. **A legal review is a gate before multi-node recording of anything beyond Remote ID**, because of
    the "systematic, more than one apparatus" reading
