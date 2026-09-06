@@ -251,3 +251,63 @@ overrides; and the band hint matches the dwell centre.
 ### Question raised
 
 None.
+
+---
+
+## Additional findings, not from the hypothesis list
+
+The fleet and host-platform audit that ran alongside this one produced two
+defects in the same code, and they are recorded here because they came out of
+the same discipline even though the plan did not predict them.
+
+### The detector could not see any of the maintainer's aircraft
+
+`find_bursts` gates on a matched filter for Zadoff-Chu root 600, which is the
+OcuSync 2 pilot. OcuSync 3 is reported to use a different pair, and an
+OcuSync 4 variant to vary its roots frame to frame (proto17 issue 65). Every
+airframe in the maintainer's fleet is O3 or O4, so the gate was plausibly
+blind to all of them, and it fails in the worst possible way: no detection is
+indistinguishable from no drone.
+
+`find_bursts_cp` gates on structure instead. Every OFDM symbol repeats its own
+tail one FFT length earlier, so correlating the two peaks wherever this
+numerology is present whatever the symbols carry. The roots become generation
+*labels*, and the measured root is recorded per burst, which turns every
+future capture of a real aircraft into a data point on roots nobody has
+published.
+
+Three bugs surfaced while building it, all found by measuring:
+
+1. **A fixed stride where the schedule is not uniform.** The back-search
+   stepped 1104 samples per symbol, but the prefixes run 80, then seven of 72,
+   then 80. That accumulates 8 samples per symbol and lands 2192 samples out,
+   which is exactly the gap between the two pilots, so the second was read as
+   the first and the root came back 147 instead of 600. It looked like a
+   successful decode.
+2. **A sign error in the prefix frequency estimator.** `numpy.vdot` conjugates
+   its *first* argument, so the recovered offset is positive. The error is
+   invisible whenever the true offset is near a multiple of the 15 kHz
+   subcarrier spacing, which is where a test written to be convenient would
+   look; it only appeared because 5 and 9 kHz behaved differently from 30 and
+   120.
+3. **A root claimed on a coin toss.** Different roots cross-correlate at about
+   `1 / sqrt(601)` = 0.04, so a real match wins twentyfold. Two scores within a
+   thousandth of each other mean neither matched, and the honest answer is
+   none.
+
+### The product-type table stops at "Mini SE"
+
+`PRODUCT_TYPES` ends at 70. Every DJI airframe released since carries a higher
+number, so a successful decode of a recent aircraft rendered `unknown (73)`,
+which reads like a failed decode when in fact everything except the model name
+resolved. That includes the Mini 3 Pro, which the closed E200 firmware
+explicitly claims to decode in full.
+
+The audit proposed adding 73, 75, 77, 82, 83, 86, 87, 88 and 90. **They were
+not added, and a test asserts they are still absent.** No primary source
+reachable from this project confirms any of them: neither reference decoder
+ships a lookup table, Kismet's parser reads `product_type` and never maps it,
+and the numbers in circulation trace to forum posts. A wrong model name on a
+detection is a confident false identification, which is worse than a missing
+one. `product_name()` describes the gap instead, distinguishing a number above
+the table's ceiling from one inside it.
