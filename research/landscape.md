@@ -736,7 +736,9 @@ with balanced accuracy 0.9284 +/- 0.0034 read from the repository README
 The often-quoted ">= 85% balanced accuracy above -12 dB", and the companion ">80% in field tests",
 come from the [arXiv 2406.18624](https://arxiv.org/abs/2406.18624) **abstract as a web snippet**;
 arXiv was egress-blocked for the whole sweep, so neither was reproduced from the released code or
-from the per-SNR CSVs, and the two split figures above are the load-bearing numbers. Its class list is the problem: one DJI Phantom
+from the per-SNR CSVs, and the two split figures above are the load-bearing numbers.
+
+Its class list is the problem: one DJI Phantom
 4 Pro / GL300F link plus five hobby transmitters (Futaba T7C, Futaba T14SG, Graupner mx-16, FrSky
 Taranis ACCST, Turnigy 9X) and Noise, with **no** OcuSync 2/3/4, no ELRS, no Crossfire and no 5.8 GHz
 video ([deep read](https://github.com/sgluege/Robust-Drone-Detection-and-Classification)).

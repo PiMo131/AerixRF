@@ -21,6 +21,7 @@ report, and is worth re-checking before you rely on it.
 | `antsdr_toolkit.classify` | The signature table (26 link families with their sources) and the heuristic scorer |
 | `antsdr_toolkit.droneid` | DJI DroneID: constants, Zadoff-Chu pilots, coding, a burst synthesiser and a receiver that decodes |
 | `antsdr_toolkit.analog` | Analog 5.8 GHz FPV: the channel plan, the width and envelope gates, a line-rate lock that names the video standard, and a decoder that turns the carrier into pictures |
+| `antsdr_toolkit.fleet` | What each DJI airframe actually yields: link generation, EU class label, and every route to its identity, with the confidence of each claim |
 | `antsdr_toolkit.remoteid` | Standard Remote ID (ASTM F3411 / EN 4709): message and message-pack decoding, and the 802.11 Beacon vendor element it rides in |
 | `antsdr_toolkit.bridges` | Parser and transports for the E200 DroneID firmware's own output |
 

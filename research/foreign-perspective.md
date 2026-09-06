@@ -680,7 +680,9 @@ single band list found in any language for video transmitters actually sold into
 | **DJI O3 40 MHz (50 Mbps)** | **5677, 5794, 5902 MHz** |
 | Walksnail race / 25 / 50 Mbps, HDZero FCC and CE rows | listed alongside |
 
-(The DJI O3 and HDZero rows were re-read directly from the cloned HTML to confirm them.) Per-model
+(The DJI O3 and HDZero rows come from the lens's own verified key fact for this mirror; nothing in
+the evidence records an independent re-read of the cloned HTML, so treat them as read once.)
+Per-model
 JSON channel and power tables in the same mirror give Foxeer Reaper Infinity 4.9-6.0 GHz 10 W with
 64-80 channels, RushFPV 3.3 GHz 16 channels over 3.17-3.47 GHz at 2 W, iFlight BLITZ 3.3 GHz 5
 channels over 3.25-3.37 GHz, and AKK Alpha 5 W 5.3-5.9 GHz 64 channels.
