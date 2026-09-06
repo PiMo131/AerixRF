@@ -36,10 +36,24 @@ duration* is one transmission; *repetition / hop rate* is the interval between c
 transmissions; *dwell* is how long the emitter stays on one frequency; *duty cycle* is burst
 duration divided by repetition interval on the occupied channel.
 
-**Platform constraint that shapes every "observable?" judgement below**: the AD9361 gives up to
-56 MHz of analog bandwidth but the 1 GbE host link caps sustained single-channel sc16 streaming at
-the vendor's stated 20 MSPS *(verified: verdict 2, host streaming tiers,
-[vendor table](https://github.com/MicroPhase/antsdr_doc_en))*. Anything wider than about 20 MHz is
+**Platform constraint that shapes every "observable?" judgement below**: the AD9361 variant of the
+front end gives up to 56 MHz of analog bandwidth (which part is fitted is unconfirmed; the public
+schematic draws U11 as an AD9363, 325 MHz to 3.8 GHz and 20 MHz, so every 5.8 GHz and >20 MHz row
+below is conditional on the AD9361 being present, see
+[hardware-e200.md](hardware-e200.md) section 1.1), but the 1 GbE host link is the binding
+constraint, and it is **three tiers, not one number** *(verified: verdict 2,
+`host-streaming-tiers`)*:
+
+| Tier | Sustained single-channel sc16 | Nature |
+|---|---|---|
+| Stock IIO / PlutoSDR personality | 11-13 MSPS measured, budget **<= 10 MSPS** continuous | community measurement on a Zynq-7000/ANTSDR ([libiio #875](https://github.com/analogdevicesinc/libiio/discussions/875)) |
+| UHD personality | **20 MSPS** vendor figure; **29.6 MSPS** hard wire ceiling from the 1500-byte MTU | selection-table entry with no test data, plus arithmetic on the packet geometry ([vendor table](https://github.com/MicroPhase/antsdr_doc_en)) |
+| Snapshot, either personality | up to **61.44 MSPS** into DDR, then a slow transfer (25-40 % duty cycle) | the DMA lands in DDR first |
+
+The "observable?" column below assumes the **UHD tier**, i.e. 20 MSPS continuous with a 29.6 MSPS
+ceiling, because that is the personality intended for host streaming. On the stock IIO personality
+subtract half: anything above about 10 MSPS is a snapshot there, which moves DroneID's 15.36 MSPS
+and every 20 MHz video mode out of the continuous class. Anything wider than about 20 MHz is
 observed partially, or through a snapshot capture at up to 61.44 MSPS, or after decimation in the
 Zynq PL.
 
@@ -54,7 +68,7 @@ not standard Remote ID (section 6) and not the airlink itself (section 2).
 |---|---|---|---|---|---|---|---|---|---|---|
 | DroneID, OcuSync 2 (Mini 2, Mavic Air 2) | 2399.5 / 2414.5 / 2429.5 / 2444.5 / 2459.5 MHz and 5756.5 / 5776.5 / 5796.5 MHz (proto17); wider live list in section 1.1 | ~9 MHz (600 data carriers x 15 kHz), "10 MHz" nominal, 15.36 MHz including guards | 9880 samples = 643.2 us at 15.36 MSPS (9 OFDM symbols) | ~600 ms | 12-20 bursts per channel before hopping | QPSK on 600 carriers, 15 kHz spacing, no pilots; CP schedule long, short x7, long = [80,72x7,80] at 15.36 MSPS | ~0.11 % (derived, 643 us / 600 ms) | Zadoff-Chu pilots at symbols 4 and 6, roots 600 and 147 | **decodable** | [proto17/dji_droneid](https://github.com/proto17/dji_droneid), [DroneSecurity helpers.py](https://github.com/RUB-SysSec/DroneSecurity), [Bender arXiv 2207.10795](https://arxiv.org/abs/2207.10795) (dwell, snippet) |
 | DroneID, legacy 8-symbol (Mavic Pro, Mavic 2) | as above | ~9 MHz | 8784 samples = 571.9 us at 15.36 MSPS (8 symbols, first omitted) | ~600 ms | as above | as above, CP [80,72x6,80], ZC at symbols 3 and 5 | ~0.10 % (derived) | one symbol short; DroneSecurity gates it at 565-600 us | detect-only in open code (Mavic 2 Pro decode fails) | [DroneSecurity helpers.py](https://github.com/RUB-SysSec/DroneSecurity), [DroneSecurity #49](https://github.com/RUB-SysSec/DroneSecurity/issues/49) |
-| DroneID, OcuSync 3 (Mavic 3 family, Air 2S, Mini 3 Pro) | 2.4 and 5.8 GHz, same raster | ~9-10 MHz | 10 OFDM symbols, four ZC symbols, no long CP, 7200 bits | not established | not established | QPSK + 4 ZC; Mavic 3 analysis found roots 600 and 385, each twice, with 6 data symbols | not established | four ZC symbols instead of two | **detect-only** in open code; decoded only by the closed E200 firmware | [proto17 #58](https://github.com/proto17/dji_droneid/issues/58), [proto17 Mavic 3 wiki](https://github.com/proto17/dji_droneid/wiki/DJI-Mavic-3-DroneID-Analysis), [DroneSecurity #46](https://github.com/RUB-SysSec/DroneSecurity/issues/46) *(verified: verdict 4, DJI generation coverage)* |
+| DroneID, OcuSync 3 (Mavic 3 family, Air 2S, Mini 3 Pro) | 2.4 and 5.8 GHz, same raster | ~9-10 MHz | 10 OFDM symbols, four ZC symbols, no long CP, 7200 bits | not established | not established | QPSK + 4 ZC; Mavic 3 analysis found roots 600 and 385, each twice, with 6 data symbols | not established | four ZC symbols instead of two | **detect-only** in open code; decoded only by the closed E200 firmware | [proto17 #58](https://github.com/proto17/dji_droneid/issues/58), [proto17 Mavic 3 wiki](https://github.com/proto17/dji_droneid/wiki/DJI-Mavic-3-DroneID-Analysis), [DroneSecurity #46](https://github.com/RUB-SysSec/DroneSecurity/issues/46) *(verified: verdict 4, `dji-generation-coverage`)* |
 | DroneID, OcuSync 4 (Air 3, Mini 4 Pro, Avata 2, Neo, Air 3S, Flip, Mavic 4 Pro, Mini 5 Pro) | 2.4 and 5.8 GHz; E200 firmware auto mode watches 2434.5 / 5756.5 / 5776.5 / 5816.5 MHz (**unverified round-1**, `o4-firmware-channels`) | ~9 MHz; 99 % bandwidth measured 8.921-8.926 MHz on a Mini 5 Pro | ~500 us burst with 4 ZC sequences (Air 3S) | 5 ms periodicity measured on Mini 5 Pro (**unverified round-1**, `ocusync-phy`) | not established | QPSK demodulates cleanly; payload encrypted (SM2 for key packets, AES-128-CTR for telemetry on Mini 5 Pro) | not established | burst present, constellation clean, payload opaque; only a per-session hash, frequency and RSSI are recoverable offline | **encrypted** | [proto17 #50](https://github.com/proto17/dji_droneid/issues/50), [DroneSecurity #50](https://github.com/RUB-SysSec/DroneSecurity/issues/50), [luyii-code-1/dji-ocusync-droneid-research](https://github.com/luyii-code-1/dji-ocusync-droneid-research) *(verified: verdict 4)* |
 | DroneID, OcuSync 4+ (Avata 360) | 5.8 GHz | ~9 MHz | 10 symbols: QPSK x3, ZC x2, ZC x2, QPSK x3 | not established | not established | ZC root indices change from frame to frame | not established | root-agnostic ZC detection is required; fixed 600/147 templates fail | **encrypted** | [proto17 #65](https://github.com/proto17/dji_droneid/issues/65) |
 | DroneID, LightBridge / OcuSync 1 (Phantom 4 Pro V2) | 2.4 GHz | not established | 14-symbol signal with two sync symbols | not established | not established | not established | not established | "this burst does not exist in LightBridge technology": a different signal that only the closed E200 firmware decodes | detect-only in open code | [proto17 #50](https://github.com/proto17/dji_droneid/issues/50), [DroneSecurity #43](https://github.com/RUB-SysSec/DroneSecurity/issues/43) |
@@ -150,7 +164,7 @@ verified tables `ExpressLRS_AirRateConfig` and `ExpressLRS_AirRateRFperf`.
 | FLRC F500 | as above | 0.6 MHz | 389 us | 2000 us | 4 ms | as above | 19.5 % | lowest duty cycle of the FLRC set | detect-only | common.cpp |
 | FLRC D500 (DVDA x2) | as above | 0.6 MHz | 389 us | 1000 us | 2 ms | as above, each packet sent twice | 38.9 % | duplicate packets back to back | detect-only | common.cpp |
 | FLRC D250 (DVDA x4) | as above | 0.6 MHz | 389 us | 1000 us | 2 ms | as above, sent four times | 38.9 % | four identical packets per control frame | detect-only | common.cpp |
-| LoRa 500 Hz | as above | 812.5 kHz (BW code 0x18, "800") | 1507 us | 2000 us | 8 ms (hop every 4) | SF5, CR_LI 4/6, preamble 12, implicit header, no LoRa CRC, IQ inverted when UID[5] is odd | 75.4 % | SF5 chirps at 812.5 kHz | **detect-only** *(verified: verdict 3, ELRS decodability)* | common.cpp |
+| LoRa 500 Hz | as above | 812.5 kHz (BW code 0x18, "800") | 1507 us | 2000 us | 8 ms (hop every 4) | SF5, CR_LI 4/6, preamble 12, implicit header, no LoRa CRC, IQ inverted when UID[5] is odd | 75.4 % | SF5 chirps at 812.5 kHz | **detect-only** *(verified: verdict 3, `elrs-decodability`)* | common.cpp |
 | LoRa 333 Hz Full | as above | 812.5 kHz | 2374 us | 3003 us | 12.0 ms | SF5, CR_LI 4/8, 13-byte OTA8 payload | 79.1 % | 3003 us interval is unique | detect-only | common.cpp |
 | LoRa 250 Hz | as above | 812.5 kHz | 3300 us | 4000 us | 16 ms | SF6, CR_LI 4/8, preamble 14 | 82.5 % | preamble 14 instead of 12 | detect-only | common.cpp |
 | LoRa 150 Hz | as above | 812.5 kHz | 5871 us | 6666 us | 26.7 ms | SF7, CR_LI 4/8 | 88.1 % | 6666 us interval collides with Crossfire 150 Hz and Futaba S-FHSS timing; modulation must break the tie | detect-only | common.cpp |
@@ -186,7 +200,7 @@ flies: `SyncPktIntervalDisconnected` is 3-11 ms on 2.4 GHz rates (0 for the 2.4 
 carry `fhssIndex`, `nonce`, `rfRateEnum`, `tlmRatio`, UID4 and UID5 in clear text
 ([OTA.h](https://github.com/ExpressLRS/ExpressLRS/blob/master/src/lib/OTA/OTA.h)), and the NCC Group
 advisory confirms that these leak most of the binding UID
-([NCC Group 2022](https://research.nccgroup.com/2022/06/30/technical-advisory-expresslrs-vulnerabilities-allow-for-hijack-of-control-link/), snippet).
+([NCC Group 2022](https://www.nccgroup.com/research/technical-advisory-expresslrs-vulnerabilities-allow-for-hijack-of-control-link/), snippet).
 There is no encryption anywhere in `src/src` or `src/lib/OTA` *(verified: verdict 3)*.
 
 ### 4.2 ExpressLRS regulatory domains (exact frequency plans)
@@ -259,7 +273,7 @@ table.
 ### 5.1 Analog FPV
 
 The occupied-bandwidth question was contested and went through the verification pass. The corrected
-position *(verified: verdict 5, analog FPV bandwidth)*:
+position *(verified: verdict 5, `analog-fpv-bandwidth`)*:
 
 * Analog 5.8 GHz FPV is wideband FM of a 1 Vpp composite video signal (NTSC 4.2 MHz, PAL about
   5-5.5 MHz including chroma), plus, on RTC6705-class VTX, two FM audio subcarriers at 6.0 and
@@ -373,7 +387,8 @@ windows per tune rather than watching them all
 | OcuSync video occupied bandwidth | "a single video transmission module occupies 8 MHz" (CSDN) versus 10/20 MHz (DJI SDK) versus ~18 MHz measured OBW in the 20 MHz mode (tmbinc) | Use 10/20 MHz nominal and ~18 MHz occupied. The 8 MHz figure has no supporting measurement and should not be used | [CSDN OcuSync explainer](https://blog.csdn.net/weixin_29216049/article/details/158087603) (snippet), [DJI SDK](https://developer.dji.com/iframe/mobile-sdk-doc/android/reference/dji/common/airlink/OcuSyncBandwidth.html), [tmbinc](https://github.com/tmbinc/random/tree/master/dji/ocusync2) |
 | DroneID modulation class | "DroneID uses 5-10 MHz frequency hopping spread spectrum" (ETR 2025) | Wrong characterisation. DroneID is an OFDM burst that appears on a small set of rotating centre frequencies; the width figure agrees with proto17, the "FHSS" label does not | [ETR 2025](https://journals.ru.lv/index.php/ETR/article/download/8486/6933/10816) (snippet), [proto17](https://github.com/proto17/dji_droneid) |
 | Mini 4 Pro airlink generation | "Mini 4 Pro uses Lightbridge" (ETR 2025) | Wrong. The Mini 4 Pro ships OcuSync 4; it appears in the O4 model tables of the E200 firmware | [ETR 2025](https://journals.ru.lv/index.php/ETR/article/download/8486/6933/10816) (snippet), [alphafox02/antsdr_dji_droneid](https://github.com/alphafox02/antsdr_dji_droneid) |
-| "DJI drones only broadcast DroneID when motors are spinning" | asserted in one README | *(verified: verdict 4)*: **refuted for OcuSync-2-era firmware** (proto17 records DroneID from a powered-on Mini 2 with no controller; DroneSecurity's mini2_sm capture predates GPS lock) and **unverified for O4**. The protocol carries separate `motor_on` and `in_air` flags, so log them and measure per model | [alphafox02 README](https://github.com/alphafox02/antsdr_dji_droneid), [proto17 MATLAB wiki](https://github.com/proto17/dji_droneid/wiki/Using-the-MATLAB-Code), [DroneSecurity](https://github.com/RUB-SysSec/DroneSecurity) |
+| "DJI drones only broadcast DroneID when motors are spinning" | asserted in one README | *(verified: verdict 4, `dji-generation-coverage`)*: **refuted for OcuSync-2-era firmware** (proto17 records DroneID from a powered-on Mini 2 with no controller; DroneSecurity's mini2_sm capture predates GPS lock) and **unverified for O4**. The payload carries separate `motor_on` (bit 12) and `in_air` (bit 13) flags in `state_info`, named from source comments and marked unverified in the deep read, so log them and measure per model | [alphafox02 README](https://github.com/alphafox02/antsdr_dji_droneid), [proto17 MATLAB wiki](https://github.com/proto17/dji_droneid/wiki/Using-the-MATLAB-Code), [DroneSecurity `droneid_packet.py`](https://github.com/RUB-SysSec/DroneSecurity) |
+| Same claim, **inside the verification record itself** | verdict 4 refutes it for O2-era firmware; verdict 7 (`dji-eu-rid`) restates it as fact ("only while motors are spinning, not at power-on") | **unresolved between two verdicts.** Verdict 4 carries the primary-source reasoning and is the version used in this document; verdict 7 asserts the behaviour without citing a source for it, and also groups O3+/O3 Pro with the encrypted generations, which verdict 4 identifies as a generation mix-up. Measure per model rather than trusting either | [verdicts.json via verification-log.md](verification-log.md) |
 | HDZero baseband silicon | "AD9361-based HDZero video link" (Chinese explainer) | **contested**. The open HDZero firmware shows DM5680 baseband with DM6300 (VTX) and DM6302 (goggle RX) and contains no AD9361 reference | [kechuang.org](https://www.kechuang.org/t/89181) (snippet) versus [hdzero-vtx](https://github.com/hd-zero/hdzero-vtx) (verified) |
 | HDZero R1 centre frequency | 5658 MHz (firmware) versus 5668 MHz (Russian channel table) | Use 5658 MHz; the firmware constant `FREQ_R1` is authoritative | [hdzero-vtx common.h](https://github.com/hd-zero/hdzero-vtx), [techuav VTX table](https://github.com/techuav/techuav.github.io) |
 | ELRS sub-GHz "decodable" | claimed decodable given CRC/UID handling | *(verified: verdict 3)*: **decodable-candidate**, not demonstrated. gr-lora_sdr supports the parameters but no public project has decoded a real ELRS radio end to end; the only GNU Radio ELRS project validates only its own loopback with non-ELRS LoRa parameters | [gr-lora_sdr](https://github.com/tapparelj/gr-lora_sdr), [GNU_Radio_ExpressLRS](https://github.com/Diamond-D0gs/GNU_Radio_ExpressLRS) |
@@ -483,8 +498,8 @@ same source flags this explicitly and its Wi-Fi rejection stage was never traine
 
 | Window | Reported performance | Source |
 |---|---|---|
-| 2.5 ms | 72.7 % (ResNet-18 on DroneRFa STFT) | [DroneRFa](https://jeit.ac.cn/cn/article/doi/10.11999/JEIT230570) |
-| 10 ms | 97.73 % on the same benchmark; 0.769 for a PSD+SVM on DroneDetect | [DroneRFa](https://jeit.ac.cn/cn/article/doi/10.11999/JEIT230570), [RFClassification](https://github.com/IQTLabs/RFClassification) |
+| 2.56 ms (256 k samples at 100 MS/s, **derived**; the source states the window in samples, not time) | 72.7 % (ResNet-18 on DroneRFa STFT) | [DroneRFa](https://jeit.ac.cn/cn/article/doi/10.11999/JEIT230570) |
+| 10 ms (1 M samples at 100 MS/s) | 97.73 % on the same benchmark; 0.769 for a PSD+SVM on DroneDetect | [DroneRFa](https://jeit.ac.cn/cn/article/doi/10.11999/JEIT230570), [RFClassification](https://github.com/IQTLabs/RFClassification) |
 | 20 ms | 0.836 (PSD+SVM, DroneDetect) | [RFClassification](https://github.com/IQTLabs/RFClassification) |
 | 50 ms | 0.894 (PSD+SVM, DroneDetect) | same |
 | 65-100 ms | working buffer sizes in fielded systems: 2.62 M samples (~65 ms at 40 MSPS), 1.05 M samples (~75 ms at 14 MHz), 0.1 s stated as the period over which drone behaviour is fully visible | [RF-Vision-UAV-Tracker](https://github.com/ALPssdz/RF-Vision-UAV-Tracker), [Noisy Drone RF v2](https://github.com/sgluege/Noisy-Drone-RF-Signal-Classification-v2), [DroneRFa](https://jeit.ac.cn/cn/article/doi/10.11999/JEIT230570) |

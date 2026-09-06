@@ -53,7 +53,9 @@ Decisions that came out of this are in [../docs/decisions/](../docs/decisions/);
 8. **Use a time-frequency front end, and distrust published accuracies.** VGG11 scored 0.842 balanced accuracy on a complex STFT against 0.413 on raw IQ at -12 dB SNR (Glüge et al., NCTA
    2023), the gap closing to zero at 0 dB and above; grouped evaluation collapses DroneRF type identification from macro-F1 0.742 to 0.455, which is chance *(verified: verdict 8,
    `rf-ml-inputs-and-leakage`; [Noisy-Drone-RF](https://github.com/sgluege/Noisy-Drone-RF-Signal-Classification), [spectrahawk](https://github.com/shulm/spectrahawk))*. Domain shift bites
-   harder than SNR: statistical features fall from 100 % to 42.3 % on an unseen individual airframe while ConvNeXt keeps 92.0 % ([rfml-moe-hub](https://github.com/r4d10n/rfml-moe-hub)).
+   harder than SNR: on an unseen individual airframe (DroneRFb-DIR, train units 1 and 2, test unit 3) statistical features score 42.3 % against ConvNeXt-Base's 92.0 %
+   ([rfml-moe-hub](https://github.com/r4d10n/rfml-moe-hub)). The same feature family scores 95.7 % on RFUAV and 100 % on the 800-sample RTL-ML set, which is a different dataset and a
+   different task ([rfml-moe-hub](https://github.com/r4d10n/rfml-moe-hub)).
    See [datasets.md](datasets.md).
 9. **The foreign-language material contributes data and bands, not code.** The Chinese value is datasets, per-model hop tables and Remote ID tooling: DroneRFa was recorded with a USRP-2955
    at 100 MS/s ([JEIT 10.11999/JEIT230570](https://jeit.ac.cn/cn/article/doi/10.11999/JEIT230570)), GB 42590-2023 has been in force since 2024-06-01 and GB 46750-2025 takes effect
@@ -74,7 +76,8 @@ Decisions that came out of this are in [../docs/decisions/](../docs/decisions/);
 (counted from `finders_all.json`), 296 unique after deduplication: English 208, Chinese 50, Russian 24, Ukrainian 8, Dutch 6 ([sources.md](sources.md)).
 
 **Seven deep code reads.** These were cloned and read file by file rather than summarised, because the toolkit will either reuse or re-implement them:
-`RUB-SysSec/DroneSecurity` (AGPL-3.0) with `proto17/dji_droneid` (MIT); `MicroPhase/antsdr_doc_en`, `antsdr_uhd` and `antsdr-fw-patch` (GPL-3.0);
+`RUB-SysSec/DroneSecurity` (AGPL-3.0) with `proto17/dji_droneid` (MIT); `MicroPhase/antsdr_doc_en` and `antsdr_uhd` (GPL-3.0), `antsdr-fw-patch` (no LICENSE file; patches over a GPL-2 kernel
+and u-boot, ADI HDL and Buildroot);
 `sandialabs/gr-fhss_utils` (GPL-3.0-or-later); `lukeswitz/fpv-sdr` (conflicting MIT and GPL-3.0 notices in one tree);
 `sgluege/Robust-Drone-Detection-and-Classification` (GPL-3.0); `jonkraft/Pluto_Beamformer` (no LICENSE file, ADI BSD headers);
 `ALPssdz/RF-Vision-UAV-Tracker` (MIT, with AGPL and proprietary dependencies). Licence detail per repo is in [sources.md](sources.md) and drives
@@ -88,9 +91,10 @@ and date against the evidence JSON and flag unsourced facts, overreach, snippet-
 
 **Sandbox constraints.** The research ran in a sandbox that could reach only `github.com` and `pypi.org` over HTTP. Everything else was available as
 search-engine snippets only: arXiv, IEEE, MDPI, CSDN, Zhihu, bilibili, habr, cyberleninka, SciDB, Zenodo, Kaggle, Hugging Face, IEEE DataPort, fccid.io,
-crowdsupply.com, ez.analog.com, wiki.analog.com and the Dutch legal sites. The whole session shared a 200-search budget which ran out during the fourth lens,
-so `github-video-links`, `github-df-tdoa`, `academic-en-detection` and `academic-en-datasets` logged 11-14 queries against 45-51 for the first four and rest
-almost entirely on GitHub-hosted material; GitHub search itself rate-limited (HTTP 429) in two lenses. A session limit then killed the first run of the
+crowdsupply.com, ez.analog.com, wiki.analog.com and the Dutch legal sites. The whole session shared a 200-search budget which ran out at the start of the fifth
+lens, so `github-video-links`, `github-df-tdoa`, `academic-en-detection` and `academic-en-datasets` logged 11-14 queries against 45-51 for the first four and rest almost entirely on
+GitHub-hosted material; GitHub search itself rate-limited (HTTP 429) in two lenses. Both figures are recorded in the lenses' own `gaps_or_open_questions` entries in `finders_all.json`
+("200/200 used by the session"; "GitHub search pages returned HTTP 429" in `github-video-links` and `academic-en-detection`). A session limit then killed the first run of the
 remaining five lenses (`web-zh-community`, `academic-zh`, `web-ru-community`, `regulatory-rid`, `signal-reference-tables`); they were re-run in a second round
 with 22-26 queries each.
 
@@ -109,7 +113,8 @@ The verification pass was budgeted for ten claims and completed eight. The two t
 unverified round-1 findings and carry that label wherever they are used:
 
 * `o4-firmware-channels` - the E200 O4 DroneID firmware in auto mode hopping only 2434.5, 5756.5, 5776.5 and 5816.5 MHz, running 1R1T at a 61.44 MSPS path
-  clock, the legacy firmware using an FPGA correlator at `/dev/my-axi-droneid-filter0`. Used in [hardware-e200.md](hardware-e200.md) and [landscape.md](landscape.md).
+  clock, the legacy firmware using an FPGA correlator at `/dev/my-axi-droneid-filter0`. Used in [hardware-e200.md](hardware-e200.md), [landscape.md](landscape.md) and
+  [signal-reference.md](signal-reference.md).
 * `ocusync-phy` - OcuSync 2 as 15 kHz subcarriers with FFT 2048/1024, CP 144/72 and ~1 ms frames; O3/O4 at roughly 30 kHz spacing with ~9 MHz 99 % bandwidth and 5 ms periodicity on the
   Mini 5 Pro; cyclic-prefix autocorrelation separating OcuSync from Wi-Fi's 312.5 kHz. Used in [landscape.md](landscape.md) and [signal-reference.md](signal-reference.md).
 
@@ -132,8 +137,10 @@ The limits of the record as a whole; each document carries its own longer list.
 
 * **No E200 measurements exist anywhere.** Sustained MSPS on stock v0.39 IIO firmware, whether sc8/sc12 over-the-wire works on its FPGA, RX1/RX2 phase coherence and drift, close-in
   phase noise (one unresolved user complaint of worse-than-Pluto at 1 GHz), and whether the case exposes the RX2 u.FL without opening it: all bench work.
-* **OcuSync 3 and O4.** No open decoder finishes O3; O4 encryption has no published algorithm or key handling and the only route to its payload is a paid
-  closed service; the E200 O4 firmware's channel set and its per-session hash are unverified (`o4-firmware-channels`).
+* **OcuSync 3 and O4.** No open decoder finishes O3; O4 encryption has no published key or key-derivation detail and the only route to its payload is a paid
+  closed service (one verified repository names the primitives as SM2 for the key-material packets and AES-128-CTR for the telemetry packets, validated on a Mini 5 Pro only,
+  [luyii-code-1/dji-ocusync-droneid-research](https://github.com/luyii-code-1/dji-ocusync-droneid-research)); the E200 O4 firmware's channel set and its per-session hash are unverified
+  (`o4-firmware-channels`).
 * **The closed links have no published waveform parameters.** Autel SkyLink, Skydio Connect SL, Walksnail Avatar, Herelink framing, HDZero's PHY and DJI
   O3/O4 video bandwidths beyond one Mini 5 Pro measurement sit behind blocked FCC test reports or are unpublished.
 * **Remote ID reception details.** Which band and channel DJI beacons on (2.4 GHz ch 6 vs 5 GHz ch 149) is not established, the PHY rate of commercial RID

@@ -53,8 +53,8 @@ this record the same way.
 | 6 | `openwifi-personality` | openwifi supports the E200 and can be the Remote ID sniffer | partly | [regulatory.md](regulatory.md), RID receiver choice |
 | 7 | `dji-eu-rid` | DJI standard RID is Wi-Fi Beacon only; DroneID continues alongside | partly | [regulatory.md](regulatory.md), [landscape.md](landscape.md) |
 | 8 | `rf-ml-inputs-and-leakage` | Spectrograms beat raw IQ at low SNR; depth does not matter; benchmarks leak | partly | [datasets.md](datasets.md), ML protocol |
-| 9 | `o4-firmware-channels` | E200 O4 firmware auto mode watches four channels, 1R1T, 61.44 MSPS | **not run** | [hardware-e200.md](hardware-e200.md), [landscape.md](landscape.md) |
-| 10 | `ocusync-phy` | OcuSync 2 = 15 kHz/FFT 2048/CP 144; O3/O4 ~30 kHz; CP autocorrelation vs Wi-Fi | **not run** | [signal-reference.md](signal-reference.md), detector design |
+| 9 | `o4-firmware-channels` | E200 O4 firmware auto mode watches four channels, 1R1T, 61.44 MSPS | **not run** | [hardware-e200.md](hardware-e200.md), [landscape.md](landscape.md), [signal-reference.md](signal-reference.md) |
+| 10 | `ocusync-phy` | OcuSync 2 = 15 kHz/FFT 2048/CP 144; O3/O4 ~30 kHz; CP autocorrelation vs Wi-Fi | **not run** | [signal-reference.md](signal-reference.md), [landscape.md](landscape.md), detector design |
 
 ---
 
@@ -77,11 +77,17 @@ enabling the second channel on the Pluto-compatible firmware requires the `fw_se
 [Chinese original](https://github.com/MicroPhase/antsdr_doc_en/blob/master/source_cn/device_and_usage_manual/ANTSDR_E_Series_Module/ANTSDR_E200_Reference_Manual/AntsdrE200_RF_parameters_cn.md)),
 and the board photo shows exactly two SMA jacks, RX1 and TX1, on the RF edge
 ([e200.png](https://github.com/MicroPhase/antsdr_doc_en/blob/master/source/device_and_usage_manual/ANTSDR_E_Series_Module/ANTSDR_E200_Reference_Manual/ANTSDR_E200_Reference_Manual.assets/e200.png)).
-The second pair, RX2/TX2, is on u.FL/IPEX pads on the PCB. The pair is not unreachable: the
-Crowd Supply campaign states the kit ships with a Hirose U.FL-to-SMA bulkhead pigtail of
-less than 2 dB loss to 6 GHz
-([crowdsupply.com](https://www.crowdsupply.com/microphase-technology/antsdr-e200), snippet
-only), so RX2 can be brought out with a pigtail.
+The second pair, RX2/TX2, is on u.FL/IPEX pads on the PCB. The pair is not unreachable, but
+**whether a pigtail is supplied is contradicted inside the evidence**. The Crowd Supply
+campaign states the kit ships with a Hirose U.FL-to-SMA bulkhead pigtail of less than 2 dB
+loss to 6 GHz ([crowdsupply.com](https://www.crowdsupply.com/microphase-technology/antsdr-e200),
+**snippet only**), while MicroPhase's own unboxing page (**verified**) lists the standard kit
+as "SDR x1, USB cable x1, rubber-duck antennas x2, card reader x1, Ethernet cable x1, 32 GB SD
+card x1" with no pigtail, and the lens that read it records that "a second antenna requires an
+IPEX(U.FL)-to-SMA pigtail that is not in the shipped kit"
+([AntsdrE200_Unpacking_examination_cn.md](https://github.com/MicroPhase/antsdr_doc_en/blob/master/source_cn/device_and_usage_manual/ANTSDR_E_Series_Module/ANTSDR_E200_Reference_Manual/AntsdrE200_Unpacking_examination_cn.md)).
+The verified vendor source outranks the snippet, so treat the pigtail as something to buy
+until the unit in hand is opened. Either way RX2 can be brought out with a pigtail.
 
 *No antenna switching (verified).* There is no TX/RX antenna switching on the E200 at all.
 The UHD FPGA top drives only `tx_amp_en1`; the whole B200 front-end GPIO vector with its
@@ -159,8 +165,10 @@ single-channel under UHD; the current driver is B210-compatible with two chains
 **Design consequence.**
 
 1. Document the E200 as "2RX coherent, 1 SMA + 1 u.FL". Hardware setup must include fitting
-   the supplied U.FL-to-SMA bulkhead pigtail for RX2, define a fixed channel map RX1 = SMA
-   jack / RX2 = pigtail, and ignore the UHD `antenna` parameter because it does nothing.
+   a U.FL-to-SMA bulkhead pigtail for RX2 (supplied per the Crowd Supply snippet, absent from
+   the vendor's own box list, so verify on the unit and budget for buying one), define a fixed
+   channel map RX1 = SMA jack / RX2 = pigtail, and ignore the UHD `antenna` parameter because
+   it does nothing.
 2. Provide a firmware-mode matrix with explicit commands: UHD image as the toolkit default
    (two RX chains natively, no env change); Pluto/libiio image (ships 1R1T as `adi,ad9364`,
    so the toolkit must run or verify the `fw_setenv` sequence and check that `iio_info` shows
@@ -348,7 +356,7 @@ hardware generation (LR1121/LR2021), silent on UID-driven IQ inversion and on th
 2.4 GHz modes, overstates "decodable" into plausible-but-undemonstrated, and understates how
 little UID knowledge is actually needed. An NCC Group advisory confirms that sync packets
 leak most of the FHSS seed
-([NCC Group, 2022](https://research.nccgroup.com/2022/06/30/technical-advisory-expresslrs-vulnerabilities-allow-for-hijack-of-control-link/)).
+([NCC Group, 2022](https://www.nccgroup.com/research/technical-advisory-expresslrs-vulnerabilities-allow-for-hijack-of-control-link/)).
 
 **Design consequence.**
 
@@ -1003,6 +1011,9 @@ disagreed. These are the disagreements that mattered, and what happened to each.
 | C10 | Origin of the -12 dB IQ/STFT numbers | Survey attribution vs the actual paper | **Resolved** |
 | C11 | DJI C0 Remote ID in the EU | "no RID in Europe" vs "Mini 4 Pro includes RID" | **Open** |
 | C12 | GB 46750-2025 timestamp field | 6-byte Unix ms vs 4-byte seconds since 2019 | **Open** |
+| C13 | Whether a U.FL-to-SMA pigtail ships with the E200 | Crowd Supply (snippet) says yes vs MicroPhase's unboxing page (verified) lists a box without one | **Open, leaning against the snippet** |
+| C14 | `build_sdimg_drone_net.zip` versus `build_sdimg_drone_o4.zip` | Round-1 finder maps `_net` to the legacy `done_dji_release`; the deep read maps `_net` to the new `drone_dji_rid_decode` | **Open** |
+| C15 | DroneID only with motors spinning, **between two verdicts** | Verdict 4 refutes it for O2-era firmware; verdict 7 restates it as fact | **Open; verdict 4 carries the sourcing** |
 
 **C1 - E200 RF channel count.** The Crowd Supply campaign describes "2x2 MIMO with two SMA
 antenna connectors and two U.FL connectors"
@@ -1149,6 +1160,40 @@ broadcast Remote ID format disagree on the timestamp field: six-byte Unix millis
 four-byte seconds since 2019-01-01. Neither GB text is openly hosted. **Left open**; it only
 matters if Chinese-market firmware turns up in NL, which is itself unverified.
 
+**C13 - Does a pigtail ship?** The Crowd Supply campaign states the kit includes a Hirose
+U.FL-to-SMA bulkhead pigtail rated under 2 dB loss to 6 GHz
+([crowdsupply.com](https://www.crowdsupply.com/microphase-technology/antsdr-e200), snippet;
+`crowdsupply.com` was egress-blocked, so the page itself was never read). MicroPhase's own
+unboxing page was read: the standard kit is "SDR x1, USB cable x1, rubber-duck antennas x2,
+card reader x1, Ethernet cable x1, 32 GB SD card x1", and the lens that read it concluded that
+a second antenna "requires an IPEX(U.FL)-to-SMA pigtail that is not in the shipped kit"
+([AntsdrE200_Unpacking_examination_cn.md](https://github.com/MicroPhase/antsdr_doc_en/blob/master/source_cn/device_and_usage_manual/ANTSDR_E_Series_Module/ANTSDR_E200_Reference_Manual/AntsdrE200_Unpacking_examination_cn.md),
+verified). A verified vendor page outranks a snippet, and the two may also describe different
+SKUs (a Crowd Supply bundle versus the Chinese standard kit). **Consequence:** the "RX2 is
+usable out of the box" position in verdict 1 rests on the weaker source. Budget for buying a
+U.FL-to-SMA bulkhead pigtail, and settle it by opening the box.
+
+**C14 - Which DroneID zip holds which binary.** The round-1 reading of
+[alphafox02/antsdr_dji_droneid](https://github.com/alphafox02/antsdr_dji_droneid) records
+`build_sdimg_drone_net.zip` (files dated 2024-03-06) as the **legacy**
+`/usr/sbin/done_dji_release` and `build_sdimg_drone_o4.zip` (2026-01-14) as the **new**
+`/sbin/drone_dji_rid_decode`; the deep read of the same repository records the reverse mapping
+for `_net`. The two agree completely on what each **binary** does and disagree only on the
+filename attached to it. **Consequence:** flashing from a table rather than from the unpacked
+ramdisk can boot the wrong personality. Extract the archive and look for the binary name before
+committing an SD card ([hardware-e200.md](hardware-e200.md) section 3).
+
+**C15 - Two verdicts disagree with each other on the motors-spinning claim.** Verdict 4
+(`dji-generation-coverage`) refutes it for OcuSync-2-era firmware and cites three
+counter-sources; verdict 7 (`dji-eu-rid`) restates it as settled fact in its corrected claim
+("only while motors are spinning, not at power-on") without citing a source for that clause.
+Verdict 7 also groups O3+/O3 Pro with the encrypted generations, which verdict 4 explicitly
+calls a generation mix-up, so verdict 7's DJI-generation statements should be read as the
+weaker of the two. **Consequence:** the record is not internally consistent here. Use verdict
+4's position, label it contested wherever it appears, and measure the start condition per model
+(row C7 above records the same claim against external sources; this row records the internal
+disagreement).
+
 ---
 
 ## Facts that rest on snippets only
@@ -1163,9 +1208,9 @@ recorded.
 
 | Fact resting on a snippet | Why it matters | Download to confirm |
 |---|---|---|
-| The E200 kit ships a Hirose U.FL-to-SMA bulkhead pigtail with under 2 dB loss to 6 GHz | The entire "RX2 is usable" position in verdict 1, and therefore all two-channel DF planning | [crowdsupply.com/microphase-technology/antsdr-e200](https://www.crowdsupply.com/microphase-technology/antsdr-e200); also the [Taobao listing](https://item.taobao.com/item.htm?id=691394502321) for accessory SKUs |
+| The E200 kit ships a Hirose U.FL-to-SMA bulkhead pigtail with under 2 dB loss to 6 GHz. **Directly contradicted by a verified source**: MicroPhase's own unboxing page lists the box contents (SDR, USB cable, 2 rubber-duck antennas, card reader, Ethernet cable, 32 GB SD card) with no pigtail, and the lens that read it states the pigtail "is not in the shipped kit". See contradiction C13 | The entire "RX2 is usable" position in verdict 1, and therefore all two-channel DF planning | [crowdsupply.com/microphase-technology/antsdr-e200](https://www.crowdsupply.com/microphase-technology/antsdr-e200) versus the verified [AntsdrE200_Unpacking_examination_cn.md](https://github.com/MicroPhase/antsdr_doc_en/blob/master/source_cn/device_and_usage_manual/ANTSDR_E_Series_Module/ANTSDR_E200_Reference_Manual/AntsdrE200_Unpacking_examination_cn.md); also the [Taobao listing](https://item.taobao.com/item.htm?id=691394502321) for accessory SKUs |
 | ADI's statement that RX1/RX2 relative phase holds while LO and sample rate are untouched, and can change on any rewrite of either | The DF calibration policy (per-state calibration tables, AGC off) rests on this one thread | [EngineerZone 601154](https://ez.analog.com/rf/wide-band-rf-transceivers/design-support/f/q-a/601154/adalm-pluto-revc-phase-between-rx1-rx2-is-not-stable) and [EngineerZone 554210](https://ez.analog.com/rf/wide-band-rf-transceivers/design-support/f/q-a/554210/ad9361-2r2t-operation-for-digital-phase-correction-of-rx-and-tx-pll-s) |
-| ADI's DoA whitepaper: phase relationship changes when LO, sample rate or gain change, and during quadrature tracking | The only source that names **gain** as a phase-disturbing event; verdict 1 otherwise has to assert it from first principles | [doa_whitepaper.pdf](https://wiki.analog.com/_media/resources/tools-software/linux-software/doa_whitepaper.pdf) |
+| ADI's DoA whitepaper: phase relationship changes when LO, sample rate or gain change, and during quadrature tracking | The only source that names **gain** as a phase-disturbing event; verdict 1 otherwise has to assert it from first principles. Note the scope: the quoted sentence is about **multiple transceivers** ("When using the internal LOs multiple transceivers will have a random phase relationship..."), i.e. the inter-chip case, so applying it to RX1/RX2 on one AD9361 is an extrapolation, and verdict 1 says the gain effect on the intra-chip pair "is not confirmed by any source" | [doa_whitepaper.pdf](https://wiki.analog.com/_media/resources/tools-software/linux-software/doa_whitepaper.pdf) |
 | ESP32 and hostapd Remote ID beacons go out at 1 Mbps DSSS | Decides whether an openwifi E200 can see mainstream 2.4 GHz Beacon RID at all. Verdict 6 calls this an inference from defaults, not a measurement | No download will settle it: capture a real RID beacon with a COTS card and read the radiotap rate field |
 | Which Wi-Fi band and channel DJI uses for standard RID beacons (2.4 GHz ch 6 vs 5 GHz ch 149) | Sets the Wi-Fi sniffer's channel plan; unverified in verdict 7, so both must be scanned | No reachable DJI source; measure with a C1 DJI aircraft |
 | DJI began encrypting DroneID from January 2024 on Mavic 3 Series, Mini 4 Pro and Avata with current firmware, and sells an AeroScope EA500 dongle that decrypts it | Would move specific models across the Tier A / Tier B boundary of verdict 4 | [aerial-defence.com](https://www.aerial-defence.com/the-process-of-encrypting-dji-droneid-has-commenced/) |
@@ -1220,9 +1265,14 @@ the actual hardware.
    strings-in-a-binary findings.
 10. The DroneID hop sequence and dwell schedule are not documented anywhere open
     (contradiction C8).
-11. O4/O3-Pro DroneID encryption is entirely opaque: no public information on algorithm or key
-    handling, and the per-session hash's derivation is unconfirmed. The one source claiming
-    O1-O4 CRC-correct decode is a blocked Chinese blog series.
+11. O4 DroneID encryption is partly published but unusable. The algorithms are named: one
+    verified repository reports **SM2** for the "AA" key-material packets and **AES-128-CTR**
+    for the "87" telemetry packets, validated on a DJI Mini 5 Pro only
+    ([luyii-code-1/dji-ocusync-droneid-research](https://github.com/luyii-code-1/dji-ocusync-droneid-research)).
+    What is missing is key material and any key-derivation detail, and the per-session hash's
+    derivation is unconfirmed. (Note also that grouping "O3 Pro" with O4 here follows verdict
+    7's wording; verdict 4 places O3+/O3 Pro on the unencrypted side, see C15.) The one source
+    claiming O1-O4 CRC-correct decode is a blocked Chinese blog series.
 12. Open-source OcuSync 3 decoding remains unproven; the closed E200 firmware claims it, and the
     O3 burst variant would have to be reverse-engineered from E200 captures.
 13. The licence of `alphafox02/antsdr_dji_droneid` is ambiguous (no root LICENSE, one MIT header)

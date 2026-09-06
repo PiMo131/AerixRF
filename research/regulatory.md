@@ -54,7 +54,7 @@ Two readings were found, and they do not agree on scope.
 | Source | Reading of "bijzondere inspanning" | Confidence |
 |---|---|---|
 | [ITenRecht ECLI document](https://www.itenrecht.nl/documents/ecli/56e8eb1b-5a94-40f9-9451-3e83c35ff8c2.pdf) | Ether signals are in principle free and receiving or recording them is in principle permitted, but not once a special effort is made, "which is the case if the tapping or recording occurs systematically and the receiving device consists of more than one apparatus" | snippet only; domain blocked, so the case facts, court level and which signals were at issue are **unknown** |
-| [Ius Mentis, Aftappen van gegevens](https://www.iusmentis.com/beveiliging/hacken/computercriminaliteit/aftappengegevens/) | Data received by radio is exempt unless special effort or an unauthorised receiver is used; intercepting encryption keys and spoofing a MAC address are given as examples of special effort | snippet only; the same page cites ECLI:NL:RBROT:2016:5814 (TorRAT) and ECLI:NL:RBROT:2011:BU6142 as 139c case law, neither drone-specific |
+| [Ius Mentis, Aftappen van gegevens](https://www.iusmentis.com/beveiliging/hacken/computercriminaliteit/aftappengegevens/) | Data received by radio is exempt unless special effort or an unauthorised receiver is used; intercepting encryption keys and spoofing a MAC address are given as examples of special effort | snippet only; the same search surfaced ECLI:NL:RBROT:2016:5814 (TorRAT) and ECLI:NL:RBROT:2011:BU6142 as 139c case law, neither drone-specific. Whether the Ius Mentis page itself cites them is **unverified**: the page was never fetched |
 
 The ITenRecht reading is the uncomfortable one for AERIX, because "systematic" plus "more than one
 apparatus" is a literal description of a multi-node observation network with an SDR and a Wi-Fi
@@ -135,7 +135,7 @@ Worth stating explicitly, because it is easy to think of RF detection as anonymo
   ([RUB-SysSec/DroneSecurity](https://github.com/RUB-SysSec/DroneSecurity)).
 * GB 46750-2025 makes the operator/GCS position mandatory and requires both a 20-character serial
   and the 8-character real-name registration ID
-  ([libopendroneidcn README](https://github.com/opendroneid/opendroneid-core-c)).
+  ([libopendroneidcn README](https://github.com/opendroneid/opendroneid-core-c/blob/master/libopendroneidcn/README.md)).
 
 So a "detection" record can contain a natural person's live position. That is a GDPR question the
 evidence could not answer (section 1.3) and it is why [ADR-0011](../docs/decisions/ADR-0011-legal-posture.md)
@@ -215,8 +215,9 @@ unauthenticated claim.
 |---|---|---|
 | C1, C2, C3 class marks in the Open category | Active, updated Remote ID since 1 January 2024 | [skyzr](https://www.skyzr.com/en/drone-laws/remote-id-for-drones-mandatory-in-eu-since-2024/) (blog, snippet), [Dronavia](https://www.dronavia.com/2024/04/04/drone-remote-identification-european-union/) (vendor, snippet) |
 | C5 and C6 | Included in the same obligation | [skyzr](https://www.skyzr.com/en/drone-laws/remote-id-for-drones-mandatory-in-eu-since-2024/) (snippet). Dronavia words it as "all class-marked C1-C6", so the two secondary sources differ on whether C4 is in scope; neither was checkable against the regulation |
-| Any drone in the Specific category (below 120 m) | DRI required | [skyzr](https://www.skyzr.com/en/drone-laws/remote-id-for-drones-mandatory-in-eu-since-2024/), [Dronavia](https://www.dronavia.com/2024/04/04/drone-remote-identification-european-union/) (both snippet) |
-| C0 and drones under 250 g without a camera, and toys | Exempt | [skyzr](https://www.skyzr.com/en/drone-laws/remote-id-for-drones-mandatory-in-eu-since-2024/) (snippet) |
+| Any drone in the Specific category (below 120 m) | DRI required | [skyzr](https://www.skyzr.com/en/drone-laws/remote-id-for-drones-mandatory-in-eu-since-2024/) (snippet) is the only source carrying the "below 120 m" qualifier; [Dronavia](https://www.dronavia.com/2024/04/04/drone-remote-identification-european-union/) (snippet) states the obligation for the Specific category without a height qualifier |
+| Drones under 250 g without a camera or personal-data sensor, and toys | Exempt | [skyzr](https://www.skyzr.com/en/drone-laws/remote-id-for-drones-mandatory-in-eu-since-2024/) (snippet) |
+| C0 class mark | Exempt: DRI is mandated only from C1 upwards | *(verified: verdict 7)*, plus [Dronavia](https://www.dronavia.com/2024/04/04/drone-remote-identification-european-union/) (snippet) for the class list |
 | Legacy drones with no class mark flown in the Open category | May legally emit nothing | Research key finding built on [eur-lex 2024/2103](https://eur-lex.europa.eu/eli/dec_impl/2024/2103/oj), [skyzr](https://www.skyzr.com/en/drone-laws/remote-id-for-drones-mandatory-in-eu-since-2024/) and [Dronavia](https://www.dronavia.com/2024/04/04/drone-remote-identification-european-union/); secondary sourcing only |
 | Compliance route | Native (DJI, Parrot) or an add-on broadcast module | [Dronavia](https://www.dronavia.com/2024/04/04/drone-remote-identification-european-union/) (snippet) |
 
@@ -246,8 +247,13 @@ only three new enum values and a Timestamp field in the System message
 ([opendroneid-core-c](https://github.com/opendroneid/opendroneid-core-c)).
 
 Condensed from the comparison table in the
-[opendroneid-core-c README](https://github.com/opendroneid/opendroneid-core-c) (verified, M =
-mandatory, O = optional, R = recommended, blank = not addressed):
+[opendroneid-core-c README, "Comparison" section](https://github.com/opendroneid/opendroneid-core-c#comparison)
+(verified, M = mandatory, O = optional, R = recommended, blank = not addressed). **Provenance
+note:** the research lenses recorded only that the README carries such a table, not its contents, so
+this matrix and the jurisdiction dates in section 5 were read from the cloned repository rather than
+from a lens entry in the evidence JSON. Anyone auditing this document against `finders_all.json`
+will not find them there; audit them against the README's "Comparison", "United States", "Japan" and
+"Timelines" sections instead:
 
 | Field | FAA rule | EU rule | ASD-STAN DRI | Japan rule |
 |---|---|---|---|---|
@@ -314,10 +320,13 @@ This section states the corrected version of the claim that went through adversa
 
 **Transport.** DJI's standard Remote ID is an 802.11 **Beacon-only** implementation using the
 ASD-STAN vendor IE (`FA:0B:BC`, type `0x0D`), typically advertising an SSID of the form `RID-<id>`.
-No DJI model is documented anywhere in the evidence as using Bluetooth 4, Bluetooth 5 or Wi-Fi NAN.
-Verified for the Mavic 3 and Mini 3 Pro from
+No DJI model is documented as using Bluetooth 4 or Bluetooth 5, and the only Wi-Fi NAN report in the
+evidence is a single forum account of an early Mini 3 Pro firmware that later firmware appears to
+have disabled ([forum.dji.com 279235](https://forum.dji.com/thread-279235-1-1.html), snippet, and
+see the model table below) *(verified: verdict 7)*. Verified for the **Mavic 3** from
 [opendroneid's transmitter-devices.md](https://github.com/opendroneid/receiver-android/blob/master/transmitter-devices.md)
-("Wi-Fi Beacon only", "Range < 500 meters via smartphone"), for the Air 2S from
+("Wi-Fi Beacon only", with BT4, BT5 and NAN all recorded as "no", and "Range < 500 meters via
+smartphone"), for the Air 2S from
 [receiver-android issue 93](https://github.com/opendroneid/receiver-android/issues/93) ("added RID
 support through WiFi Beacon") and for the Mavic 3 Enterprise from
 [issue 99](https://github.com/opendroneid/receiver-android/issues/99) ("Transport type: Beacon
@@ -396,7 +405,7 @@ energy with an OFDM signature. Everything the toolkit does in that direction is 
 The US means of compliance is ASTM F3411-22a overlaid by the ASTM Means of Compliance F3586-22,
 published 26 July 2022 and accepted by the FAA through a Notification of Availability on
 11 August 2022 as an acceptable, but not the only, means of compliance
-([opendroneid-core-c README](https://github.com/opendroneid/opendroneid-core-c)). FAA enforcement of
+([opendroneid-core-c README, "United States" section](https://github.com/opendroneid/opendroneid-core-c#united-states), read in the clone; not recorded in the lens evidence). FAA enforcement of
 the operator Remote ID requirement began 16 March 2024 after a grace period, and drones upgraded by
 firmware must carry the label `ASTM F3411-22a-RID-B`
 ([DJI FAQ on FAA Remote ID compliance](https://support.dji.com/help/content?customId=en-us03400007747&spaceId=34&re=US&lang=en),
@@ -412,12 +421,15 @@ therefore treat the Basic ID type as significant rather than assuming a serial.
 
 ### 5.2 Japan
 
-Broadcast Remote ID has been required since 20 June 2022. Compared with the EU: BT5 Long Range and
+Broadcast Remote ID has been required since 20 June 2022
+([opendroneid-core-c README, "Japan" section](https://github.com/opendroneid/opendroneid-core-c#japan),
+read in the clone; the lens evidence records only that the README carries such a section). Compared
+with the EU: BT5 Long Range and
 Wi-Fi Beacon are among the mandatory-one-of methods, BT4 legacy advertising is optional, **two**
 Basic ID messages must be sent (serial number and a CAA-provisioned registration ID), an
 Authentication signature over the message set is mandatory, and because the System message is
 optional so is the operator location
-([opendroneid-core-c README](https://github.com/opendroneid/opendroneid-core-c)). The README itself
+([opendroneid-core-c README, "Japan" section](https://github.com/opendroneid/opendroneid-core-c#japan)). The README itself
 warns that this reading is based on auto-translated Japanese documents and may contain errors.
 Japan is not operationally relevant to a Dutch deployment; it is recorded because it is the only
 rule in the set that mandates an authentication signature, which is what a spoof-resistant network
@@ -428,12 +440,12 @@ would want (section 2, point 2).
 | | GB 42590-2023 | GB 46750-2025 |
 |---|---|---|
 | Title | 民用无人驾驶航空器系统安全要求 (Civil UAS safety requirements) | 民用无人驾驶航空器系统运营识别规范 (Civil UAS operational identification specification) |
-| Dates | Published 2023-05-23, effective 2024-06-01 ([openstd.samr.gov.cn](https://openstd.samr.gov.cn/bzgk/gb/newGbInfo?hcno=0DC41035BA23EF2C5B94E6482492AF1E), snippet) | Published 2025-10-31, effective 2026-05-01 ([XC-RemoteID](https://github.com/luolitao/XC-RemoteID), [libopendroneidcn README](https://github.com/opendroneid/opendroneid-core-c)) |
-| Obligation | Light and small UAS report identification to the state supervision platform over the network **and** automatically broadcast identification over Wi-Fi or Bluetooth in flight ([NetEase explainer](https://www.163.com/dy/article/KCLCCD000552L9R6.html), snippet) | Both broadcast mode (§5.2) and network mode (§5.3) mandatory for full compliance ([libopendroneidcn README](https://github.com/opendroneid/opendroneid-core-c)) |
-| Wire format | Same vendor IE as ASTM (`FA:0B:BC` / `0x0D`) but protocol-version nibble `0x1`, 25-byte messages, a 3-byte pack header `[0xF1][25][count]` against ASTM's 2-byte header, and a 12-bit direction field ([luolitao/remoteid](https://github.com/luolitao/remoteid), [esp32-crid](https://github.com/luolitao/esp32-crid)) | Independent, not wire-compatible: single variable-length packet starting `0xFF` with a flag-bitmask chain, 21 defined fields, data region up to 200 bytes ([libopendroneidcn README](https://github.com/opendroneid/opendroneid-core-c), [luolitao/remoteid](https://github.com/luolitao/remoteid)) |
-| Identity | Manufacturers may fill the payload with OpenDroneID message types ([CSDN parsing guide](https://blog.csdn.net/qq_41126242/article/details/143920008), snippet) | Serial (GB/T 41300, 20 characters) **and** the last 8 digits of the CAAC real-name registration number, both mandatory ([XC-RemoteID](https://github.com/luolitao/XC-RemoteID), [libopendroneidcn](https://github.com/opendroneid/opendroneid-core-c)) |
-| Transports | Wi-Fi beacon vendor IE 221 on 2400-2476 MHz or 5725-5829 MHz, or Bluetooth ([CSDN](https://blog.csdn.net/qq_41126242/article/details/143920008), snippet) | At least Bluetooth 5.0 broadcast mode or Wi-Fi broadcast mode; reference firmware uses BLE 5.0 extended advertising plus Wi-Fi Beacon, and BT4.2 chips cannot carry a full packet within the 31-byte limit ([XC-RemoteID](https://github.com/luolitao/XC-RemoteID)); 2.4 GHz / 5.8 GHz ([libopendroneidcn](https://github.com/opendroneid/opendroneid-core-c)) |
-| Product-level obligations | Geofencing among 17 requirement areas ([NetEase](https://www.163.com/dy/article/KCLCCD000552L9R6.html), snippet) | Continuous broadcast that cannot be switched off, interval <= 1 s, 10 s shutdown grace period, take-off interlock, 120 h rolling log, **ADS-B prohibited**, operator/GCS position mandatory, WGS-84 or CGCS2000 ([XC-RemoteID](https://github.com/luolitao/XC-RemoteID), [libopendroneidcn](https://github.com/opendroneid/opendroneid-core-c)) |
+| Dates | Published 2023-05-23, effective 2024-06-01 ([openstd.samr.gov.cn](https://openstd.samr.gov.cn/bzgk/gb/newGbInfo?hcno=0DC41035BA23EF2C5B94E6482492AF1E), snippet) | Published 2025-10-31, effective 2026-05-01 ([XC-RemoteID](https://github.com/luolitao/XC-RemoteID), [libopendroneidcn README](https://github.com/opendroneid/opendroneid-core-c/blob/master/libopendroneidcn/README.md)) |
+| Obligation | Light and small UAS report identification to the state supervision platform over the network **and** automatically broadcast identification over Wi-Fi or Bluetooth in flight ([NetEase explainer](https://www.163.com/dy/article/KCLCCD000552L9R6.html), snippet) | Both broadcast mode (§5.2) and network mode (§5.3) mandatory for full compliance ([libopendroneidcn README](https://github.com/opendroneid/opendroneid-core-c/blob/master/libopendroneidcn/README.md)) |
+| Wire format | Same vendor IE as ASTM (`FA:0B:BC` / `0x0D`) but protocol-version nibble `0x1`, 25-byte messages, a 3-byte pack header `[0xF1][25][count]` against ASTM's 2-byte header, and a 12-bit direction field ([luolitao/remoteid](https://github.com/luolitao/remoteid), [esp32-crid](https://github.com/luolitao/esp32-crid)) | Independent, not wire-compatible: single variable-length packet starting `0xFF` with a flag-bitmask chain, 21 defined fields, data region up to 200 bytes ([libopendroneidcn README](https://github.com/opendroneid/opendroneid-core-c/blob/master/libopendroneidcn/README.md), [luolitao/remoteid](https://github.com/luolitao/remoteid)) |
+| Identity | Manufacturers may fill the payload with OpenDroneID message types ([CSDN parsing guide](https://blog.csdn.net/qq_41126242/article/details/143920008), snippet) | Serial (GB/T 41300, 20 characters) **and** the last 8 digits of the CAAC real-name registration number, both mandatory ([XC-RemoteID](https://github.com/luolitao/XC-RemoteID), [libopendroneidcn](https://github.com/opendroneid/opendroneid-core-c/tree/master/libopendroneidcn)) |
+| Transports | Wi-Fi beacon vendor IE 221 on 2400-2476 MHz or 5725-5829 MHz, or Bluetooth ([CSDN](https://blog.csdn.net/qq_41126242/article/details/143920008), snippet) | At least Bluetooth 5.0 broadcast mode or Wi-Fi broadcast mode; reference firmware uses BLE 5.0 extended advertising plus Wi-Fi Beacon, and BT4.2 chips cannot carry a full packet within the 31-byte limit ([XC-RemoteID](https://github.com/luolitao/XC-RemoteID)); 2.4 GHz / 5.8 GHz ([libopendroneidcn](https://github.com/opendroneid/opendroneid-core-c/tree/master/libopendroneidcn)) |
+| Product-level obligations | Geofencing among 17 requirement areas ([NetEase](https://www.163.com/dy/article/KCLCCD000552L9R6.html), snippet) | Continuous broadcast that cannot be switched off, interval <= 1 s, 10 s shutdown grace period, take-off interlock, 120 h rolling log, **ADS-B prohibited**, operator/GCS position mandatory, WGS-84 or CGCS2000 ([XC-RemoteID](https://github.com/luolitao/XC-RemoteID), [libopendroneidcn](https://github.com/opendroneid/opendroneid-core-c/tree/master/libopendroneidcn)) |
 | Transition | Newly manufactured micro/light/small drones needed RID from 1 January 2024 per secondary summaries ([openstd entry](https://openstd.samr.gov.cn/bzgk/gb/newGbInfo?hcno=0DC41035BA23EF2C5B94E6482492AF1E), snippet) | Manufacturers must retrofit sold drones with a module within 12 months of publication; 36-month transition for retrofitted systems ([XC-RemoteID](https://github.com/luolitao/XC-RemoteID)) |
 
 Why a Dutch receiver should care: an ASTM-only parser silently drops both Chinese formats, and
@@ -469,7 +481,7 @@ Consequence: Russian-registered aircraft are **not** expected to be receivable b
 receiver at all, because their identification path is a network report rather than a local
 broadcast. The only speculative local hook is ADS-B on 1090 MHz if a hybrid tracker uses it, which
 is unverified. Note the contrast with China, which explicitly prohibits using ADS-B for this purpose
-([libopendroneidcn](https://github.com/opendroneid/opendroneid-core-c)). The wider Russian and
+([libopendroneidcn](https://github.com/opendroneid/opendroneid-core-c/tree/master/libopendroneidcn)). The wider Russian and
 Ukrainian picture is in [foreign-perspective.md](foreign-perspective.md).
 
 ---
@@ -484,17 +496,17 @@ The required table. "E200" means the ANTSDR E200 in some firmware personality; s
 
 | Transport | Where it is mandated | E200 capability | Best receiver for AERIX | Why |
 |---|---|---|---|---|
-| **Wi-Fi Beacon 2.4 GHz (ch 6)** | Mandatory-one-of under ASD-STAN DRI, ASTM MoC and GB 42590 ([opendroneid-core-c](https://github.com/opendroneid/opendroneid-core-c)) | Poor. openwifi supports `antsdr_e200` but is OFDM-only and cannot demodulate 802.11b DSSS/CCK, which is what reference RID transmitters use for beacons *(verified: verdict 6)* | **Commodity monitor-mode Wi-Fi NIC** (for example the rtl8812au tested by [unix_rid_capture](https://github.com/sxjack/unix_rid_capture)) | An openwifi E200 will most likely miss mainstream 2.4 GHz Beacon RID; an ordinary USB NIC that speaks 802.11b does not |
+| **Wi-Fi Beacon 2.4 GHz (ch 6)** | Mandatory-one-of under ASD-STAN DRI, ASTM MoC and GB 42590 ([opendroneid-core-c](https://github.com/opendroneid/opendroneid-core-c)) | Poor. openwifi supports `antsdr_e200` but is OFDM-only and cannot demodulate 802.11b DSSS/CCK, which is what reference RID transmitters are believed to use for beacons **(inferred from transmitter defaults, not measured: ESP-IDF's default `11B\|11G\|11N` protocol and hostapd with no `basic_rates` override; no radiotap capture exists anywhere in the evidence, and the PHY rate of commercial drones' Wi-Fi Beacon RID frames is itself unverified)** *(verified: verdict 6)* | **Commodity monitor-mode Wi-Fi NIC** (for example the rtl8812au tested by [unix_rid_capture](https://github.com/sxjack/unix_rid_capture)) | An openwifi E200 will most likely miss mainstream 2.4 GHz Beacon RID; an ordinary USB NIC that speaks 802.11b does not |
 | **Wi-Fi Beacon 5 GHz (ch 149)** | Same | Possible in principle: 5 GHz beacons are OFDM at 6 Mbps or above *(verified: verdict 6)* | Same commodity NIC (dual-band) | The NIC covers both channels and hops; openwifi watches only one 20 MHz channel at a time *(verified: verdict 6)* |
 | **Wi-Fi NAN 2.4 / 5 GHz** | Mandatory-one-of under ASD-STAN DRI ([opendroneid-core-c](https://github.com/opendroneid/opendroneid-core-c)) | Unverified. NAN service discovery rides Action frames (subtype 13) ([luolitao/remoteid](https://github.com/luolitao/remoteid)); whether openwifi passes them in monitor mode and at what PHY rate was not tested *(verified: verdict 6)* | Commodity NIC with NAN-capable capture, or a phone for spot checks | Android NAN reception is documented as working only on some devices ([receiver-android](https://github.com/opendroneid/receiver-android)) |
 | **Bluetooth 4 legacy advertising** | Optional under DRI, mandatory (with BT5) under the ASTM MoC ([opendroneid-core-c](https://github.com/opendroneid/opendroneid-core-c)) | Marginal. [ice9-bluetooth-sniffer](https://github.com/mikeryan/ice9-bluetooth-sniffer) channelises 4-60 MHz into 2 MHz channels and links against libuhd, so it might run through MicroPhase's `antsdr_uhd` fork, untested; [BTLE](https://github.com/JiaoXianjun/BTLE) is HackRF/bladeRF and 1M PHY only | **CC2652P dongle running [Sniffle](https://github.com/nccgroup/Sniffle)**, or a bluez HCI adapter ([unix_rid_capture](https://github.com/sxjack/unix_rid_capture)) | Cheap, reliable, captures all three primary advertising channels with one sniffer |
 | **Bluetooth 5 Long Range (Coded PHY, extended advertising)** | Mandatory-one-of under DRI, and the transport add-on modules such as Dronetag use ([Dronavia](https://www.dronavia.com/2024/04/04/drone-remote-identification-european-union/), [Dronetag](https://help.dronetag.com/drone-scanner/)) | **None.** No surveyed open SDR tool decodes Coded PHY: ice9 documents BR and BLE 1M only, BTLE is 1M only | **[Sniffle](https://github.com/nccgroup/Sniffle) on TI CC26x2R / CC2652RB / CC1352 / SONOFF CC2652P / Catsniffer**, or an nRF52840 dongle with sniffer firmware | Sniffle supports "all BT5 PHY modes (regular 1M, 2M, and coded modes)", follows extended-advertising auxiliary pointers (`-e`) and exports PCAP; the OpenDroneID project recommends it and validated BT5 capture with the nRF52840 ([wireshark-dissector](https://github.com/opendroneid/wireshark-dissector)) |
-| **GB 46750-2025 broadcast (BLE 5.0+ extended advertising or Wi-Fi 2.4/5.8 GHz)** | China, effective 2026-05-01 ([libopendroneidcn](https://github.com/opendroneid/opendroneid-core-c)) | Wi-Fi side only, and nothing the commodity radios cannot also hear | Same NIC plus Sniffle pair, with a `0xFF`-first parser ([esp32-crid](https://github.com/luolitao/esp32-crid), [luolitao/remoteid](https://github.com/luolitao/remoteid)) | Same radios, different parser. Note that the surveyed open receivers only listen on 2.4 GHz channel 6, so the 5.8 GHz option has to be covered deliberately ([CSDN parsing guide](https://blog.csdn.net/qq_41126242/article/details/143920008), snippet) |
+| **GB 46750-2025 broadcast (BLE 5.0+ extended advertising or Wi-Fi 2.4/5.8 GHz)** | China, effective 2026-05-01 ([libopendroneidcn](https://github.com/opendroneid/opendroneid-core-c/tree/master/libopendroneidcn)) | Wi-Fi side only, and nothing the commodity radios cannot also hear | Same NIC plus Sniffle pair, with a `0xFF`-first parser ([esp32-crid](https://github.com/luolitao/esp32-crid), [luolitao/remoteid](https://github.com/luolitao/remoteid)) | Same radios, different parser. Note that the surveyed open receivers only listen on 2.4 GHz channel 6, so the 5.8 GHz option has to be covered deliberately ([CSDN parsing guide](https://blog.csdn.net/qq_41126242/article/details/143920008), snippet) |
 | **GB 42590-2023 broadcast (Wi-Fi IE 221 or Bluetooth)** | China, effective 2024-06-01 | As above | As above | Shares the ASTM OUI, so it costs only a header check ([luolitao/remoteid](https://github.com/luolitao/remoteid)) |
 | **French e-ID beacon (OUI `6A:5C:35`)** | France national regime ([Dronavia](https://www.dronavia.com/2024/04/04/drone-remote-identification-european-union/)) | Same as Wi-Fi Beacon | Commodity NIC | Parser addition only ([opendroneid-core-c wifi.c](https://github.com/opendroneid/opendroneid-core-c)) |
 | **DJI legacy Wi-Fi DroneID IE (OUI `26:37:12`)** | Not mandated; DJI Wi-Fi-link aircraft (Spark, Mavic Air, Tello class) | Same as Wi-Fi Beacon | Commodity NIC with [Kismet](https://github.com/kismetwireless/kismet) or the [DeFliTeam](https://github.com/DeFliTeam/DroneDetection) approach | It is an 802.11 beacon IE, so an SDR adds nothing |
-| **DJI DroneID over OcuSync (2.4 / 5.8 GHz OFDM burst)** | Not a Remote ID transport at all | **This is what the E200 is for.** ~10 MHz burst (15.36 MHz with guards) every ~600 ms ([proto17](https://github.com/proto17/dji_droneid)) | **ANTSDR E200** with the MicroPhase DroneID firmware or a host decoder *(verified: verdict 4)* | No commodity dongle demodulates an LTE-flavoured OFDM burst; see [landscape.md](landscape.md) section 1 |
-| **Network RID (Russia ERA-GLONASS; China network mode)** | Russia from 2026-03-01 ([Interfax](https://www.interfax.ru/russia/1071959)); China §5.3 ([libopendroneidcn](https://github.com/opendroneid/opendroneid-core-c)) | None, and none for any receiver | **Not receivable.** Record as a known blind spot | The identification path is a network report to a state platform, not a local broadcast |
+| **DJI DroneID over OcuSync (2.4 / 5.8 GHz OFDM burst)** | Not a Remote ID transport at all | **This is what the E200 is for.** ~10 MHz burst (15.36 MHz with guards) every ~600 ms ([proto17](https://github.com/proto17/dji_droneid)) | **ANTSDR E200** with the MicroPhase DroneID firmware, which is the only thing that decodes O3, or an open host decoder for **OcuSync-2-era airframes only** (proto17, DroneSecurity and samples2djidroneid are verified on the Mini 2 and Mavic Air 2, fail on the Mavic 2 Pro, and no public repository demonstrates an O3 decode) *(verified: verdict 4)* | No commodity dongle demodulates an LTE-flavoured OFDM burst; see [landscape.md](landscape.md) section 1 |
+| **Network RID (Russia ERA-GLONASS; China network mode)** | Russia from 2026-03-01 ([Interfax](https://www.interfax.ru/russia/1071959)); China §5.3 ([libopendroneidcn](https://github.com/opendroneid/opendroneid-core-c/tree/master/libopendroneidcn)) | None, and none for any receiver | **Not receivable.** Record as a known blind spot | The identification path is a network report to a state platform, not a local broadcast |
 
 Note on price: the research lens describes the Sniffle-compatible dongle as a roughly EUR 15 part;
 the Sniffle README lists the supported boards (CC26x2R, CC2652RB, CC1352R/P Launchpads, SONOFF

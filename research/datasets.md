@@ -53,7 +53,7 @@ about 56 MHz span cannot be reproduced on this board at all, only consumed after
 | 1.12 | UAVSig | 2024 | USRP B205mini (survey) | 50 MSPS, 50 MHz | not stated | yes | 720 files | UCLA Dataverse | native snapshot |
 | 1.13 | NIST TN 2237 | n/a | not stated | not stated | 2.4 + 5.8 GHz | yes (.h5) | not stated | Kaggle mirror | negatives only |
 | 1.14 | LowSNR_DroneRF (Kaggle) | 2026 | not stated | 10 MHz claimed | not stated | **no** | ~3 GB | Kaggle | do not use |
-| 1.15 | DroneSecurity samples | 2023 | USRP B200 family via UHD | 50 MSPS complex64 | 2.4 GHz | yes | 7.6 MB total | in-repo | native snapshot |
+| 1.15 | DroneSecurity samples | 2023 | Ettus USRP B205-mini (AD9364) via UHD | 50 MSPS complex64 | 2.4 GHz | yes | 7.6 MB total | in-repo | native snapshot |
 | 1.16 | samples2djidroneid | 2024-26 | n/a | 15.36 / 30.72 MSPS input | 2.4 GHz | **no data shipped** | n/a | GitHub | decoder only |
 | 1.17 | RTL-ML | 2026 | RTL-SDR Blog V4 | 1.024 MSPS | VHF/UHF, no drones | yes (.npy) | 6.2 GB, 800 samples | Hugging Face | out of scope |
 
@@ -282,7 +282,7 @@ evaluate "reject the drone model you have never seen" without inventing our own 
 | SNR tooling | `SNREstimation/` with an `awgn1` MATLAB helper that iterates until the estimated SNR is within 0.1 dB of a target, stepping -20 to +20 dB in 2 dB steps (`NoisyData.m`, read in the clone) |
 | Fingerprint definition | five parameters per drone: frequency-hopping signal bandwidth (FHSBW), hop duration (FHSDT), video-transmitted signal bandwidth (VSBW), hop duty cycle (FHSDC), hop pattern period (FHSPP) ([repo README](https://github.com/kitoweeknd/RFUAV)) |
 | Licence | code Apache-2.0 (clone); **dataset licence on Hugging Face not verified** |
-| Benchmarks | third-party 37-class reruns: MaxViT-Base 97.8% (118.7 M params), YOLOv11n-cls 97.4% (~1.6 M), MobileNetV3-Large 97.1% (4.2 M), raw-IQ LWMExpert 94.1% (1.3 M), statistical features + random forest 95.7%. The paper's own 5-class SNR-averaged figures: ViT-L-16 56.44% (98.55% at >= 10 dB), ResNet18 54.78% (99.93% at >= 10 dB) ([rfml-moe-hub](https://github.com/r4d10n/rfml-moe-hub)) |
+| Benchmarks | third-party 37-class reruns: MaxViT-Base 97.8% (118.7 M params), YOLOv11n-cls 97.4% (~1.6 M), MobileNetV3-Large 97.1% (4.2 M), raw-IQ LWMExpert 94.1% (1.3 M), statistical features + random forest 95.7%. The paper's own 5-class SNR-averaged figures: ViT-L-16 56.44% (98.55% at >= 10 dB), ResNet18 54.78% (99.93% at >= 10 dB) ([rfml-moe-hub](https://github.com/r4d10n/rfml-moe-hub)). A second snippet of the same paper attributes the identical 56.44% to **ViT-L-32** and gives its high-SNR figure as 100% rather than 98.55%, and adds "ResNet18 best at SNR <= -10 dB (22.39%)" ([RFUAV paper snippets](https://github.com/kitoweeknd/RFUAV)); which variant and which high-SNR number the paper actually reports is **unresolved** |
 
 E200 fit: 100 MSps is about 1.8x the E200's 56 MHz analog bandwidth and far beyond any streaming mode,
 so it is training material only. The precedent already exists:
@@ -410,12 +410,16 @@ is the file ordered by class, and do segment identifiers exist.
 |---|---|
 | Repo | [RUB-SysSec/DroneSecurity](https://github.com/RUB-SysSec/DroneSecurity), AGPL-3.0 (LICENSE added 2023-03-10, read in the clone) |
 | Files | `samples/mini2_sm` 5,820,000 bytes = 727,500 complex64 = 14.55 ms at 50 MSPS with 10 bursts of ~640 us; `samples/mavic_air_2` 1,802,240 bytes = 225,280 complex64 = 4.51 ms with 3-4 bursts; both float32 interleaved IQ (byte counts measured on the clone) |
+| Capture front end | Ettus USRP B205-mini, the AD9364 part; the README states "The live receiver was tested with: Ettus USRP B205-mini, DJI mini 2, DJI Mavic Air 2" ([repo](https://github.com/RUB-SysSec/DroneSecurity)) |
 | Capture rate | 50 MSPS, dumped from the live receiver's detection stage (`inspectrum -r 50e6`) ([repo](https://github.com/RUB-SysSec/DroneSecurity)) |
 | Ground truth | a scratch rerun reproduced the README exactly: `mini2_sm` gives 10 frame candidates, 9 decoded, 7 CRC OK; `mavic_air_2` gives 3 candidates and 1 CRC-OK "Mavic Air 2" frame at 51.44633 / 7.26722, height 12.8 (rerun logged in the deep read) |
 | Format | raw complex, **not SigMF** ([repo](https://github.com/RUB-SysSec/DroneSecurity)) |
 
 E200 fit: these two files are the only public DJI DroneID IQ ground truth found in the whole sweep,
-and they are the acceptance test for any DroneID path on the E200. 50 MSPS is a snapshot rate on
+and they are the acceptance test for any DroneID path on the E200. They are also the closest
+analogue to an E200 recording in the catalogue, because the B205-mini's AD9364 is the same
+transceiver family as the E200's AD936x front end (the same argument the evidence makes for
+proto17's B205-mini recordings, [dji_droneid](https://github.com/proto17/dji_droneid)). 50 MSPS is a snapshot rate on
 this board, not a streaming rate *(verified: verdict 2)*. Note the AGPL-3.0 licence: the decoder must
 be re-implemented from its description, not vendored
 ([ADR-0003](../docs/decisions/ADR-0003-third-party-code-and-licences.md)).
@@ -816,7 +820,9 @@ What the evidence could not establish, drawn from the lens `gaps_or_open_questio
 * **Contradictions left standing.** DroneRF size 3.75 GB versus ~40 GB; Noisy Drone RF v2 size ~23 GB
   reported versus ~140-150 GB computed from the file schema (dtype unverified); DroneRFa described as
   100 MS/s with 80 MHz IBW by the paper but "80 MSps" by rfml-moe-hub; RFUAV centred at 2.4 GHz per
-  its README examples but 5.765 GHz per rfml-moe-hub; CardRF listed as "17 controllers, 8
+  its README examples but 5.765 GHz per rfml-moe-hub; RFUAV's best 5-class model reported as
+  ViT-L-16 at 98.55% above 10 dB by one snippet and ViT-L-32 at 100% by another, both quoting the
+  same 56.44% SNR-averaged figure; CardRF listed as "17 controllers, 8
   manufacturers" by the survey while its own README lists six UAVs, five Bluetooth and two Wi-Fi
   devices. None of these could be resolved from a primary source.
 * **DroneRFb-Spectra is known only from snippets.** Its size (14,460 samples), brand list (7 brands)

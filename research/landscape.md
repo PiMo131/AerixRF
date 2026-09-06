@@ -22,14 +22,20 @@ Conventions used throughout:
   [regulatory.md](regulatory.md), and the Chinese/Russian/Ukrainian view in
   [foreign-perspective.md](foreign-perspective.md).
 
-The three E200 constraints that shape everything below, in one paragraph: the AD9361 front end
-covers 70 MHz to 6 GHz with up to 56 MHz analog bandwidth, but the host link is a single 1 GbE port
-with a 1500-byte MTU, which caps continuous single-channel sc16 streaming at **29.6 MSPS** by
-arithmetic. What is reachable in practice depends on which firmware is booted, and the vendor's
-often-quoted 20 MSPS is the figure for the UHD personality, not for the factory one: the stock
-PlutoSDR-compatible IIO firmware is CPU-bound in `iiod` on the Cortex-A9 and sustains about
-**11 to 13 MSPS** single-channel, roughly half that per channel with two
-*(verified: verdict 2, host streaming tiers,
+The three E200 constraints that shape everything below, in one paragraph: the AD9361 variant of the
+front end (which part is actually fitted is unconfirmed, since the public schematic draws U11 as an
+AD9363 with a 325 MHz to 3.8 GHz, 20 MHz envelope and Crowd Supply sells both variants, see
+[hardware-e200.md](hardware-e200.md) section 1.1) covers 70 MHz to 6 GHz with up to 56 MHz analog
+bandwidth, but the host link is a single 1 GbE port with a 1500-byte MTU, which caps continuous
+single-channel sc16 streaming at **29.6 MSPS** by arithmetic. What is reachable in practice depends
+on which firmware is booted. The vendor's 20 MSPS row is a selection-table entry with no test data
+behind it, and it most likely tracks the UHD data path rather than the factory one, which is an
+inference from the table's API column (E310 "Libiio" at 10 MSPS versus E200/E316 "Libiio & UHD" at
+20 MSPS) and not a vendor statement. The stock PlutoSDR-compatible IIO firmware is CPU-bound in
+`iiod` on the Cortex-A9 and sustains about **11 to 13 MSPS** single-channel, and, by arithmetic on
+the AD9361 interleaving rather than any measurement, roughly half that per channel with two enabled
+(unmeasured on either personality, see [hardware-e200.md](hardware-e200.md) section 15)
+*(verified: verdict 2, `host-streaming-tiers`,
 [libiio #875](https://github.com/analogdevicesinc/libiio/discussions/875),
 [vendor table](https://github.com/MicroPhase/antsdr_doc_en/blob/master/source/device_and_usage_manual/ANTSDR_E_Series_Module/ANTSDR_E200_Reference_Manual/AntsdrE200_RF_parameters.md))*.
 The practical consequence runs through this whole document: **DroneID's 15.36 MSPS does not fit a
@@ -88,7 +94,7 @@ beacon/pairing 490-540 us, video 630-665 us at roughly 20 MHz
 ### 1.2 Which generations are decodable, and which are encrypted
 
 This is the single most consequential finding for the project, and the round-1 version of it was
-wrong in an important way. The corrected statement *(verified: verdict 4, DJI generation coverage)*:
+wrong in an important way. The corrected statement *(verified: verdict 4, `dji-generation-coverage`)*:
 
 * Open decoders are demonstrated only on **OcuSync-2-era** aircraft: DJI Mini 2 and Mavic Air 2
   ([DroneSecurity README](https://github.com/RUB-SysSec/DroneSecurity/blob/public_squash/README.md)),
@@ -139,9 +145,21 @@ motors are spinning" appears only in
 It is contradicted for O2-era firmware by proto17's own recording instructions ("Power on the drone
 (shouldn't need the controller to be on)",
 [proto17 wiki](https://github.com/proto17/dji_droneid/wiki/Using-the-MATLAB-Code)), by DroneSecurity's
-`mini2_sm` capture taken before GPS lock, and by the protocol itself carrying separate `motor_on` and
-`in_air` state bits ([Kismet IE parser](https://github.com/kismetwireless/kismet/blob/master/dot11_parsers/dot11_ie_221_dji_droneid.h))
-*(verified: verdict 4)*. Treat the start condition as unknown per model and measure it.
+`mini2_sm` capture taken before GPS lock, and by the protocol itself carrying separate `motor_on`
+(bit 12) and `in_air` (bit 13) state bits in the OcuSync payload's `state_info` field
+([DroneSecurity `droneid_packet.py`](https://github.com/RUB-SysSec/DroneSecurity); the bit names are
+taken from source comments and are marked unverified in the deep read) *(verified: verdict 4)*.
+Treat the start condition as unknown per model and measure it.
+
+**The verification record is not self-consistent here.** Verdict 7 (`dji-eu-rid`) restates the
+motors-spinning behaviour as settled fact ("DJI DroneID over OcuSync is still transmitted by all
+generations but (a) only while motors are spinning, not at power-on"), which directly contradicts
+verdict 4's refutation above. Verdict 4 is the one that carries the primary-source reasoning (the
+proto17 instructions, the pre-GPS-lock capture, the state bits) and it is the version used
+throughout this document; verdict 7 asserts the behaviour without citing a source for it. The same
+verdict 7 also groups O3+/O3 Pro with the encrypted generations, which verdict 4 identifies as a
+generation mix-up. Neither verdict settles the point: it must be measured per model. See
+[verification-log.md](verification-log.md).
 
 ### 1.3 Open decoders: maturity, licence, what they cost to run
 
@@ -197,7 +215,15 @@ Outputs, both verified:
 * Capability split, from the vendor-adjacent
   [WarDragon doc](https://github.com/alphafox02/WarDragon/blob/main/docs/software/detection-capabilities.md):
   O2 and standard O3 give full telemetry; O3 Pro / O4+ give hash only by default, with full
-  telemetry requiring a DragonScope subscription and internet connectivity.
+  telemetry requiring a DragonScope subscription and internet connectivity. Note that this
+  vendor-adjacent doc groups **O3 Pro with O4+**, which is exactly the grouping verdict 4 identifies
+  as a generation mix-up at the PHY level: O3+/O3 Pro payloads are not encrypted (section 1.2). The
+  split as written may therefore describe what this firmware build supports rather than what is
+  encrypted. Which of the two it is cannot be settled from the evidence.
+
+* Kismet parses the separate Wi-Fi-link format (802.11 vendor IE, OUI 26:37:12, subcommands 0x10
+  flight telemetry and 0x11 flight purpose), not the OcuSync one
+  ([dot11_ie_221_dji_droneid.h](https://github.com/kismetwireless/kismet/blob/master/dot11_parsers/dot11_ie_221_dji_droneid.h)).
 
 An **unverified round-1** finding (queued as `o4-firmware-channels`, never adversarially checked)
 holds that the O4 firmware in `device_mode auto` monitors only 2434.5, 5756.5, 5776.5 and
@@ -253,7 +279,7 @@ IQ budget completely ([alphafox02](https://github.com/alphafox02/antsdr_dji_dron
 the board: the DroneID image is a full alternative Linux personality shipped as SD-card zips
 ([alphafox02](https://github.com/alphafox02/antsdr_dji_droneid)), and only one personality can boot
 at a time because the stock IIO firmware lives in QSPI while UHD and the SD images are selected by
-the BOOT DIP switch *(verified: verdict 6, personality exclusivity;
+the BOOT DIP switch *(verified: verdict 6, `openwifi-personality`;
 [unpacking guide](https://github.com/MicroPhase/antsdr_doc_en/blob/master/source/device_and_usage_manual/ANTSDR_E_Series_Module/ANTSDR_E200_Reference_Manual/AntsdrE200_Unpacking_examination.md))*. Host
 processing at 15.36 MSPS covers exactly one DroneID channel per tune, but it is *above* the stock
 IIO firmware's continuous ceiling of 11 to 13 MSPS, so on the factory personality it has to be a
@@ -415,7 +441,7 @@ with no SX1280 support and its [issue #143](https://github.com/tapparelj/gr-lora
 (SX1280 at SF7/CR 4/5) is unanswered; [rpp0/gr-lora](https://github.com/rpp0/gr-lora) rejects SF<6
 and lists only sub-GHz transmitters;
 [SDRangel ChirpChat](https://github.com/f4exb/sdrangel/blob/master/plugins/channelrx/demodchirpchat/readme.md)
-tops out at 500 kHz bandwidth *(verified: verdict 3, ELRS decodability)*. The FLRC and LR1121 GFSK
+tops out at 500 kHz bandwidth *(verified: verdict 3, `elrs-decodability`)*. The FLRC and LR1121 GFSK
 rates are not LoRa at all and have no open demodulator either. On top of that, the 80-channel
 2.4 GHz hop set spans 79 MHz, wider than the E200's 56 MHz analog bandwidth, so 2.4 GHz ELRS has to
 be handled as a swept chirp-and-timing detector rather than a full-band capture *(verified:
@@ -451,7 +477,7 @@ A pilot's handset is detectable before anything flies.
 
 | Link | PHY | Hop set / period | Decoder status |
 |---|---|---|---|
-| TBS Crossfire 150 Hz | FSK, 85.1 kBaud, 42.48 kHz deviation, 260 kHz grid | 150-slot sequence, 6.667 ms slot (23-byte up, 13-byte down), TX ch 0-49, RX 50-99 | Unencrypted, no open SDR decoder; parameters from [g3gg0](https://www.g3gg0.de/default/fpv-analysis-of-tbs-crossfire/) (snippet, blocked) and [ESP32_CRSFSniffer](https://github.com/g3gg0/ESP32_CRSFSniffer) |
+| TBS Crossfire 150 Hz | FSK, 85 kBaud, 42.3 kHz deviation (blog snippet: 85.1 kBaud / 42.48 kHz), 260.01 kHz grid | 150-slot sequence, 6.667 ms slot (23-byte up, 13-byte down), TX ch 0-49, RX 50-99 | Unencrypted, no open SDR decoder; parameters from [g3gg0](https://www.g3gg0.de/default/fpv-analysis-of-tbs-crossfire/) (snippet, blocked) and [ESP32_CRSFSniffer](https://github.com/g3gg0/ESP32_CRSFSniffer) |
 | TBS Crossfire 50 Hz | LoRa on SX1272 | as above | Decodable in principle with SX127x-compatible code once per-mode SF/BW/CR are transcribed ([g3gg0](https://www.g3gg0.de/default/fpv-analysis-of-tbs-crossfire/), snippet) |
 | FrSky D8 | 2-FSK 31 kbps | 47 ch, 9 ms | Fully specified in [Multiprotocol](https://github.com/pascallanger/DIY-Multiprotocol-TX-Module), no SDR decoder |
 | FrSky D16 | 70-77 kbps (100 kbps EU-LBT) | 47 ch, 9 ms | as above |
@@ -503,7 +529,7 @@ Analog FPV is wideband FM of a 1 Vpp composite video signal, and on RTC6705-clas
 chipset) there are two FM audio subcarriers at 6.0 and 6.5 MHz sitting 25-30 dB below the video
 carrier; the RTC6705 datasheet specifies **no** main-carrier video deviation
 ([RichWave RTC6705 datasheet, shipped in OpenVTx](https://github.com/OpenVTx/OpenVTx/blob/master/docs/RTC6705-RichWave.pdf))
-*(verified: verdict 5, analog FPV bandwidth)*. The "5 MHz peak deviation" figure that circulates is a
+*(verified: verdict 5, `analog-fpv-bandwidth`)*. The "5 MHz peak deviation" figure that circulates is a
 decoder scale constant (`fpvdec --dev` default), not a specification
 ([5G8atv config.hpp](https://github.com/zubon2003/5G8atv-rf-hackrf-decoder/blob/main/src/config.hpp)).
 
@@ -539,7 +565,7 @@ Channel plans to sweep, all verified from firmware tables: the 40-entry A/B/E/F/
 fpv-sdr's DJI band 5660/5695/5735/5770/5805/5839/5878/5914 MHz
 ([fpv-sdr](https://github.com/lukeswitz/fpv-sdr)); and HDZero's 20 discrete channels R1-R8
 (5658-5917), E1 5705, F1/F2/F4 5740/5760/5800 and L1-L8 5362-5621 MHz
-([hdzero-vtx common.h](https://github.com/hd-zero/hdzero-vtx/blob/main/src/dm6300.c)). Russian and
+([hdzero-vtx common.h](https://github.com/hd-zero/hdzero-vtx/blob/main/src/common.h), lines 176-193; `dm6300.c` only references the constants). Russian and
 Ukrainian sources report analog video far outside that: 460-600, 910-1360, 1405-1680, 2290-2510,
 3000-4938 and 4867-6184 MHz, with reports of VTX above 6.2 GHz which the E200 cannot reach at all
 ([techuav VTX frequency table](https://github.com/techuav/techuav.github.io)). They also report
@@ -623,9 +649,13 @@ commits since 2023-08-17 and no maintainer response to 2025 issues. Re-implement
 algorithm in numpy is the recommendation
 ([ADR-0007](../docs/decisions/ADR-0007-detection-pipeline-heuristics-before-ml.md)).
 
-Cheap statistical gating works well as a pre-filter. A PSD(1024) plus SVM binary drone/no-drone
-detector reaches 0.983 accuracy at 0.286 ms per 20 ms window on an i9-9820X
-([IQTLabs/RFClassification](https://github.com/IQTLabs/RFClassification)). Kurtosis is a good burst
+Cheap statistical gating works well as a pre-filter. A PSD(NFFT = 1024) plus SVM binary
+drone/no-drone detector reaches 0.983 accuracy **on DroneRF** at 0.286 ms per 20 ms window on an
+i9-9820X ([IQTLabs/RFClassification](https://github.com/IQTLabs/RFClassification)). The dataset
+matters: DroneRF is real-valued, three drones old and leakage-prone (section 5.5), so the figure is
+not a general capability. It survives the correction better than the type-ID results do, though,
+because binary detection on DroneRF still scores ROC-AUC 0.978 +/- 0.017 under grouped evaluation
+while type identification collapses to chance (section 5.5). Kurtosis is a good burst
 gate: RF-Vision computes kappa = mean|x|^4 / (mean|x|^2)^2 capped at 20 with a 3-frame median and an
 EMA of 0.35, and reports burst kurtosis of 6-8 against noise
 ([RF-Vision-UAV-Tracker](https://github.com/ALPssdz/RF-Vision-UAV-Tracker)); the deep read flags that
@@ -690,7 +720,7 @@ Five qualifications that the raw numbers hide, all established in verdict 8:
 Window length is independently confirmed as the dominant knob: DroneDetect PSD+SVM scores 0.769 /
 0.836 / 0.894 at 10 / 20 / 50 ms with accuracy insensitive to NFFT
 ([RFClassification](https://github.com/IQTLabs/RFClassification)), ZJU's ResNet-18 baseline drops
-from 97.7% on 10 ms windows to 72.7% on 2.5 ms
+from 97.7% on 1 M-sample (10 ms) windows to 72.7% on 256 k-sample (2.56 ms) windows
 ([JEIT 10.11999/JEIT230570](https://jeit.ac.cn/cn/article/doi/10.11999/JEIT230570)), and the consensus
 capture buffer across projects is 65-100 ms (ZHAW 74.9 ms at 14 MSPS, CageDroneRF 0.5 s windows at
 0.1 s steps, RF-Vision 65.5 ms at 40 MSPS)
@@ -700,9 +730,13 @@ of 256 points beat 1024 across SNRs on its data ([RFUAV](https://github.com/kito
 
 Only one project ships released weights, a public IQ dataset and a field test at an E200-compatible
 rate: Glüge's VGG11_BN (GPL-3.0), 2^20-sample windows at 14 MSPS rendered as a 1024x1024 two-channel
-complex STFT (n_fft = hop = 1024), 7 classes, 5-fold test accuracy 0.942 and >= 85% balanced accuracy
-above -12 dB ([Robust-Drone-Detection-and-Classification](https://github.com/sgluege/Robust-Drone-Detection-and-Classification),
-[arXiv 2406.18624](https://arxiv.org/abs/2406.18624)). Its class list is the problem: one DJI Phantom
+complex STFT (n_fft = hop = 1024), 7 classes, and a five-split test accuracy of 0.9425 +/- 0.0066
+with balanced accuracy 0.9284 +/- 0.0034 read from the repository README
+([Robust-Drone-Detection-and-Classification](https://github.com/sgluege/Robust-Drone-Detection-and-Classification)).
+The often-quoted ">= 85% balanced accuracy above -12 dB", and the companion ">80% in field tests",
+come from the [arXiv 2406.18624](https://arxiv.org/abs/2406.18624) **abstract as a web snippet**;
+arXiv was egress-blocked for the whole sweep, so neither was reproduced from the released code or
+from the per-SNR CSVs, and the two split figures above are the load-bearing numbers. Its class list is the problem: one DJI Phantom
 4 Pro / GL300F link plus five hobby transmitters (Futaba T7C, Futaba T14SG, Graupner mx-16, FrSky
 Taranis ACCST, Turnigy 9X) and Noise, with **no** OcuSync 2/3/4, no ELRS, no Crossfire and no 5.8 GHz
 video ([deep read](https://github.com/sgluege/Robust-Drone-Detection-and-Classification)).
@@ -713,8 +747,9 @@ Closed-set classifiers are the wrong shape for an observation network that will 
 never seen. [S3R](https://github.com/DaftJun/S3R) (IEEE TIFS 2024) is the implemented recipe: a
 2048-point Hamming STFT with 50% hop, three dilated convolution branches (dilations 1, 3, 5) producing
 a semantic embedding, and known/unknown decisions from class-centre distances with per-class
-covariance, reaching 96.64% closed-set accuracy on DroneRFb-Spectra (14,460 samples, 7 brands: DJI,
-Vbar, FrSky, Futaba, Taranis, RadioLink, Skydroid). Two blockers: the repository has **no LICENCE
+covariance. The reported 96.64% closed-set accuracy on DroneRFb-Spectra (14,460 samples, 7 brands:
+DJI, Vbar, FrSky, Futaba, Taranis, RadioLink, Skydroid) is **snippet**-grade; the STFT and
+architecture constants above were read from the clone. Two blockers: the repository has **no LICENCE
 file** and the data are 100 MSPS dual-band, so re-rendering to E200 rates is required
 ([S3R](https://github.com/DaftJun/S3R)). Its dataset ships nine predefined known/unknown splits,
 which is the evaluation protocol worth copying.
@@ -847,7 +882,7 @@ Five things stand between that and a bearing the toolkit can publish:
    180 degrees, and there is no way of knowing if the signal is coming from in front, or behind", and
    "radio direction finding bearings will always have inaccuracies of several degrees" with small
    arrays absorbing multipath into the main lobe
-   ([KrakenSDR wiki 03/04](https://github.com/krakenrf/krakensdr_docs/wiki/04.-Antenna-Array-Setup)).
+   ([KrakenSDR wiki 04](https://github.com/krakenrf/krakensdr_docs/wiki/04.-Antenna-Array-Setup)).
    Their own resolution estimates are for **five** elements (about 3.4 degrees for a 5-element linear
    array at 0.5 lambda). Cable lengths must match to within a centimetre up to about 900 MHz
    ([KrakenSDR wiki](https://github.com/krakenrf/krakensdr_docs/wiki/04.-Antenna-Array-Setup)), which
@@ -975,9 +1010,12 @@ Payloads are ChaCha20-Poly1305 encrypted and will never be decodable passively
 ([wfb-ng](https://github.com/svpcom/wfb-ng)).
 
 **P8. Remote ID on commodity dongles, not on the E200.** An openwifi-mode E200 most likely misses the
-mainstream 1 Mbps DSSS beacons, cannot receive Bluetooth at all, watches one 20 MHz channel at a
-time, and halts after about two hours on the evaluation-licensed Viterbi decoder *(verified: verdict
-6)*. Use a monitor-mode NIC with 802.11b/g/n/a plus a Sniffle-class BLE 5 dongle
+mainstream 1 Mbps DSSS beacons (**inferred from ESP-IDF and hostapd defaults, never measured** on
+either an openwifi board or a commercial drone; the PHY rate of DJI's Wi-Fi Beacon RID frames is
+itself unverified, and the measurement is listed as row 17 of
+[hardware-e200.md](hardware-e200.md) section 15), cannot receive Bluetooth at all, watches one
+20 MHz channel at a time, and halts after about two hours on the evaluation-licensed Viterbi decoder
+*(verified: verdict 6)*. Use a monitor-mode NIC with 802.11b/g/n/a plus a Sniffle-class BLE 5 dongle
 ([Sniffle](https://github.com/nccgroup/Sniffle)), and parse ASTM/EN 4709 alongside GB 42590 and
 GB 46750 ([luolitao/remoteid](https://github.com/luolitao/remoteid)). See
 [ADR-0010](../docs/decisions/ADR-0010-band-coverage.md).

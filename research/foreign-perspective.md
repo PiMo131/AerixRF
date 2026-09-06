@@ -25,7 +25,7 @@ The foreign-language material is the weakest part of the evidence base, for mech
 
 | Limit | Detail |
 | --- | --- |
-| Reachable hosts | In practice only GitHub-hosted material could be fetched or cloned; for every other host the evidence is a search-engine snippet, which [sources.md](sources.md) marks as **snippet** ("only a search-engine snippet was available because the development sandbox cannot reach that host"). Every **verified** foreign entry below is a `github.com` URL. |
+| Reachable hosts | In practice only GitHub-hosted material could be fetched or cloned; for every other host the evidence is a search-engine snippet, which [sources.md](sources.md) marks as **snippet** ("only a search-engine snippet was available because the development sandbox cannot reach that host"). Every verified foreign entry below was read through GitHub; the one exception in the record is the DroneRFa JEIT paper, flagged **verified** because its PDF was read from the [maojinxiang/DroneRFA_24-Dataset](https://github.com/maojinxiang/DroneRFA_24-Dataset) mirror even though its canonical URL is the blocked `jeit.ac.cn`. |
 | Search budget | Three foreign lenses ran: `web-zh-community` (26 searches, 26 sources), `academic-zh` (26 searches, 25 sources), `web-ru-community` (26 searches, 25 sources) - `finders_all.json`. |
 | Verified vs snippet | Chinese community lens: 8 verified / 18 snippet. Chinese academic lens: 8 verified / 17 snippet. Russian lens: 14 verified / 11 snippet. The Russian lens scores better only because one contributor mirrored Telegram channels into a Git repository, which the sandbox could clone. |
 | Bibliography share | [sources.md](sources.md) records 296 unique sources: 208 English, **50 Chinese, 24 Russian, 8 Ukrainian**, 6 Dutch. |
@@ -97,7 +97,7 @@ design on an AD9363 (later an Artosyn AR8003) with adaptive BPSK-64QAM over 2.3-
 
 The ZJU baseline is also useful as a **window-length budget**: ResNet-18 on a 2 x 1024 x 1024 STFT
 (N = 1024, 50 % overlap) of 1 M-sample (10 ms) windows reaches 97.73 % at 53 fps, but the same model
-on 256 k-sample (2.5 ms) windows collapses to 72.7 %; reducing frequency resolution to 128 gives
+on 256 k-sample (2.56 ms at 100 MS/s, derived) windows collapses to 72.7 %; reducing frequency resolution to 128 gives
 87.9 % at 217 fps (<https://jeit.ac.cn/cn/article/doi/10.11999/JEIT230570>). At the E200's realistic
 host rate that means buffering on the order of 10 ms, i.e. about 200 k samples at 20 MSPS, before
 each decision.
@@ -108,8 +108,10 @@ drone individual identification"), JEIT 2025, 47(3):573-581, DOI 10.11999/JEIT24
 <https://www.scidb.cn/en/detail?dataSetId=84cf9101e739402784b1396783881202>, PDF at
 <https://cdn.sciengine.com/doi/pdf/148A3ABAED5C4D2D97D17B63A9671CF4>. This one targets **individual
 airframe fingerprinting**, not model classification: 6 drone types x 3 physical individuals plus one
-urban background class, raw I/Q over 2.4-2.48 GHz (80 MHz span), >= 40 segments per class and >= 4 M
-samples per segment, containing flight-control (FCS), video (VTS) and ambient interference signals.
+urban background class, raw I/Q over 2.4-2.48 GHz (80 MHz span), more than 40 segments per drone type and more than 4 M
+samples per segment (the two evidence entries word this differently: the SciDB listing gives ">= 40
+segments of >= 4 M samples" per class, the JEIT page ">40 segments per type; >4 million samples per
+segment"), containing flight-control (FCS), video (VTS) and ambient interference signals.
 All of that is snippet-level; ScienceDB is blocked. It is the only open drone-RF dataset found that
 is explicitly built for per-unit identity, which is the harder problem AERIX would eventually face
 when correlating an RF track with a Remote ID identity.
@@ -157,7 +159,7 @@ Three Chinese-authored repositories were cloned and read:
 
 SE-DCNet is the one that carries evidential weight, because the adversarial pass used it as
 third-party evidence against the round-1 "spectrograms clearly beat raw IQ" claim *(verified:
-verdict 8, spectrogram vs IQ)*: on DroneRFa with synthetic channels, an **IQ-only CNN-LSTM matches
+verdict 8, `rf-ml-inputs-and-leakage`)*: on DroneRFa with synthetic channels, an **IQ-only CNN-LSTM matches
 the STFT-EfficientNet at -10 dB AWGN (about 69 % vs 68 %) while an STFT-ResNet gets 47 % and a plain
 IQ-CNN 33 %** - architecture choice matters more than input domain, though STFT models are more
 consistently robust under Rayleigh/Rician fading and dual-branch fusion is best
@@ -217,9 +219,9 @@ packet types (full, serial-only, fully encrypted, key packets)
 <https://blog.csdn.net/leegang12/article/details/147245156>,
 <https://blog.csdn.net/leegang12/article/details/150761143>).
 
-**Treat the headline claim as unproven.** The verification pass *(verified: verdict 4, DJI generation
-coverage)* concluded that O1/O2/O3 payloads are unencrypted while the **O4 generation (Air 3, August
-2023 onward) is encrypted**, that no open repository demonstrates even an O3 decode, and that the
+**Treat the headline claim as unproven.** The verification pass
+*(verified: verdict 4, `dji-generation-coverage`)* concluded that O1/O2/O3 payloads are unencrypted
+while the **O4 generation (Air 3, August 2023 onward) is encrypted**, that no open repository demonstrates even an O3 decode, and that the
 only thing that decodes O4 identity is a licensed cloud service reached through an
 `/api/o4online/decrypt?hex=...` call inside MicroPhase's closed firmware binary. leegang12's own
 O1/O2/O3-unencrypted vs O4-encrypted statement is consistent with that; the "CRC correct on O1/O2/O3
@@ -272,15 +274,21 @@ Two of those rows were corrected by the verification pass and must be quoted in 
 * **Ports.** MicroPhase's "SMA:1T1R IPEX:1T1R" is confirmed, and the board photo shows exactly two
   SMA jacks on the RF edge, but the second pair is **not unreachable**: the Crowd Supply campaign
   states the kit ships with a Hirose U.FL-to-SMA bulkhead pigtail rated under 2 dB loss to 6 GHz
-  (snippet-level). There is also **no TX/RX antenna switching on the E200 at all** - the UHD FPGA top
-  drives only `tx_amp_en1` *(verified: verdict 1, `rf-ports`;
+  (snippet-level). **Note the direct conflict with the table above:** MicroPhase's own unboxing page
+  (verified) lists the box contents without a pigtail, and the Chinese-community lens concludes from
+  it that an IPEX-to-SMA pigtail "is not in the shipped kit". The Crowd Supply claim is snippet-level
+  and `crowdsupply.com` was never reachable, so treat the pigtail as something to buy until the unit
+  in hand is opened; the "RX2 is usable out of the box" position rests entirely on the weaker source
+  (recorded as contradiction C13 in [verification-log.md](verification-log.md)). There is also **no
+  TX/RX antenna switching on the E200 at all** - the UHD FPGA top drives only `tx_amp_en1`
+  *(verified: verdict 1, `rf-ports`;
   <https://www.crowdsupply.com/microphase-technology/antsdr-e200/updates/answering-your-questions>)*.
   See [hardware-e200.md](hardware-e200.md) for the full port map.
 * **Host rate.** The Chinese table's flat "20 MSPS" is a vendor figure, not a measurement. The
   corrected statement is that a single 1 GbE port with a 1500-byte MTU caps continuous
   single-channel streaming at about **29.6 MSPS sc16, 39 MSPS sc12, 59 MSPS sc8**, and that the
   achievable rate depends on the firmware personality (IIO/Pluto path fixed at 4 bytes/sample through
-  the PS GEM and `iiod` on the ~700 MHz Cortex-A9) *(verified: verdict 2, host streaming tiers)*.
+  the PS GEM and `iiod` on the ~700 MHz Cortex-A9) *(verified: verdict 2, `host-streaming-tiers`)*.
 
 The `ant_impl.cpp` driver source confirms that the IPEX receiver is software-selectable under UHD:
 RX antennas are `{"TX/RX", "RX2"}` (lines 968-969), anything else is rejected (line 1378), the
@@ -296,8 +304,8 @@ personality is a **binary-only MicroPhase SD image redistributed by a third part
 not published. Strings pulled from the O4 ramdisk during verification show `sbin/drone_dji_rid_decode`
 built "2026/1/14" for "E200", CSV formats `dji_O,2/3,...` and `dji_O,4,...hash`, "O4 packet",
 "Enable o4/Disable o4", and the online call `/api/o4online/decrypt?hex=` with
-`Authorization` / `auth_secret` / `token_secret` environment variables *(verified: verdict 4, DJI
-generation coverage)*. In other words: **the Chinese vendor holds the O4 keys behind a paid cloud
+`Authorization` / `auth_secret` / `token_secret` environment variables *(verified: verdict 4,
+`dji-generation-coverage`)*. In other words: **the Chinese vendor holds the O4 keys behind a paid cloud
 endpoint**, which is the commercial reality that any European toolkit has to plan around. See
 [ADR-0006](../docs/decisions/ADR-0006-dji-three-tiers.md).
 
@@ -345,8 +353,7 @@ Three things make this the most instructive foreign artefact in the sweep:
    in <https://github.com/ALPssdz/RF-Vision-UAV-Tracker>).
 3. **Its 40 MSPS is not sustained streaming.** At int16 I/Q that is 160 MB/s, above GbE, so it
    burst-captures 2,621,440 samples (65.5 ms, 10.5 MB) per tick with gaps and retune sleeps. This
-   directly contradicted the round-1 reading and was corrected *(verified: verdict 2, host streaming
-   tiers)*: **40 MSPS sc16 is impossible on any 1 GbE firmware**. The burst-with-gaps pattern is
+   directly contradicted the round-1 reading and was corrected *(verified: verdict 2, `host-streaming-tiers`)*: **40 MSPS sc16 is impossible on any 1 GbE firmware**. The burst-with-gaps pattern is
    nonetheless the right pattern for the E200.
 
 The subcarrier-spacing mapping the whole S3 stage rests on (OcuSync 2 = 15 kHz, O3/O4 = about 30 kHz,
@@ -378,7 +385,7 @@ Chinese open-source direction-finding material.
 | 侦测与反制 - 无人机防御 (Hikvision C-UAS product page) | <https://www.hikvision.com/cn/products/drone-products/udf/detection-prevention/> | Mainstream vendor taxonomy: spectrum + EO + radar detection -> alert -> force return-to-home or landing. A list of 50+ Chinese C-UAS suppliers for spec-sheet mining is at <https://www.aibangfly.com/a/6327> |
 | 大疆发布 DJI O4 地面站 ("DJI releases the O4 ground station") | <https://www.ithome.com/0/965/621.htm>, <https://digi.ithome.com/archiver/823/622.htm> | O4 Air Unit / Air Unit Pro operate in **5.170-5.250 GHz and 5.725-5.850 GHz**; the O4 ground station switches automatically among sub-2 GHz, 2.4 GHz, 5.2 GHz and 5.8 GHz with a 12-antenna dual-polarised array; latency 20 ms standard, 15 ms racing |
 | 基于AD9361的图传hdzero图传介绍 ("Introduction to the AD9361-based HDZero video link") | <https://www.kechuang.org/t/89181> | HDZero architecture: a Divimath (迪威码, Xi'an) DM5680 baseband OFDM-modulates uncompressed video and hands I/Q to an AD9361; RX demodulates OFDM from an AD9361; latency under 1 ms, up to 1080p30; range 1.3 km at 5.8 GHz / 20 dBm and 22 km at 520 MHz / 30 dBm (<https://news.eeworld.com.cn/mp/ADI/a60568.jspx>) |
-| ELRS技术详解：基于LORA的低功耗远程无线电系统及其特性 | <https://blog.csdn.net/csdnpmsm/article/details/137477858> (+ <https://zhuanlan.zhihu.com/p/720873035>, <https://zhuanlan.zhihu.com/p/695156875>, <https://blog.csdn.net/lida2003/article/details/143709303>) | Chinese labels for the ELRS parameter set: SX127x at 433/868/915 MHz, SX1280/1281 at 2.4 GHz, LoRa and FLRC, adaptive FHSS, in-band time-division telemetry, power steps 25/100/250/500/1000/2000 mW (14-33 dBm). Nothing beyond the English ELRS docs, and the decodability question is settled elsewhere *(verified: verdict 3, ELRS decodability: every 2.4 GHz ELRS mode is detect/classify-only today)* |
+| ELRS技术详解：基于LORA的低功耗远程无线电系统及其特性 | <https://blog.csdn.net/csdnpmsm/article/details/137477858> (+ <https://zhuanlan.zhihu.com/p/720873035>, <https://zhuanlan.zhihu.com/p/695156875>, <https://blog.csdn.net/lida2003/article/details/143709303>) | Chinese labels for the ELRS parameter set: SX127x at 433/868/915 MHz, SX1280/1281 at 2.4 GHz, LoRa and FLRC, adaptive FHSS, in-band time-division telemetry, power steps 25/100/250/500/1000/2000 mW (14-33 dBm). Nothing beyond the English ELRS docs, and the decodability question is settled elsewhere *(verified: verdict 3, `elrs-decodability`: every 2.4 GHz ELRS mode is detect/classify-only today)* |
 | 无人机测试系列：大疆精灵3遥控+图传信号实测 ("Measured Phantom 3 RC and video signals") | <https://mbb.eet-china.com/blog/1675150-368785.html> | A 2016 spectrum-analyser bench measurement of a Lightbridge-era uplink and downlink. Page blocked; only its existence is established |
 | 我国无人机，FPV图传与遥控链路通信频段划分 ("China's frequency allocation for UAV FPV video and RC links") | <http://www.idc-rf.com/news/1183.html> (+ <https://www.techphant.cn/blog/98863.html>) | Claims to describe the MIIT allocation for UAV links (sub-GHz, 1.4 GHz, 2.4 GHz, 5.8 GHz). **The actual numbers were not in the snippet.** Chinese industrial drones may use allocations that a EU-centric scan misses; must be verified by hand |
 | 教程分享 \| C-RID 无人机唯一产品识别码广播模块使用教程 (bilibili) | <https://www.bilibili.com/video/BV1RRtEzvEZS/> | A Chinese add-on module that broadcasts the GB 42590 唯一产品识别码 (unique product identification code) - a cheap known-good transmitter for bench-testing a receiver against Chinese-format Remote ID |
@@ -634,7 +641,7 @@ ground transmitter's uplink and the video transmitter rather than waiting for te
 ELRS detector that sits on 868/915/2400 MHz will miss these links entirely; the search space is
 150 MHz to 2.8 GHz. That does not change the decodability picture - every 2.4 GHz ELRS mode remains
 detect/classify-only, and the standard 2.4 GHz FHSS table already spans 2400.4-2479.4 MHz, wider than
-the E200's 56 MHz instantaneous bandwidth *(verified: verdict 3, ELRS decodability)*.
+the E200's 56 MHz instantaneous bandwidth *(verified: verdict 3, `elrs-decodability`)*.
 
 ### 4.2 Where control links actually live: a dated drift
 
@@ -704,7 +711,7 @@ A detector that proves presence by producing a recognisable picture - the Chuyka
 degrades against this, while an FM-video **spectral** signature (line-rate structure, deviation) does
 not. That is consistent with the independent finding that analog FPV keeps its energy in a
 luma-driven quasi-static FM core, so a 10 MSPS capture is enough for detection and for a usable NTSC
-picture *(verified: verdict 5, analog FPV bandwidth)*.
+picture *(verified: verdict 5, `analog-fpv-bandwidth`)*.
 
 ### 4.5 Links that are not ELRS at all
 
@@ -726,7 +733,7 @@ The same mirror carries a Russian re-flash registry for DJI aircraft listing dro
 data), `aeroscope_random`, `aeroscope_z` and `aeroscope_heart` (broadcast pseudo-random or
 shape-drawing fake coordinates over DRONE ID), and firmware modifications described as
 "отключены DRONE ID, OpenDroneId, NFZ" (DRONE ID, OpenDroneID and no-fly zones disabled)
-*(verified: verdict 4, DJI generation coverage; local read of
+*(verified: verdict 4, `dji-generation-coverage`; local read of
 `docs/ПЛАТФОРМА_FPV/Прошивка/РЕЕСТР_ПРОШИВОК_ДЛЯ_КВАДРОКОПТЕРОВ_DJI.html` and
 `ПРОШИВКА_И_ПО_ДЛЯ_М3_(МАВИК_3).html` in <https://github.com/techuav/techuav.github.io>)*. DroneID is
 unauthenticated, so this is cheap. For AERIX it means an observation network must never treat

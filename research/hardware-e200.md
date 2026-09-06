@@ -219,14 +219,23 @@ but on the IIO firmware the FPGA top level ties it high unconditionally
 (`assign tx_amp_en = 1'b1` in `projects/e200/system_top.v` of the
 [HDL patch](https://github.com/MicroPhase/antsdr-fw-patch), checked in the cloned patch
 file), so the PA is enabled for as long as that personality runs. The correct passive
-posture is therefore to hold the TX chain at maximum attenuation, that is
-`tx_hardwaregain_chanX` at the bottom of the range the probe reports as 0.0 to 89.8 dB in
-0.2 dB steps
-([AntsdrE200_UHD.md](https://github.com/MicroPhase/antsdr_doc_en/blob/master/source/device_and_usage_manual/ANTSDR_E_Series_Module/ANTSDR_E200_Reference_Manual/AntsdrE200_UHD.md);
-`AD9361_MAX_GAIN = 89.75` in the UHD AD9361 device code reached through
+posture is therefore to hold the TX chain at maximum attenuation and never to call `tx()`,
+per [ADR-0001](../docs/decisions/ADR-0001-passive-receive-only.md). The two personalities
+use **opposite sign conventions** for that setting and must not be confused:
+
+| Personality | Attribute or call | Value for maximum attenuation | Source |
+|---|---|---|---|
+| UHD | `set_tx_gain()` | **0.0 dB**, the bottom of the TX gain range the documented probe output reports as "gain 0-89.8 dB step 0.2" for FE-TX1 | [AntsdrE200_UHD.md](https://github.com/MicroPhase/antsdr_doc_en/blob/master/source/device_and_usage_manual/ANTSDR_E_Series_Module/ANTSDR_E200_Reference_Manual/AntsdrE200_UHD.md) probe output |
+| IIO / pyadi | `tx_hardwaregain_chanX` | **-89**, the value the reference dual-RX script uses for a passive board | [Pluto_Beamformer deep read](https://github.com/jonkraft/Pluto_Beamformer) (`sdr.tx_hardwaregain_chan0 = -89  # passive`) |
+
+On the IIO path the attribute is an attenuation expressed as a negative number, so -89 is
+near the floor, not inside the 0.0 to 89.8 dB UHD gain range at all. The magnitude matches
+UHD's own `AD9361_MAX_GAIN = 89.75` constant (`ad9361_device.cpp` lines 288-294, reached
+through
 [ant_impl.cpp](https://github.com/MicroPhase/antsdr_uhd/blob/master/host/lib/usrp/ant/ant_impl.cpp)),
-and never to call `tx()`, per
-[ADR-0001](../docs/decisions/ADR-0001-passive-receive-only.md). Whether the PA still
+which is an inference about the sign convention rather than a statement any source makes;
+read back what the driver accepts before trusting it. Setting `0` on the IIO path would be
+maximum output power. Whether the PA still
 produces measurable LO leakage in that state is one of the numbers to measure (section 15).
 
 ---
@@ -241,9 +250,9 @@ personalities are mutually exclusive at boot time.
 | **IIO / PlutoSDR-compatible** (antsdr-fw-patch v0.39) | QSPI, factory-preloaded | root / `analog` | 192.168.1.10, mDNS `ant.local` | `iiod` over TCP; libiio, pyadi-iio, GNU Radio `gr-iio`, MATLAB. 1R1T until reconfigured | [antsdr-fw-patch README](https://github.com/MicroPhase/antsdr-fw-patch/blob/master/README.md), [unboxing page](https://github.com/MicroPhase/antsdr_doc_en/blob/master/source/device_and_usage_manual/ANTSDR_E_Series_Module/ANTSDR_E200_Reference_Manual/AntsdrE200_Unpacking_examination.md) |
 | **UHD (B210-compatible)** (antsdr_uhd v1.0) | SD only | root / `microphase` | 192.168.1.10, persisted with `ip_set <ip>` into the I2C EEPROM | UHD 4.1 device `type=ant`, two radio chains, sc16/sc12/sc8/fc32 over the wire | [antsdr_uhd README](https://github.com/MicroPhase/antsdr_uhd), [host README](https://github.com/MicroPhase/antsdr_uhd/blob/master/host/README.md), [firmware README](https://github.com/MicroPhase/antsdr_uhd/blob/master/firmware/README.md) |
 | **DJI DroneID, legacy** (`done_dji_release`, 2024-03-06) | SD | configured from QSPI Pluto mode as root / `analog` | 192.168.1.10 | TCP **server** on port 41030, little-endian binary detection frames | [alphafox02/antsdr_dji_droneid](https://github.com/alphafox02/antsdr_dji_droneid) |
-| **DJI DroneID, current** (`drone_dji_rid_decode`, 2026-01-14) | SD (`build_sdimg_drone_net.zip`) | root / `1` | from `ipaddr_eth` | TCP **client** to `tcp_serverip:52002` sending CSV lines | [alphafox02/antsdr_dji_droneid](https://github.com/alphafox02/antsdr_dji_droneid) |
-| **DJI DroneID, O4** (`build_sdimg_drone_o4.zip`) | SD | root / `1` | from `ipaddr_eth` | O4 encrypted-ID detection: hash, frequency, RSSI | [alphafox02/antsdr_dji_droneid](https://github.com/alphafox02/antsdr_dji_droneid) |
-| **openwifi** (board `antsdr_e200`) | SD | password `openwifi` | 192.168.10.122 | mac80211 802.11a/g/n: monitor, injection, CSI, short IQ capture. No wideband IQ | [openwifi](https://github.com/open-sdr/openwifi), [board README](https://github.com/open-sdr/openwifi/blob/master/kernel_boot/boards/antsdr_e200/README.md), [MicroPhase E200 page](https://github.com/MicroPhase/antsdr_doc_en/blob/master/source/device_and_usage_manual/ANTSDR_E_Series_Module/ANTSDR_E200_Reference_Manual/AntsdrE200_openwifi.md) |
+| **DJI DroneID, current** (`drone_dji_rid_decode`, 2026-01-14) | SD (zip filename disputed, see below) | root / `1` | from `ipaddr_eth` | TCP **client** to `tcp_serverip:52002` sending CSV lines | [alphafox02/antsdr_dji_droneid](https://github.com/alphafox02/antsdr_dji_droneid) |
+| **DJI DroneID, O4** (zip filename disputed, see below) | SD | root / `1` | from `ipaddr_eth` | O4 encrypted-ID detection: hash, frequency, RSSI | [alphafox02/antsdr_dji_droneid](https://github.com/alphafox02/antsdr_dji_droneid) |
+| **openwifi** (board `antsdr_e200`) | SD | password `openwifi` (from the E310 openwifi page, which the E200 page defers to) | 192.168.10.122 (same E310 page) | mac80211 802.11a/g/n: monitor, injection, CSI, short IQ capture. No wideband IQ | [openwifi](https://github.com/open-sdr/openwifi), [board README](https://github.com/open-sdr/openwifi/blob/master/kernel_boot/boards/antsdr_e200/README.md), [MicroPhase E200 page](https://github.com/MicroPhase/antsdr_doc_en/blob/master/source/device_and_usage_manual/ANTSDR_E_Series_Module/ANTSDR_E200_Reference_Manual/AntsdrE200_openwifi.md) |
 | **Kuiper / FMCOMMS** | SD (dd image + MicroPhase boot files) | Kuiper defaults | static, set in `/etc/network/interfaces` | full Debian with a local IIO context; the E310 page claims "2T2R operation at a 61.44Msps sampling rate" on-board | [antsdr_fmcomms](https://github.com/MicroPhase/antsdr_fmcomms) (snippet), [AntsdrE310_fmcomms.md](https://github.com/MicroPhase/antsdr_doc_en/blob/master/source/device_and_usage_manual/ANTSDR_E_Series_Module/ANTSDR_E310_Reference_Manual/AntsdrE310_fmcomms.md) |
 | **Standalone / no-OS** | JTAG or SD | n/a | n/a | bare-metal ADI HDL + no-OS project `antsdre200`, LO/rate/gain over serial | [antsdr_standalone](https://github.com/MicroPhase/antsdr_standalone) |
 
@@ -265,6 +274,17 @@ Notes that cost time if missed:
 - The DroneID SD images are modified **Pluto-firmware** builds, not UHD: their `uEnv.txt`
   is the stock `antsdre200` environment with `mode=1r1t` and `maxcpus=1`
   ([alphafox02/antsdr_dji_droneid](https://github.com/alphafox02/antsdr_dji_droneid)).
+- **The zip-to-binary mapping is contradictory in the evidence and must be confirmed by
+  unpacking the archive before flashing.** The round-1 reading of the repository says
+  `build_sdimg_drone_net.zip` (files dated 2024-03-06) contains the **legacy**
+  `/usr/sbin/done_dji_release` (TCP server on 41030, binary frames) and
+  `build_sdimg_drone_o4.zip` (2026-01-14) contains the **new** `/sbin/drone_dji_rid_decode`
+  (TCP client to `tcp_serverip:52002`, CSV). The deep read of the same repository says the
+  opposite, that `build_sdimg_drone_net.zip` carries `drone_dji_rid_decode` and
+  `build_sdimg_drone_o4.zip` is the O4 detection image. Both readings agree on which
+  **binary** does what; only the filename attached to each disagrees. Extract the ramdisk
+  and check for `done_dji_release` versus `drone_dji_rid_decode` before committing an SD
+  card ([alphafox02/antsdr_dji_droneid](https://github.com/alphafox02/antsdr_dji_droneid)).
 - openwifi on the E200 boots only from SD, so it excludes both streaming personalities.
   Inside the openwifi image the AD9361 IIO control driver is present but the `cf-ad9361`
   IQ DMA is disabled, so there is no wideband IQ stream; openwifi is also OFDM-only and
@@ -459,12 +479,14 @@ CMOS in both personalities, so that route would require a new FPGA build and is 
 ## 7. Host streaming: what each personality really sustains
 
 This is the single most consequential set of numbers for the toolkit, and it was checked
-adversarially (verified: `stream-rate`).
+adversarially (verified: `host-streaming-tiers`).
 
 **The physical ceiling.** The UHD path uses `udp_simple::mtu` = 1472-byte UDP payloads in
 1500-byte frames with a 16-byte CHDR header and no jumbo frames. That gives 81,274
 packets/s times 364 sc16 samples = **29.6 MSPS** maximum continuous single-channel sc16,
-39.4 MSPS at sc12 and 59.2 MSPS at sc8. 40 MSPS sc16 is 1.28 Gbit/s and is impossible on
+39.4 MSPS at sc12 and 59.2 MSPS at sc8. All three are **derived**, and they rest on the
+16-byte header assumption behind the 364-sample figure (section 8): a larger CHDR header
+lowers all three proportionally. 40 MSPS sc16 is 1.28 Gbit/s and is impossible on
 any firmware ([ant_impl.cpp](https://github.com/MicroPhase/antsdr_uhd/blob/master/host/lib/usrp/ant/ant_impl.cpp),
 [ant_io_impl.cpp](https://github.com/MicroPhase/antsdr_uhd/blob/master/host/lib/usrp/ant/ant_io_impl.cpp)).
 The Zynq-7000 GEM used by the IIO path has no jumbo-frame capability at all
@@ -491,13 +513,13 @@ while the IIO firmware routes everything through `&gem0` with `phy-mode = rgmii-
 | Path | Figure | Nature | Source |
 |---|---|---|---|
 | Vendor selection table | 20 MSPS "transmission bandwidth to host" (E310: 10 MSPS, E316: 20 MSPS) | table entry, no test data | [AntsdrE200_RF_parameters.md](https://github.com/MicroPhase/antsdr_doc_en/blob/master/source/device_and_usage_manual/ANTSDR_E_Series_Module/ANTSDR_E200_Reference_Manual/AntsdrE200_RF_parameters.md) |
-| IIO, stock firmware | ~44.7-52 MiB/s = **11-13 MSPS** sc16, 1 channel, CPU-bound in `iiod` | community measurement on a Zynq-7000/ANTSDR | [libiio discussion #875](https://github.com/analogdevicesinc/libiio/discussions/875) |
+| IIO, stock firmware | roughly **47-52 MiB/s = 11-13 MSPS** sc16, 1 channel, CPU-bound in `iiod` | community measurement on a Zynq-7000/ANTSDR; the quoted thread values are 48 MiB/s (libiio 0.23 both sides) and 52 MiB/s (1.0-dev `iiod`, 0.23 host) | [libiio discussion #875](https://github.com/analogdevicesinc/libiio/discussions/875) (verified: `host-streaming-tiers`) |
 | IIO, kernel/iiod tuned | 82-84 MiB/s = **~20-22 MSPS** with larger blocks, `-O3` kernel, `iiod` pinned to a core | same thread; also LibreSDR "20 MSPS without overclock, compared to ~10 MSPS stock" | [#875](https://github.com/analogdevicesinc/libiio/discussions/875), [libresdr](https://github.com/hz12opensource/libresdr) |
 | IIO, overclocked | **27.5 MSPS** at 1100 MHz CPU / 750 MHz DDR | LibreSDR only, not ANTSDR firmware | [libresdr](https://github.com/hz12opensource/libresdr) |
 | UHD, vendor stress test | 2 devices at 7.68 MSPS each = "about 492 Mbit/s of aggregate sc16 RX payload for two devices" over 14400 s | a default, explicitly not a maximum | [host README](https://github.com/MicroPhase/antsdr_uhd/blob/master/host/README.md), [antsdr_dual_e200_stress.sh](https://github.com/MicroPhase/antsdr_uhd/blob/master/host/utils/antsdr_dual_e200_stress.sh) |
 | UHD, wire formats | sc16 / sc12 / fc32 / sc8 all implemented in driver and FPGA | `SR_RX_FMT` 0/1/2/3, `chdr_16sc_to_8sc.v` / `chdr_16sc_to_12sc.v` in the FPGA manifest; **no published throughput measurement** | [ant_io_impl.cpp](https://github.com/MicroPhase/antsdr_uhd/blob/master/host/lib/usrp/ant/ant_io_impl.cpp) |
-| Two channels | halve the per-channel rate: 14.8 MSPS sc16 wire maximum, ~10 MSPS per channel practical against the 20 MSPS vendor figure | arithmetic on the above | (verified: `stream-rate`) |
-| Snapshot mode | any AD9361 rate up to 61.44 MSPS into a DDR buffer, then a slow transfer | the DMA lands in DDR first on both firmwares | (verified: `stream-rate`) |
+| Two channels | halve the per-channel rate: 14.8 MSPS sc16 wire maximum, ~10 MSPS per channel practical against the 20 MSPS vendor figure | arithmetic on the above | (verified: `host-streaming-tiers`) |
+| Snapshot mode | any AD9361 rate up to 61.44 MSPS into a DDR buffer, then a slow transfer | the DMA lands in DDR first on both firmwares | (verified: `host-streaming-tiers`) |
 
 Two corrections the research record needed:
 
@@ -512,14 +534,18 @@ Two corrections the research record needed:
   IIO firmware is built on plutosdr-fw v0.39, which ships **libiio v0.26 and Linux 6.1**
   ([plutosdr-fw v0.39](https://github.com/analogdevicesinc/plutosdr-fw/releases/tag/v0.39)),
   untuned; an open request for an overclocked build has had no maintainer reply
-  ([issue #29](https://github.com/MicroPhase/antsdr-fw-patch/issues/29)).
+  ([issue #29](https://github.com/MicroPhase/antsdr-fw-patch/issues/29)). Note a small
+  unit disagreement inside the record itself: the round-1 reading of the same thread
+  reports the stock figure as "~44.7 MB/s (~11 MSPS sc16, 1 ch)" while the verification
+  pass quotes the thread as 48 and 52 **MiB/s**. The table above uses the verification
+  pass's numbers; either way the conclusion, 11-13 MSPS, is the same.
 - **The "40 MSPS from a Zynq-7020" claim in RF-Vision-UAV-Tracker is a snapshot rate, not
   a stream.** That project sets `sample_rate = 40e6`, `rx_rf_bandwidth = 40e6` and
   `rx_buffer_size = 2621440` on `adi.Pluto`, i.e. 65.5 ms and 10.5 MB per capture, with
   40-50 ms PLL settling sleeps and discarded buffers after every retune
   ([RF-Vision-UAV-Tracker](https://github.com/ALPssdz/RF-Vision-UAV-Tracker)). At 50-108
   MB/s of transfer that 10.5 MB snapshot takes 97-210 ms, a 24-40 % duty cycle
-  (verified: `stream-rate`). It is the right pattern for the E200, and it is not
+  (verified: `host-streaming-tiers`). It is the right pattern for the E200, and it is not
   continuous streaming.
 
 Host-side tuning that follows from the UHD driver's constants: the data transports are
@@ -554,13 +580,14 @@ must be rebuilt against this libuhd for the `uhd` blocks to see the E200
 | UDP ports | discovery 49100, control 49200, TX data 49202 and 49203, RX data 49204 (driver comment: "ports 49200-49210") | [ant_impl.cpp](https://github.com/MicroPhase/antsdr_uhd/blob/master/host/lib/usrp/ant/ant_impl.cpp) |
 | Discovery handshake | 8-byte hello with ids `'1'`, `'m'`, `'9'`, `'j'`; an 8-byte `'r'` dispatcher packet on the RX socket | same |
 | Transports | 1472-byte frames, 16 send and 16 receive frames, 1e6-byte socket buffers when the key is absent | same |
-| `spp` | `min(4092, (recv_frame_size - header) / bytes_per_item)`, about 364 sc16 / 485 sc12 / 728 sc8 samples per packet | [ant_io_impl.cpp](https://github.com/MicroPhase/antsdr_uhd/blob/master/host/lib/usrp/ant/ant_io_impl.cpp) |
+| `spp` | `min(4092, (recv_frame_size - header) / bytes_per_item)`, about 364 sc16 / 485 sc12 / 728 sc8 samples per packet (**derived**, assuming a 16-byte CHDR header, i.e. `max_if_hdr_words32 = 7` on top of a 1472-byte UDP payload; the deep read flags the header size as an assumption) | [ant_io_impl.cpp](https://github.com/MicroPhase/antsdr_uhd/blob/master/host/lib/usrp/ant/ant_io_impl.cpp) |
 | RX flow control | E200 only: window 128 packets, credit every 16 packets, sent as CHDR context packets on the control socket with SID 0x11/0x21 | same |
 | Default tick rate | 16 MHz with automatic selection (`DEFAULT_TICK_RATE 16e6`, `DEFAULT_DECIM 128`) | [ant_impl.cpp](https://github.com/MicroPhase/antsdr_uhd/blob/master/host/lib/usrp/ant/ant_impl.cpp) |
 | Cross-process lock | `flock` on `/run/lock/iqtaxi-device-<hash of addr>.lock`; a second process gets "ANTSDR device \<addr\> is busy" | same, commit 2026-08-25 |
 | Clock / time sources | `clock_source` internal or external, `time_source` none, internal or external, both on the single MMCX jack; sensor `ref_locked` | [AntsdrE200_UHD.md](https://github.com/MicroPhase/antsdr_doc_en/blob/master/source/device_and_usage_manual/ANTSDR_E_Series_Module/ANTSDR_E200_Reference_Manual/AntsdrE200_UHD.md), [ant_impl.cpp](https://github.com/MicroPhase/antsdr_uhd/blob/master/host/lib/usrp/ant/ant_impl.cpp) |
 
-What `uhd_usrp_probe` prints on a v1.0 SD image
+What the vendor documentation shows `uhd_usrp_probe` printing (a UHD 3.15-era output; the
+documentation does not say which SD image produced it)
 ([AntsdrE200_UHD.md](https://github.com/MicroPhase/antsdr_doc_en/blob/master/source/device_and_usage_manual/ANTSDR_E_Series_Module/ANTSDR_E200_Reference_Manual/AntsdrE200_UHD.md),
 Chinese mirror [AntsdrE200_UHD_cn.md](https://github.com/MicroPhase/antsdr_doc_en/blob/master/source_cn/device_and_usage_manual/ANTSDR_E_Series_Module/ANTSDR_E200_Reference_Manual/AntsdrE200_UHD_cn.md)):
 `[E200] _Product B205MINI(COMPATIBLE)`, master clock "automatic" defaulting to 16 MHz,
@@ -569,9 +596,12 @@ mboard `ANTSDR-EXXX`, "No mboard EEPROM found", FPGA Version 7.0, RX DSP frequen
 **50.000 to 6000.000 MHz**, RX gain range PGA 0.0 to 76.0 dB in 1.0 dB steps, bandwidth
 200 kHz to 56 MHz, sensors `temp`, `rssi`, `lo_locked`; TX gain 0.0 to 89.8 dB in 0.2 dB
 steps. Note the FPGA/host coupling: current `master` expects
-`B200_FPGA_COMPAT_NUM = 16` (the B210 flow with source flow control) while the published
-v1.0 image reports FPGA version 7.0 (the B205 compat-7 flow), so host and firmware must be
-built from matching revisions or probing throws "Expected FPGA compatibility number"
+`B200_FPGA_COMPAT_NUM = 16` (the B210 flow with source flow control) while the documented
+probe output reports FPGA Version 7.0 (the B205 compat-7 flow), so host and firmware must
+be built from matching revisions or probing throws "Expected FPGA compatibility number".
+Which SD image that probe output came from is **not stated in any source**, so this is a
+reason to check `FPGA Version` on the unit before assuming a mismatch, not a statement
+that the shipping v1.0 image is on compat 7
 ([ant_impl.cpp](https://github.com/MicroPhase/antsdr_uhd/blob/master/host/lib/usrp/ant/ant_impl.cpp)).
 Also note the probe's 50 MHz lower edge against the datasheet 70 MHz; the evidence does
 not explain the difference.
@@ -598,8 +628,8 @@ Use `adi.ad9364('ip:192.168.1.10')` for 1R1T and `adi.ad9361(...)` once 2r2t is 
 | `rx_rf_bandwidth` | `voltage0` `rf_bandwidth` | analog filter; set roughly equal to `sample_rate` |
 | `rx_lo` | `altvoltage0` `frequency` | 70 MHz to 6 GHz in the pyadi test sweep, 1 Hz steps per the GNU Radio block |
 | `gain_control_mode_chan0` / `_chan1` | `gain_control_mode` | `manual`, `slow_attack`, `hybrid`, `fast_attack`. **Must be set to `manual` before any gain write**: the `rx_hardwaregain_chanX` setter is silently skipped otherwise |
-| `rx_hardwaregain_chan0` / `_chan1` | `hardwaregain` | UHD probe gives the usable PGA range as 0 to 76 dB in 1 dB steps |
-| `tx_hardwaregain_chan0` / `_chan1` | `hardwaregain` | drive to the bottom of the 0.0 to 89.8 dB range the probe reports, for example -89, and never call `tx()` (section 2) |
+| `rx_hardwaregain_chan0` / `_chan1` | `hardwaregain` | 0 to 76 dB in 1 dB steps **as quoted from the UHD probe output** for FE-RX1; that range is a UHD-personality figure and is **not confirmed on the IIO personality**, where the only sourced numbers are the -3 to 70 dB used by ADI's own scripts. Read the attribute's `_available` range on the board (section 15) |
+| `tx_hardwaregain_chan0` / `_chan1` | `hardwaregain` | an **attenuation on the IIO path, expressed as a negative number**: set `-89` for passive operation and never call `tx()` (section 2). Do not confuse this with the UHD TX *gain* range of 0.0 to 89.8 dB, where maximum attenuation is 0.0 |
 | `rx_buffer_size` | n/a | only read when the buffer is created on the first `rx()`; call `rx_destroy_buffer()` before changing it |
 | `rx()` | | returns a list of two complex arrays with two channels enabled, a single array with one; raw int16 counts unless `rx_output_type='SI'` |
 | `_rxadc.set_kernel_buffers_count(1)` | libiio v0 API | avoids stale buffers; with libiio v1 bindings set `_rx_buffer_num_blocks` (default 4) before the first `rx()` |
@@ -729,7 +759,7 @@ The physics is favourable and the calibration discipline is the hard part.
   20 MSPS host figure roughly 10 MSPS per channel. That is below the 15.36 MSPS a DroneID
   OcuSync 2 burst needs, so two-channel DroneID direction finding requires on-board
   preprocessing or burst capture rather than continuous streaming
-  (verified: `stream-rate`, `rf-ports`; see
+  (verified: `host-streaming-tiers`, `rf-ports`; see
   [ADR-0009](../docs/decisions/ADR-0009-localisation-deferred.md)).
 - For TDOA across several E200s, `dronelocate`'s UHD source is written for "B210-class
   hardware" with `channels=[0, 1]` for the coherent pair and warns that without a
@@ -871,6 +901,7 @@ sourced claim each measurement settles.
 | 15 | Board temperature and thermal drift | `xadc` and the UHD `temp` sensor over a long capture | drift is a phase-calibration invalidation source |
 | 16 | Second Cortex-A9 | `fw_setenv maxcpus 2`, reboot, `nproc` | inference only today; matters for [ADR-0005](../docs/decisions/ADR-0005-processing-location.md) |
 | 17 | openwifi personality, if used | boot the image, `sdrctl dev sdr0 get reg rx 20`, time to the Viterbi halt; capture a known Remote ID beacon and read its radiotap data rate | confirms whether 1 Mbps DSSS beacons are invisible on this board |
+| 18 | RX and TX gain ranges on the IIO personality | read `in_voltage0_hardwaregain_available` and `out_voltage0_hardwaregain_available` with `iio_attr`, then step through them | the 0 to 76 dB RX range and the 0.0 to 89.8 dB TX range are UHD-probe figures; the IIO-side ranges and the sign convention of `tx_hardwaregain_chanX` are unconfirmed (sections 2 and 9) |
 
 ---
 
