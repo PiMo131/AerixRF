@@ -148,7 +148,7 @@ COMMANDS: tuple[Command, ...] = (
 # imported inside :func:`build_parser` so that one broken or half-installed
 # module costs its own subcommand, not the whole CLI.
 EXTERNAL_COMMANDS: tuple[str, ...] = (
-    "cli_capture", "cli_sweep", "cli_classify", "cli_droneid",
+    "cli_capture", "cli_sweep", "cli_classify", "cli_droneid", "cli_video",
 )
 
 

@@ -104,6 +104,12 @@ SYNC_LEVEL = -0.04
 SYNC_THRESHOLD = -0.020
 BLACK_LEVEL = -0.02
 WHITE_LEVEL = 0.06
+#: Blanking, which is the level of the back porch. A decoder restores every
+#: line's black on its own back porch, so this is the reference the picture is
+#: measured against and the zero of :data:`video_decode.VIDEO_SPAN`. It sits
+#: *above* :data:`BLACK_LEVEL`: that constant is the slicing level used to
+#: separate sync from picture, not the black of a restored line.
+BLANKING_LEVEL = -0.015
 #: Line periods of the two analog standards.
 LINE_PERIOD_S = MappingProxyType({"ntsc": 63.5e-6, "pal": 64.0e-6})
 
