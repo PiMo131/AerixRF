@@ -32,8 +32,9 @@ from .zc import carrier_indices, zc_frequency
 
 __all__ = ["DEFAULT_TX", "DroneIdTx", "make_burst", "make_frame_bytes", "place_burst"]
 
-#: Degrees to the int32 encoding DJI uses: radians scaled by 1e7.
-_DEG_SCALE = 1e7 / 57.2957795785523
+#: Degrees to the int32 encoding DJI uses. Shared with the receiver so the
+#: two halves of the codec cannot disagree; see :data:`constants.COORD_SCALE`.
+_DEG_SCALE = C.COORD_SCALE
 
 
 @dataclass(frozen=True)

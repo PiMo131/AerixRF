@@ -547,11 +547,24 @@ def parse_frame(payload: bytes) -> DroneIdFrame | None:
      v_n, v_e, v_u, yaw, gps_time, pilot_lat, pilot_lon, home_lon, home_lat,
      product, uuid_len, uuid_raw, _pad, _crc) = fields
 
-    def _deg(value: int) -> float | None:
-        if value == 0:
-            return None
-        deg = float(value) / 174533.0
-        return deg if -90.0 <= abs(deg) <= 180.0 else None
+    def _pair(lat_raw: int, lon_raw: int) -> tuple[float | None, float | None]:
+        """One latitude and longitude, each checked against its own range.
+
+        The two are not interchangeable: latitude runs to 90 degrees and
+        longitude to 180. Checking both against one range, which an earlier
+        version of this function did, accepts an impossible latitude of 150
+        and rejects an ordinary Pacific longitude of -150.
+
+        "No fix" is decided on the pair. A single zero is a real place: the
+        equator and the Greenwich meridian both run through airspace.
+        """
+        if lat_raw == 0 and lon_raw == 0:
+            return None, None
+        latitude = float(lat_raw) / C.COORD_SCALE
+        longitude = float(lon_raw) / C.COORD_SCALE
+        if not (-90.0 <= latitude <= 90.0 and -180.0 <= longitude <= 180.0):
+            return None, None
+        return latitude, longitude
 
     serial = serial_raw.split(b"\x00", 1)[0].decode("utf-8", "replace")
     return DroneIdFrame(
@@ -559,9 +572,11 @@ def parse_frame(payload: bytes) -> DroneIdFrame | None:
         product_type=int(product),
         product_name=C.PRODUCT_TYPES.get(int(product), f"unknown ({product})"),
         sequence=int(sequence), state_info=int(state),
-        drone_lat=_deg(lat), drone_lon=_deg(lon),
-        pilot_lat=_deg(pilot_lat), pilot_lon=_deg(pilot_lon),
-        home_lat=_deg(home_lat), home_lon=_deg(home_lon),
+        drone_lat=_pair(lat, lon)[0], drone_lon=_pair(lat, lon)[1],
+        pilot_lat=_pair(pilot_lat, pilot_lon)[0],
+        pilot_lon=_pair(pilot_lat, pilot_lon)[1],
+        home_lat=_pair(home_lat, home_lon)[0],
+        home_lon=_pair(home_lat, home_lon)[1],
         height_m=float(height), altitude_m=float(altitude),
         v_north_m_s=float(v_n), v_east_m_s=float(v_e), v_up_m_s=float(v_u),
         yaw_deg=float(yaw) / 100.0, gps_time_ms=int(gps_time),

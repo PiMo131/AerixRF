@@ -337,3 +337,49 @@ def test_degenerate_inputs():
     scores = np.array([0.0, 1.0, 0.0])
     assert rx.interpolate_peak(scores, 1) == pytest.approx(1.0)
     assert rx.interpolate_peak(scores, 0) == 0.0  # cannot interpolate at the edge
+
+
+# ------------------------------------------------ coordinate ranges (H2)
+
+
+def _frame_with(lat_deg, lon_deg, **kw):
+    """A synthetic frame whose drone position is set to an exact pair."""
+    from antsdr_toolkit.droneid import synth
+    tx = synth.DroneIdTx(drone_lat=lat_deg, drone_lon=lon_deg, **kw)
+    return synth.make_frame_bytes(tx)
+
+
+@pytest.mark.parametrize(("lat", "lon"), [
+    (51.9225, 4.47917),      # Rotterdam
+    (-33.8688, 151.2093),    # Sydney: southern and eastern
+    (0.0, 4.47917),          # on the equator, which is a real place
+    (51.9225, 0.0),          # on the Greenwich meridian, likewise
+])
+def test_a_lone_zero_coordinate_is_a_place_not_a_missing_fix(lat, lon):
+    """Only a zero *pair* means no fix. The equator has airspace over it."""
+    from antsdr_toolkit.droneid import constants as C
+    frame = _frame_with(lat, lon)
+    import struct
+    fields = struct.unpack("<BBBHH16siihhhhhhQiiiiBB19sBH", frame)
+    lon_raw, lat_raw = fields[6], fields[7]
+    assert lat_raw == pytest.approx(lat * C.COORD_SCALE, abs=1.0)
+    assert lon_raw == pytest.approx(lon * C.COORD_SCALE, abs=1.0)
+
+
+def test_the_encoder_and_decoder_share_one_coordinate_scale():
+    """They previously carried their own, disagreeing by about 2.5 m.
+
+    174533.0 in the receiver against 1e7 / 57.2957795785523 in the
+    synthesiser: 4.3 parts in ten million, which the round-trip test's
+    tolerance was too wide to notice.
+    """
+    import math
+
+    from antsdr_toolkit.droneid import constants as C
+    from antsdr_toolkit.droneid import synth
+    assert synth._DEG_SCALE is C.COORD_SCALE
+    assert C.COORD_SCALE == pytest.approx(1e7 * math.pi / 180.0, rel=1e-15)
+    # The old receiver constant differed by enough to matter at Dutch latitudes.
+    old = 174533.0
+    error_m = 52.0 * (old / C.COORD_SCALE - 1.0) * 111_320
+    assert abs(error_m) > 2.0, "the mismatch this test guards was smaller than thought"

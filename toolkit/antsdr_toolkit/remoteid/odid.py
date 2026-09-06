@@ -77,7 +77,9 @@ __all__ = [
     "CLASS_EU",
     "ID_TYPES",
     "INVALID",
+    "LATITUDE_RANGE",
     "LATLON_MULT",
+    "LONGITUDE_RANGE",
     "MESSAGE_SIZE",
     "MESSAGE_TYPES",
     "PACK_MAX_MESSAGES",
@@ -304,16 +306,40 @@ def _i32(raw: bytes, offset: int) -> int:
     return struct.unpack_from("<i", raw, offset)[0]
 
 
-def _latlon(value: int) -> float | None:
-    """Degrees, or ``None`` when the field is zero or out of range.
+#: Physical limits, which are not the same for the two coordinates. Checking
+#: both against one range is the classic way to accept an impossible latitude
+#: of 150 degrees while rejecting an ordinary Pacific longitude of -150.
+#: ``opendroneid.h`` states them separately (MIN_LAT/MAX_LAT -90/90,
+#: MIN_LON/MAX_LON -180/180) and so does this.
+LATITUDE_RANGE = (-90.0, 90.0)
+LONGITUDE_RANGE = (-180.0, 180.0)
 
-    Exactly (0, 0) is how every implementation signals "no fix", so it is
-    treated as unknown rather than as a position in the Gulf of Guinea.
-    """
+
+def _degrees(value: int, limits: tuple[float, float]) -> float | None:
+    """One coordinate in degrees, or ``None`` if outside its own range."""
     degrees = value / LATLON_MULT
-    if value == 0 or not -90.0 <= degrees <= 180.0:
-        return None
-    return degrees
+    return degrees if limits[0] <= degrees <= limits[1] else None
+
+
+def _position(lat_raw: int, lon_raw: int) -> tuple[float | None, float | None]:
+    """A coordinate pair, with "no fix" decided on the pair, not per field.
+
+    Implementations signal an absent fix with zeros, but they send *both* as
+    zero. Rejecting each coordinate whenever it alone is zero would discard a
+    real position anywhere on the equator or the Greenwich meridian, which is
+    a large number of places people fly. So the pair is rejected only when
+    both halves are zero.
+
+    A pair is also only as good as its worse half: a valid latitude beside an
+    impossible longitude is not half a position, so both are dropped.
+    """
+    if lat_raw == 0 and lon_raw == 0:
+        return None, None
+    latitude = _degrees(lat_raw, LATITUDE_RANGE)
+    longitude = _degrees(lon_raw, LONGITUDE_RANGE)
+    if latitude is None or longitude is None:
+        return None, None
+    return latitude, longitude
 
 
 def _altitude(encoded: int) -> float | None:
@@ -361,7 +387,8 @@ def decode_message(raw: bytes) -> _Base:
             else float(speed),
             speed_v_m_s=None if vspeed_raw == INVALID["speed_v_m_s"]
             else vspeed_raw * _VSPEED_DIV,
-            latitude=_latlon(_i32(raw, 5)), longitude=_latlon(_i32(raw, 9)),
+            latitude=_position(_i32(raw, 5), _i32(raw, 9))[0],
+            longitude=_position(_i32(raw, 5), _i32(raw, 9))[1],
             altitude_baro_m=_altitude(_u16(raw, 13)),
             altitude_geo_m=_altitude(_u16(raw, 15)),
             height_m=_altitude(_u16(raw, 17)),
@@ -396,8 +423,8 @@ def decode_message(raw: bytes) -> _Base:
             protocol_version=version, raw=raw,
             operator_location_type=_OPERATOR_LOCATION.get(raw[1] & 0x03, "reserved"),
             classification_type=_CLASSIFICATION.get((raw[1] >> 2) & 0x07, "reserved"),
-            operator_latitude=_latlon(_i32(raw, 2)),
-            operator_longitude=_latlon(_i32(raw, 6)),
+            operator_latitude=_position(_i32(raw, 2), _i32(raw, 6))[0],
+            operator_longitude=_position(_i32(raw, 2), _i32(raw, 6))[1],
             area_count=_u16(raw, 10), area_radius_m=raw[12] * 10,
             area_ceiling_m=_altitude(_u16(raw, 13)),
             area_floor_m=_altitude(_u16(raw, 15)),

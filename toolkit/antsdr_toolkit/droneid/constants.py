@@ -50,6 +50,7 @@ import math
 from types import MappingProxyType
 
 __all__ = [
+    "COORD_SCALE",
     "CRC16_INIT",
     "CRC16_POLY",
     "CRC24A_POLY",
@@ -77,6 +78,17 @@ __all__ = [
     "is_supported_rate",
     "zc_body_offsets",
 ]
+
+#: DJI encodes latitude and longitude as radians scaled by 1e7, so degrees are
+#: multiplied by ``1e7 * pi / 180`` = 174532.925199...
+#:
+#: One definition, used by both the decoder and the burst synthesiser. They
+#: previously carried their own: 174533.0 in the receiver against 1e7/57.29578
+#: in the synthesiser. The difference is 4.3 parts in ten million, which is
+#: about 2.5 m of position at Dutch latitudes, and the round-trip test did not
+#: catch it because its tolerance was wider than the error. A shared constant
+#: is the only way two sides of a codec cannot drift.
+COORD_SCALE = 1e7 * math.pi / 180.0
 
 SUBCARRIER_SPACING_HZ = 15e3
 N_CARRIERS = 601          # 600 data carriers plus the null DC carrier

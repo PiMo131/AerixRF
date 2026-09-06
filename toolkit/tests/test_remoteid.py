@@ -368,3 +368,72 @@ def test_the_cli_decodes_a_single_hex_frame(capsys):
     frame = wifi.build_beacon(bytes([4]) + _pack_bytes())
     assert cli_remoteid.main(["--hex", frame.hex()]) == 0
     assert SERIAL in capsys.readouterr().out
+
+
+# ------------------------------------------------ coordinate ranges (H2)
+
+
+@pytest.mark.parametrize(("lat", "lon", "ok"), [
+    (0.0, 0.0, False),          # both zero: the no-fix signal
+    (51.9225, 4.47917, True),   # Rotterdam
+    (-33.8688, 151.2093, True), # Sydney, southern and eastern
+    (0.0, 4.47917, True),       # on the equator: a real place, not "no fix"
+    (51.9225, 0.0, True),       # on the Greenwich meridian: likewise
+    (90.0, 180.0, True),        # the corners are legal
+    (-90.0, -180.0, True),
+])
+def test_positions_at_and_around_the_limits(lat, lon, ok):
+    """Latitude runs to 90 and longitude to 180, and a lone zero is a place."""
+    decoded = odid.decode_message(odid.encode_location(latitude=lat, longitude=lon))
+    if ok:
+        assert decoded.position is not None, f"{lat}, {lon} was rejected"
+        assert decoded.latitude == pytest.approx(lat, abs=1e-6)
+        assert decoded.longitude == pytest.approx(lon, abs=1e-6)
+    else:
+        assert decoded.position is None
+
+
+def test_a_latitude_beyond_90_is_rejected_even_though_a_longitude_there_is_fine():
+    """The bug this guards: one range used for both coordinates.
+
+    150 degrees is an impossible latitude and an ordinary longitude. A shared
+    check either accepts the first or rejects the second; it cannot be right
+    about both.
+    """
+    impossible_lat = struct.pack("<i", round(150.0 * odid.LATLON_MULT))
+    fine_lon = struct.pack("<i", round(150.0 * odid.LATLON_MULT))
+    raw = bytearray(odid.encode_location(latitude=1.0, longitude=1.0))
+    raw[5:9] = impossible_lat
+    raw[9:13] = fine_lon
+    assert odid.decode_message(bytes(raw)).position is None
+
+    # And the mirror: -150 is an impossible latitude, a fine longitude.
+    raw = bytearray(odid.encode_location(latitude=1.0, longitude=1.0))
+    raw[5:9] = struct.pack("<i", round(-40.0 * odid.LATLON_MULT))
+    raw[9:13] = struct.pack("<i", round(-150.0 * odid.LATLON_MULT))
+    decoded = odid.decode_message(bytes(raw))
+    assert decoded.position is not None, "a Pacific longitude was rejected"
+    assert decoded.longitude == pytest.approx(-150.0, abs=1e-6)
+
+
+def test_half_a_position_is_no_position():
+    """A valid latitude beside an impossible longitude is not half a fix."""
+    raw = bytearray(odid.encode_location(latitude=1.0, longitude=1.0))
+    raw[9:13] = struct.pack("<i", round(200.0 * odid.LATLON_MULT))
+    decoded = odid.decode_message(bytes(raw))
+    assert decoded.latitude is None and decoded.longitude is None
+
+
+def test_the_operator_position_uses_the_same_rules():
+    system = odid.decode_message(
+        odid.encode_system(operator_latitude=0.0, operator_longitude=0.0))
+    assert system.operator_position is None
+    ok = odid.decode_message(
+        odid.encode_system(operator_latitude=-33.8688, operator_longitude=151.2093))
+    assert ok.operator_position == pytest.approx((-33.8688, 151.2093), abs=1e-6)
+
+
+def test_the_two_ranges_are_declared_separately():
+    assert odid.LATITUDE_RANGE == (-90.0, 90.0)
+    assert odid.LONGITUDE_RANGE == (-180.0, 180.0)
+    assert odid.LATITUDE_RANGE != odid.LONGITUDE_RANGE
