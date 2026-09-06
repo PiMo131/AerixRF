@@ -1,15 +1,23 @@
 """``antsdr-tk capture``: record IQ from the ANTSDR E200 into a SigMF pair.
 
 The subcommand opens :class:`antsdr_toolkit.device.e200.E200Source`, streams
-``--seconds`` worth of samples in ``--buffer``-sized reads and writes them
-through :class:`antsdr_toolkit.io.sigmf_io.SigmfRecorder` as ``cf32_le`` at
-full scale 1.0 (0 dBFS = 12-bit ADC full scale). Nothing is annotated; the
-receiver settings land in the SigMF ``global`` section (``core:hw`` from
+``--seconds`` worth of samples in ``--buffer``-sized reads and writes them as
+``cf32_le`` at full scale 1.0 (0 dBFS = 12-bit ADC full scale). Continuous-tier
+captures use :class:`antsdr_toolkit.io.sigmf_io.SigmfRecorder` as one timeline.
+Snapshot-tier captures use
+:class:`antsdr_toolkit.io.segmented_sigmf.SegmentedSigmfRecorder`: every host
+RX buffer after the first starts a new SigMF capture segment and is marked
+``antsdr:continuity = unknown-gap-before``. Packed sample indices therefore do
+not masquerade as contiguous RF time when the host link cannot sustain the
+configured sample rate.
+
+Receiver settings land in the SigMF ``global`` section (``core:hw`` from
 ``--fw`` through :func:`antsdr_toolkit.hardware.hw_string`, ``antsdr:`` fields
-for URI, RF ports, gain mode and buffer size). ``--dry-run`` resolves and
-prints the configuration - including the host-link and AD9363 envelope
-warnings from :func:`antsdr_toolkit.hardware.check_stream_config` - without
-importing the hardware driver.
+for URI, RF ports, gain mode, buffer size and capture-tier timing semantics).
+``--dry-run`` resolves and prints the configuration - including the host-link
+and AD9363 envelope warnings from
+:func:`antsdr_toolkit.hardware.check_stream_config` - without importing the
+hardware driver.
 
 Integration: :func:`register` adds the subparser to an ``argparse``
 ``subparsers`` object with ``set_defaults(func=run)``; :func:`main` builds a
@@ -17,7 +25,11 @@ standalone parser for ``python -m antsdr_toolkit.cli_capture`` and tests.
 
 Sources: the E200 limits and the ``2r2t`` / clock-calibration notes shown in
 ``--help`` come from :mod:`antsdr_toolkit.hardware` (MicroPhase antsdr_doc_en,
-antsdr-fw-patch, pyadi-iio; see that module for the file references).
+antsdr-fw-patch, pyadi-iio; see that module for the file references). SigMF
+capture segments are used only to state boundaries we actually know; no
+``core:global_index`` or per-segment RF timestamp is invented because the
+current pyadi/libiio path exposes neither a hardware sample counter nor the
+acquisition timestamp of a queued DMA buffer.
 """
 
 from __future__ import annotations
@@ -69,7 +81,8 @@ the UHD firmware; {hw.E200.host_ceiling(1, "uhd_wire_limit_sc16") / 1e6:.1f} MSP
 wire limit of 1 GbE
   capture tier '--tier continuous' keeps the link inside those ceilings; '--tier snapshot' \
 allows any rate up to {hw.E200.sample_rate_max_1ch / 1e6:.2f} MSPS and accepts the resulting \
-duty cycle (gaps between buffers) - this is how DroneID gets its 15.36 MSPS
+duty cycle (gaps between buffers). Snapshot SigMF output records each buffer as a separate \
+capture segment so those gaps are not silently treated as RF time.
   LO           {hw.E200.lo_min / 1e6:.0f} MHz .. {hw.E200.lo_max / 1e9:.0f} GHz as configured \
 by the firmware (AD9363 datasheet: 325 MHz .. 3.8 GHz, 20 MHz)
   clean rates  {", ".join(f"{r / 1e6:g}" for r in hw.CLEAN_RATES)} MSPS \
@@ -127,7 +140,7 @@ def configure(parser: argparse.ArgumentParser) -> None:
                         help=f"buffers dropped after tuning (default {DEFAULT_DISCARD})")
     parser.add_argument("--tier", choices=tuple(hw.CAPTURE_TIERS), default=DEFAULT_TIER,
                         help=f"capture tier judged against the host link (default {DEFAULT_TIER}); "
-                             "continuous = unbroken stream, snapshot = bursts with gaps")
+                             "continuous = unbroken stream, snapshot = segmented bursts with gaps")
     parser.add_argument("--fw", default="pluto-iio", metavar="TAG",
                         help="firmware personality written into core:hw (default pluto-iio)")
     parser.add_argument("--description", default="", metavar="TEXT",
@@ -236,6 +249,7 @@ def run(args: argparse.Namespace) -> int:
     import numpy as np
 
     from .device.e200 import E200Source
+    from .io.segmented_sigmf import SegmentedSigmfRecorder
     from .io.sigmf_io import SigmfRecorder
 
     try:
@@ -267,9 +281,21 @@ def run(args: argparse.Namespace) -> int:
         peak_power = 0.0
         written = 0
         t0 = time.perf_counter()
-        with SigmfRecorder(args.out_stem, info, extra_global=src.sigmf_extra_global()) as rec:
+        extra_global = dict(src.sigmf_extra_global())
+        extra_global.update({
+            "antsdr:capture_tier": cfg["tier"],
+            "antsdr:timing_contiguous": cfg["tier"] == "continuous",
+            "antsdr:segment_semantics": (
+                "continuous host stream" if cfg["tier"] == "continuous" else
+                "one capture segment per host RX buffer; gap duration unknown"
+            ),
+        })
+        recorder_cls = SegmentedSigmfRecorder if cfg["tier"] == "snapshot" else SigmfRecorder
+        with recorder_cls(args.out_stem, info, extra_global=extra_global) as rec:
             try:
                 while written < n_total:
+                    if cfg["tier"] == "snapshot" and written:
+                        rec.start_segment()
                     chunk = src.read(min(chunk_size, n_total - written))
                     rec.write(chunk)
                     re = chunk.real.astype(np.float64)
@@ -290,6 +316,7 @@ def run(args: argparse.Namespace) -> int:
           f"({speed:.2f}x realtime){' [interrupted]' if interrupted else ''}")
     print(f"  data   {rec.data_path}")
     print(f"  meta   {rec.meta_path}")
+    print(f"  timing {'continuous' if cfg['tier'] == 'continuous' else 'segmented; gaps unknown'}")
     print(f"  level  rms {_db(acc_power / n_values):.2f} dBFS, peak {_db(peak_power):.2f} dBFS")
     print(f"  gain   {gains} (hardware readback, channels {list(info.rx_channels)})")
     return 130 if interrupted else 0
