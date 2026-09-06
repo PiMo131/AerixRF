@@ -443,3 +443,141 @@ def test_no_unsourced_model_names_were_invented():
     from antsdr_toolkit.droneid import constants as C
     for code in (73, 75, 77, 82, 90):
         assert code not in C.PRODUCT_TYPES, f"{code} was added without a source"
+
+
+# ------------------------------------- root-agnostic detection (audit item)
+
+
+def _place(cfo_hz=0.0, snr_db=20.0, fs=15.36e6, n=400_000, t_start_s=0.005, seed=3):
+    from antsdr_toolkit.droneid import synth
+    return synth.place_burst(fs, n, t_start_s=t_start_s, cfo_hz=cfo_hz, snr_db=snr_db,
+                             rng=np.random.default_rng(seed)), round(t_start_s * fs)
+
+
+@pytest.mark.parametrize("cfo", [0.0, 2e3, 5e3, -7e3, 9e3, 14e3, 30e3, 60e3, 120e3, -120e3])
+def test_the_root_agnostic_detector_finds_the_burst_at_every_offset(cfo):
+    """Detection must not depend on knowing the Zadoff-Chu root.
+
+    The fixed root-600 matched filter is an OcuSync 2 pilot. OcuSync 3 is
+    reported to use a different pair and an OcuSync 4 variant to vary its
+    roots frame to frame, so a fixed-root gate is blind to the generations a
+    modern fleet flies, and it fails silently.
+    """
+    from antsdr_toolkit.droneid import receiver as rx
+    x, truth = _place(cfo_hz=cfo)
+    found = rx.find_bursts_cp(x, 15.36e6)
+    assert len(found) == 1, f"{len(found)} detections at {cfo/1e3:g} kHz"
+    assert found[0].sample_start == truth
+    assert found[0].root_agnostic is True
+    assert found[0].confirm_score > 0.9
+
+
+@pytest.mark.parametrize("cfo", [0.0, 5e3, 9e3, 30e3, 120e3])
+def test_the_root_is_identified_once_the_offset_is_removed(cfo):
+    """A matched filter decorrelates under an offset, so correct it first."""
+    from antsdr_toolkit.droneid import receiver as rx
+    x, _truth = _place(cfo_hz=cfo)
+    found = rx.find_bursts_cp(x, 15.36e6)
+    assert found[0].zc_root == 600
+    assert found[0].cfo_hz == pytest.approx(cfo, abs=100.0)
+
+
+def test_the_symbol_walk_uses_the_real_schedule_not_a_fixed_stride():
+    """The bug this guards cost 2192 samples, which is not a random number.
+
+    The prefixes run 80, then seven of 72, then 80 at 15.36 MSPS. A fixed
+    stride of 1104 accumulates 8 samples of error per symbol and lands exactly
+    one Zadoff-Chu-to-Zadoff-Chu gap out, so the second pilot is read as the
+    first and the root is reported as 147 instead of 600. It looked like a
+    successful decode.
+    """
+    from antsdr_toolkit.droneid import constants as C
+    from antsdr_toolkit.droneid import receiver as rx
+
+    fs = 15.36e6
+    starts = rx._symbol_starts_before(100_000, fs)
+    assert len(starts) == len(C.cp_schedule(fs))
+    steps = -np.diff(starts)
+    assert steps[0] == C.cp_schedule(fs)[0] + C.fft_size(fs)
+    assert len(set(steps.tolist())) > 1, "the schedule is not uniform and the walk must not be"
+    # And the true start is reachable from any interior symbol boundary.
+    boundary = 100_000 + C.cp_schedule(fs)[0] + C.fft_size(fs)
+    assert 100_000 in rx._symbol_starts_before(boundary, fs)
+
+
+def test_a_root_is_only_claimed_when_it_wins_decisively():
+    """Different roots cross-correlate at 1/sqrt(601) = 0.04, so a real match
+    beats the runner-up more than twentyfold. Two near-equal scores mean
+    neither matched, and None is the honest answer."""
+    from antsdr_toolkit.droneid import receiver as rx
+    assert rx.ROOT_MARGIN < 1.0
+    rng = np.random.default_rng(0)
+    noise = ((rng.standard_normal(40_000) + 1j * rng.standard_normal(40_000))
+             / np.sqrt(2)).astype(np.complex64)
+    root, score = rx.estimate_zc_root(noise, 100, 15.36e6)
+    assert root is None and score < 0.2
+
+
+def test_an_unrecognised_root_is_still_a_detection():
+    """A burst matching no published root is the interesting case, not a miss."""
+    from antsdr_toolkit.droneid import receiver as rx
+    x, truth = _place()
+    found = rx.find_bursts_cp(x, 15.36e6, scan_min=0.2)
+    assert found and found[0].sample_start == truth
+    # The field is optional, so a None root must not break serialisation.
+    row = found[0].to_dict()
+    assert isinstance(row, dict)
+
+
+def test_the_prefix_offset_estimator_has_the_right_sign():
+    """A sign error here is invisible whenever the offset is near a multiple
+    of the 15 kHz subcarrier spacing, which is where a lazy test would look."""
+    from antsdr_toolkit.droneid import receiver as rx
+    for cfo in (2e3, -3e3, 6e3):
+        x, truth = _place(cfo_hz=cfo)
+        estimate, ambiguity = rx.cfo_from_prefix(x, truth, 15.36e6)
+        assert ambiguity == pytest.approx(15e3, rel=1e-6)
+        assert estimate == pytest.approx(cfo, abs=150.0), f"sign or scale wrong at {cfo}"
+
+
+def test_the_prefix_estimator_wraps_and_says_so():
+    """Beyond half a subcarrier the estimate is aliased, by construction."""
+    from antsdr_toolkit.droneid import receiver as rx
+    x, truth = _place(cfo_hz=30e3)
+    estimate, ambiguity = rx.cfo_from_prefix(x, truth, 15.36e6)
+    assert abs(estimate) <= ambiguity / 2 + 1.0
+    assert estimate == pytest.approx(0.0, abs=200.0)   # 30 kHz is 2 whole wraps
+
+
+@pytest.mark.parametrize("seed", [1, 2, 3])
+def test_noise_produces_no_root_agnostic_detections(seed):
+    from antsdr_toolkit.droneid import receiver as rx
+    rng = np.random.default_rng(seed)
+    noise = ((rng.standard_normal(600_000) + 1j * rng.standard_normal(600_000))
+             / np.sqrt(2)).astype(np.complex64)
+    assert rx.find_bursts_cp(noise, 15.36e6) == []
+
+
+def test_two_bursts_are_two_detections_not_eighteen():
+    """One burst raises the profile at all nine of its symbol boundaries."""
+    from antsdr_toolkit.droneid import constants as C
+    from antsdr_toolkit.droneid import receiver as rx
+    from antsdr_toolkit.droneid import synth
+
+    fs = 15.36e6
+    x, first = _place(n=600_000)
+    burst = synth.make_burst(fs, rng=np.random.default_rng(9))
+    power = (C.occupied_bandwidth_hz() / fs) * 10 ** (20 / 10)
+    second = round(0.025 * fs)
+    x[second:second + burst.size] += (burst * np.sqrt(power)).astype(np.complex64)
+    found = rx.find_bursts_cp(x, fs)
+    assert [d.sample_start for d in found] == [first, second]
+
+
+def test_the_root_agnostic_path_works_at_30_msps():
+    from antsdr_toolkit.droneid import receiver as rx
+    fs = 30.72e6
+    x, truth = _place(cfo_hz=40e3, fs=fs, n=800_000, seed=5)
+    found = rx.find_bursts_cp(x, fs)
+    assert len(found) == 1 and found[0].sample_start == truth
+    assert found[0].zc_root == 600

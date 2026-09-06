@@ -53,6 +53,7 @@ encrypted, so the CRC will fail (see ``antsdr/research/landscape.md``).
 from __future__ import annotations
 
 import struct
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -108,6 +109,15 @@ class BurstDetection:
     pilot decorrelates under a frequency offset instead of sliding, so it is
     near zero above about 10 kHz even on a perfectly good burst."""
     legacy: bool = False
+    zc_root: int | None = None
+    """Which candidate Zadoff-Chu root best matched, or ``None`` for none.
+
+    ``None`` is not a failure. The roots are published only for OcuSync 2;
+    a burst that is clearly there and matches no known root is a measurement
+    of a generation nobody has characterised, and worth keeping."""
+    root_agnostic: bool = False
+    """True when the burst was found by cyclic-prefix structure rather than by
+    a matched filter for a particular root."""
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -323,6 +333,280 @@ def cp_coherence(x: np.ndarray, start: int, sample_rate_hz: float, *,
             scores.append(float(abs(np.vdot(prefix, tail)) / denom))
         pos += cp + n_fft
     return float(np.mean(scores)) if scores else 0.0
+
+
+#: Candidate Zadoff-Chu roots to score a detected burst against, as generation
+#: labels rather than as gates. 600 and 147 are the OcuSync 2 pair both
+#: reference implementations agree on; 385 is reported alongside 600 for the
+#: OcuSync 3 burst. The list is deliberately open: a burst whose best root is
+#: none of these is still a burst, and its measured root is worth recording,
+#: because nobody has published the roots for the later generations.
+CANDIDATE_ZC_ROOTS = (600, 147, 385)
+
+#: How far below the winner the runner-up must sit for a root to be claimed.
+#: Different Zadoff-Chu roots cross-correlate at about ``1 / sqrt(601)`` = 0.04,
+#: so a genuine match wins by more than an order of magnitude and anything
+#: closer than half is a coin toss.
+ROOT_MARGIN = 0.5
+
+#: How many whole subcarrier spacings either side of the prefix estimate to
+#: search when identifying a root. The prefix estimator wraps every 15 kHz;
+#: nine either way covers the +/-135 kHz an uncalibrated TCXO and a real
+#: aircraft between them can produce at 2.4 GHz.
+CFO_WRAP_SEARCH = 9
+
+#: Cyclic-prefix coherence a window must reach to open a root-agnostic
+#: candidate. Lower than :data:`CONFIRM_MIN` because this is a coarse sweep
+#: over every offset rather than a score at a known burst start, and the
+#: alignment is off by up to half a symbol.
+CP_SCAN_MIN = 0.28
+
+
+def cp_profile(x: np.ndarray, sample_rate_hz: float, *,
+               step: int = 16) -> tuple[np.ndarray, np.ndarray]:
+    """Cyclic-prefix coherence swept across the whole signal.
+
+    Returns ``(offsets, coherence)``. Every OFDM symbol repeats its own tail
+    one FFT length earlier, so correlating the two gives a peak wherever an
+    OFDM signal of this numerology is present, **whatever the symbols carry**.
+    That is the property this is for: it does not know or care which
+    Zadoff-Chu root the pilots use.
+
+    Why that matters here. :func:`find_bursts` gates on a matched filter for
+    root 600, which is the OcuSync 2 pilot. OcuSync 3 is reported to use 600
+    and 385, and an OcuSync 4 variant to vary its roots frame to frame
+    (proto17 issue 65). A fixed-root gate is therefore blind to exactly the
+    generations a modern fleet flies, and it fails silently: no detection
+    looks the same as no drone.
+
+    ``step`` trades resolution for speed. The default of 16 samples is far
+    finer than the coarsest cyclic prefix (72 samples at 15.36 MSPS), so a
+    burst cannot slip between two probes.
+    """
+    xs = np.asarray(x, dtype=np.complex128).ravel()
+    fs = float(sample_rate_hz)
+    n_fft = C.fft_size(fs)
+    window = min(C.cp_schedule(fs))
+    stride = max(1, int(step))
+    last = xs.size - (n_fft + window)
+    if last <= 0:
+        return np.zeros(0, dtype=np.int64), np.zeros(0, dtype=np.float64)
+
+    offsets = np.arange(0, last, stride, dtype=np.int64)
+    # Sliding inner products, vectorised: sum over the window of
+    # x[n+k] * conj(x[n+k+N]), normalised by both windows' energies.
+    product = xs[:-n_fft] * np.conj(xs[n_fft:])
+    energy_a = np.abs(xs[:-n_fft]) ** 2
+    energy_b = np.abs(xs[n_fft:]) ** 2
+    kernel = np.ones(window)
+    num = np.abs(np.convolve(product, kernel, mode="valid"))
+    den = np.sqrt(np.convolve(energy_a, kernel, mode="valid")
+                  * np.convolve(energy_b, kernel, mode="valid"))
+    with np.errstate(divide="ignore", invalid="ignore"):
+        coherence = np.where(den > 0, num / den, 0.0)
+    keep = offsets[offsets < coherence.size]
+    return keep, coherence[keep]
+
+
+def estimate_zc_root(x: np.ndarray, start: int, sample_rate_hz: float, *,
+                     roots: Sequence[int] = CANDIDATE_ZC_ROOTS,
+                     legacy: bool = False) -> tuple[int | None, float]:
+    """Which candidate root best matches this burst's first pilot.
+
+    Returns ``(root, score)``, or ``(None, best)`` when nothing clears half
+    the detection threshold. Recording the answer per burst is how the roots
+    of the unpublished generations eventually get measured: every capture of
+    a real aircraft becomes a data point.
+    """
+    fs = float(sample_rate_hz)
+    offset = C.zc_body_offsets(fs, legacy=legacy)[0]
+    n_fft = C.fft_size(fs)
+    at = int(start) + offset
+    xs = np.asarray(x, dtype=np.complex64).ravel()
+    if at < 0 or at + n_fft > xs.size:
+        return None, 0.0
+    scored: list[tuple[float, int]] = []
+    for root in roots:
+        ref = zc_time(int(root), fs)
+        piece = xs[at:at + ref.size]
+        if piece.size < ref.size:
+            continue
+        denom = np.linalg.norm(piece) * np.linalg.norm(ref)
+        scored.append((float(abs(np.vdot(piece, ref)) / denom) if denom > 0 else 0.0, int(root)))
+    if not scored:
+        return None, 0.0
+    scored.sort(reverse=True)
+    best_score, best_root = scored[0]
+    if best_score < DEFAULT_THRESHOLD / 2:
+        return None, best_score
+    # A real match is emphatic. Zadoff-Chu sequences of different roots
+    # cross-correlate at about 1/sqrt(N), which is 0.04 here, so the right root
+    # beats the runner-up more than twentyfold. Two roots scoring alike means
+    # neither was matched and the difference is noise; saying so is better than
+    # naming whichever won by a thousandth.
+    if len(scored) > 1 and scored[1][0] > best_score * ROOT_MARGIN:
+        return None, best_score
+    return best_root, best_score
+
+
+def cfo_from_prefix(x: np.ndarray, start: int, sample_rate_hz: float, *,
+                    legacy: bool = False) -> tuple[float, float]:
+    """Frequency offset from the cyclic prefixes, with its ambiguity.
+
+    Returns ``(cfo_hz, unambiguous_range_hz)``. Each prefix is a copy of its
+    own symbol's tail one FFT length later, so the phase of their correlation
+    is ``2 pi * cfo * N_fft / fs``. Solving for the offset is the standard
+    prefix estimator, and it is exact within one wrap of that phase.
+
+    **It wraps at one subcarrier spacing.** ``fs / N_fft`` is 15 kHz for this
+    numerology, so the estimate is unambiguous only within +/-7.5 kHz and a
+    true offset of 120 kHz reads as whatever 120 kHz is modulo 15 kHz. That is
+    a property of the method, not a bug, and it is why the returned range
+    matters as much as the value: a caller that needs the whole offset must
+    resolve the integer part another way, which is what the Zadoff-Chu chirp
+    slide does in :func:`estimate_cfo` when a known root is available.
+    """
+    xs = np.asarray(x, dtype=np.complex128).ravel()
+    fs = float(sample_rate_hz)
+    n_fft = C.fft_size(fs)
+    spacing = fs / n_fft
+    pos = int(start)
+    total = 0.0 + 0.0j
+    for cp in C.cp_schedule(fs, legacy=legacy):
+        usable = min(cp, xs.size - (pos + n_fft), xs.size - pos)
+        if usable <= 0:
+            break
+        total += np.vdot(xs[pos:pos + usable], xs[pos + n_fft:pos + n_fft + usable])
+        pos += cp + n_fft
+    if total == 0:
+        return 0.0, spacing
+    # numpy's vdot conjugates its FIRST argument, so this is
+    # sum(conj(prefix) * tail) = |s|^2 * exp(+j 2 pi f N / fs), and the sign of
+    # the recovered offset is positive. Getting that backwards is invisible
+    # whenever the true offset happens to be near a multiple of the subcarrier
+    # spacing, which is exactly where a lazy test would look.
+    return float(np.angle(total) * fs / (2.0 * np.pi * n_fft)), float(spacing)
+
+
+def _symbol_starts_before(boundary: int, sample_rate_hz: float, *,
+                          legacy: bool = False) -> list[int]:
+    """Candidate burst starts, given that ``boundary`` is *some* symbol start.
+
+    Returns one candidate per symbol position, computed from the cumulative
+    cyclic-prefix schedule rather than from a fixed stride, because the
+    schedule is not uniform.
+    """
+    cps = C.cp_schedule(sample_rate_hz, legacy=legacy)
+    n_fft = C.fft_size(sample_rate_hz)
+    cumulative, total = [0], 0
+    for cp in cps[:-1]:
+        total += cp + n_fft
+        cumulative.append(total)
+    return [int(boundary) - offset for offset in cumulative]
+
+
+def find_bursts_cp(
+    x: np.ndarray,
+    sample_rate_hz: float,
+    *,
+    legacy: bool = False,
+    max_bursts: int = 64,
+    scan_min: float = CP_SCAN_MIN,
+    confirm_min: float = CONFIRM_MIN,
+    step: int = 16,
+) -> list[BurstDetection]:
+    """Find bursts without assuming any Zadoff-Chu root.
+
+    Sweeps :func:`cp_profile` for offsets where the signal correlates with
+    itself one FFT later, then tests each as a burst *start* by scoring all
+    nine prefixes against the standard schedule. That second step is what
+    separates a burst start from the eight other symbol boundaries inside the
+    same burst: the schedule is asymmetric, 80 samples then seven of 72 then
+    80 at 15.36 MSPS, so it only lines up at one offset.
+
+    The detections carry ``score`` from the best matching candidate root
+    rather than from a fixed one, and ``zc_root`` records which root that was,
+    or ``None`` when none of the candidates matched. A burst with no
+    recognised root is still returned: it is a real observation, and for the
+    generations whose roots nobody has published it is the *interesting* one.
+    """
+    signal = np.asarray(x, dtype=np.complex64).ravel()
+    fs = float(sample_rate_hz)
+    length = C.burst_length(fs, legacy=legacy)
+    offsets, coherence = cp_profile(signal, fs, step=step)
+    if offsets.size == 0:
+        return []
+
+    candidates = offsets[coherence >= float(scan_min)]
+    detections: list[BurstDetection] = []
+    used: list[int] = []
+    # Strongest first, so a burst is claimed by its best-aligned candidate.
+    order = np.argsort(-coherence[coherence >= float(scan_min)])
+    for index in order:
+        if len(detections) >= int(max_bursts):
+            break
+        base = int(candidates[index])
+        # Cheap pre-filter on the raw offset; the real test is on the resolved
+        # start below, because one burst raises the profile at all nine of its
+        # symbol boundaries and every one of them resolves to the same start.
+        if any(abs(base - u) < length for u in used):
+            continue
+        # The profile marks a symbol boundary, which may be any of the nine.
+        # Step back through the schedule to find which one starts the burst.
+        #
+        # The steps are not equal, and assuming they are is a real trap: the
+        # prefixes run 80, then seven of 72, then 80 at 15.36 MSPS, so a fixed
+        # stride of 1104 accumulates 8 samples of error per symbol and lands
+        # 2192 samples out by the third one. That is exactly the gap between
+        # the two Zadoff-Chu pilots, so the burst still "decodes", with the
+        # second pilot read as the first and the root reported as 147 instead
+        # of 600. Walking the actual cumulative schedule is the fix.
+        best_start, best_confirm = -1, 0.0
+        for trial in _symbol_starts_before(base, fs, legacy=legacy):
+            for jitter in (-step, 0, step):
+                start = trial + jitter
+                if start < 0 or start + length > signal.size:
+                    continue
+                confirm = cp_coherence(signal, start, fs, legacy=legacy)
+                if confirm > best_confirm:
+                    best_start, best_confirm = start, confirm
+        if best_start < 0 or best_confirm < float(confirm_min):
+            continue
+        start = refine_start(signal, best_start, fs, legacy=legacy)
+        if start < 0 or start + length > signal.size:
+            start = best_start
+        confirm = cp_coherence(signal, start, fs, legacy=legacy)
+        if confirm < float(confirm_min):
+            continue
+
+        if any(abs(start - u) < length // 2 for u in used):
+            continue
+
+        # The prefix estimator is exact but wraps every 15 kHz, so identifying
+        # the root means searching the wraps: de-rotate by the fine estimate
+        # plus each whole subcarrier within range, and keep the hypothesis that
+        # matches a known root best. A matched filter decorrelates under any
+        # uncorrected offset, so without this an ordinary OcuSync 2 burst
+        # 30 kHz off its centre reports "no known root".
+        fine, spacing = cfo_from_prefix(signal, start, fs, legacy=legacy)
+        n = np.arange(signal.size, dtype=np.float64)
+        best = (None, 0.0, fine)
+        for k in range(-CFO_WRAP_SEARCH, CFO_WRAP_SEARCH + 1):
+            hypothesis = fine + k * spacing
+            probe = signal if k == 0 and abs(fine) < 1.0 else (
+                signal * np.exp(-2j * np.pi * hypothesis * n / fs)).astype(np.complex64)
+            root, score = estimate_zc_root(probe, start, fs, legacy=legacy)
+            if score > best[1]:
+                best = (root, score, hypothesis)
+        root, root_score, cfo = best
+        detections.append(BurstDetection(
+            sample_start=int(start), score=float(root_score), confirm_score=float(confirm),
+            cfo_hz=float(cfo), snr_db=_burst_snr_db(signal, start, length),
+            t_start_s=start / fs, legacy=bool(legacy), zc_root=root,
+            root_agnostic=True))
+        used.append(int(start))
+    detections.sort(key=lambda d: d.sample_start)
+    return detections
 
 
 def interpolate_peak(scores: np.ndarray, index: int) -> float:
