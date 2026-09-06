@@ -9,6 +9,7 @@ public real recordings.
 | [baseline.md](baseline.md) | Phase 0. The exact commit, environment and test state being audited, taken before anything was changed. |
 | [review-findings.md](review-findings.md) | Phase 2. One verdict per peer-review hypothesis H1 to H13, with the evidence on both sides. |
 | [disputes.md](disputes.md) | Where this audit disagrees with the review, and why. A hypothesis that is wrong is as useful a finding as one that is right. |
+| [real-captures.md](real-captures.md) | Phase 5. Validation against the RUB-SysSec DJI recordings: four defects that only a real signal could expose, and the measurements behind each. |
 | `datasets/` | Phase 3 and 4. Manifests for public datasets. No IQ in git. |
 | `reports/` | Per-run outputs. |
 
