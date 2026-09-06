@@ -1,29 +1,33 @@
-"""``antsdr-tk droneid``: find and decode DJI DroneID bursts in a recording.
+"""``antsdr-tk droneid``: find and decode proprietary DJI DroneID bursts.
 
-Reads a SigMF capture, correlates against the Zadoff-Chu pilots, and prints
-one line per burst with the decode result.
+Reads a SigMF capture, detects DJI-like OFDM bursts and tries to recover the
+proprietary telemetry payload.  This is distinct from ASTM/Open Drone ID: for
+AERIX the ESP32-C5/S3 path handles standards-based Remote ID, while this SDR
+path is useful because compatible DJI DroneID frames can contain aircraft,
+controller/app and home coordinates.
 
 Captures that are not already at a DroneID rate
 -----------------------------------------------
 The receiver itself needs a burst centred at zero and sampled at a multiple
 of the 15 kHz subcarrier spacing with a power-of-two FFT: 15.36, 30.72 or
-61.44 MSPS.  Recordings rarely arrive that way - you tune to a channel centre,
-sample at whatever the host link sustains, and the aircraft puts its burst
-where it likes inside the span - so ``--tune`` finds the occupied 9 MHz bands,
-mixes each to zero and resamples to 15.36 MSPS before decoding.  It engages by
-itself when the recording's own rate cannot work, which is what makes 20 MSPS
-usable after all: convenient for the E200's host link, impossible for the
-receiver directly, fine once retuned.
+61.44 MSPS. Recordings rarely arrive that way, so ``--tune`` finds occupied
+9 MHz bands, mixes each to zero and resamples to 15.36 MSPS before decoding.
+It engages automatically when the recording's own rate cannot be used
+straight through.
 
 What a result means
 -------------------
-``crc24`` is the payload check and ``crc16`` the frame check; both must pass
-before the serial number and positions are worth anything.  A burst that is
-found but does not decode is still a real observation: it is either too weak
-for a receiver without error correction (below roughly 15 dB in-band
-signal-to-noise here), or it belongs to an OcuSync 4 drone, whose payload is
-encrypted.  Either way the frequency, the time and the signal-to-noise ratio
-are usable, which is what the presence tier of ``ADR-0006`` is about.
+``crc24`` is the payload check and ``crc16`` the frame check. **Both must pass
+before serial numbers, model fields or positions are telemetry.** The receiver
+uses soft QPSK values and LTE turbo decoding by default; a CRC failure is still
+only ``decode_failed``. It can result from low SNR, residual timing/CFO/channel
+estimation error, unsupported framing/coding, corruption, or a proprietary or
+encrypted payload. CRC failure by itself does **not** identify OcuSync 4 and
+this command deliberately makes no generation claim from it.
+
+JSON follows the same evidence boundary: ``frame`` is populated only for a
+CRC-valid decode. Failed attempts carry a ``decode`` status and the CRC flags
+without exposing untrusted coordinates as if they were decoded telemetry.
 """
 
 from __future__ import annotations
@@ -35,7 +39,7 @@ from typing import Any
 
 __all__ = ["build_parser", "configure", "main", "register", "run"]
 
-HELP = "find and decode DJI DroneID bursts in a SigMF recording"
+HELP = "find and decode proprietary DJI DroneID bursts in a SigMF recording"
 
 
 def configure(parser: argparse.ArgumentParser) -> None:
@@ -45,8 +49,8 @@ def configure(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--method", choices=("zc", "cp", "both"), default="both",
                         help="detection gate: zc is the root-600 matched filter, cp is "
                              "root-agnostic cyclic-prefix structure, both merges them "
-                             "(default). Only cp can see OcuSync 3 and 4 bursts, whose "
-                             "Zadoff-Chu roots differ or vary")
+                             "(default). cp is the useful gate for generations whose "
+                             "Zadoff-Chu roots are not established")
     parser.add_argument("--tune", dest="tune", action="store_true", default=None,
                         help="find the occupied 9 MHz bands and resample each to "
                              "15.36 MSPS before decoding. On by default when the "
@@ -62,7 +66,7 @@ def configure(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--json", dest="json_path", default=None, metavar="PATH",
                         help="write the full result as JSON")
     parser.add_argument("--quiet", action="store_true",
-                        help="print only decoded frames, not every burst")
+                        help="print only CRC-valid decoded frames, not every burst")
 
 
 def register(subparsers: Any) -> None:
@@ -76,6 +80,19 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="antsdr-tk droneid", description=HELP)
     configure(parser)
     return parser
+
+
+def _decode_evidence(frame: Any) -> dict[str, Any]:
+    """Return only evidence safe to expose when a payload did not validate."""
+    if frame is None:
+        return {"status": "geometry_failed", "crc24_ok": None, "crc16_ok": None}
+    crc24 = bool(frame.crc24_ok)
+    crc16 = bool(frame.crc16_ok)
+    return {
+        "status": "decoded" if crc24 and crc16 else "decode_failed",
+        "crc24_ok": crc24,
+        "crc16_ok": crc16,
+    }
 
 
 def run(args: argparse.Namespace) -> int:
@@ -156,7 +173,8 @@ def run(args: argparse.Namespace) -> int:
         "bursts": [],
     }
     for index, (detection, frame, centre) in enumerate(results, start=1):
-        ok = bool(frame and frame.crc24_ok and frame.crc16_ok)
+        evidence = _decode_evidence(frame)
+        ok = evidence["status"] == "decoded"
         if not args.quiet or ok:
             where = (f"  band {centre / 1e6:+.3f} MHz" if tuning else "")
             print(f"\nburst {index}: t={detection.t_start_s * 1e3:8.3f} ms{where}  "
@@ -164,7 +182,7 @@ def run(args: argparse.Namespace) -> int:
                   f"root {detection.zc_root if detection.zc_root is not None else '?':>4}  "
                   f"cfo {detection.cfo_hz:+8.0f} Hz  snr {detection.snr_db:5.1f} dB")
             if frame is None:
-                print("  no decode: the burst geometry did not resolve")
+                print("  no decode: burst geometry did not resolve")
             elif ok:
                 print(f"  {frame.product_name} serial {frame.serial!r}")
                 print(f"  drone  {_pos(frame.drone_lat, frame.drone_lon)}  "
@@ -174,13 +192,16 @@ def run(args: argparse.Namespace) -> int:
                 print(f"  speed  {frame.speed_h_m_s:.1f} m/s horizontal, "
                       f"{frame.v_up_m_s:.1f} m/s vertical, yaw {frame.yaw_deg:.1f} deg")
             else:
-                print(f"  CRC failed (crc24 {frame.crc24_ok}, crc16 {frame.crc16_ok}): "
-                      "too weak for a receiver without error correction, or an "
-                      "encrypted OcuSync 4 payload")
+                print(f"  decode failed (crc24 {frame.crc24_ok}, crc16 {frame.crc16_ok}); "
+                      "generation/cause unknown")
         payload["bursts"].append({
             "band_offset_hz": centre,
             "detection": detection.to_dict(),
-            "frame": frame.to_dict() if frame else None,
+            "decode": evidence,
+            # Never expose a CRC-failed parse in the same field as trusted
+            # telemetry. A caller that wants decoder forensics has the CRC
+            # evidence above and can reproduce the attempt from the IQ file.
+            "frame": frame.to_dict() if ok else None,
         })
 
     if args.json_path:
