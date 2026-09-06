@@ -126,9 +126,12 @@ def test_the_cli_explains_a_named_airframe(capsys):
     from antsdr_toolkit import cli_fleet
     assert cli_fleet.main(["Mini 4 Pro"]) == 0
     out = capsys.readouterr().out
-    assert "exempt from Remote ID" in out
+    assert "no Remote ID obligation as shipped" in out
     assert "NONE." in out
-    assert "battery decides" in out.replace("\n", " ").replace("  ", " ")
+    flat = " ".join(out.split())
+    assert "Configuration decides" in flat
+    # Both switches must be named, not just the battery.
+    assert "C1 label upgrade" in flat and "Battery Plus" in flat
 
 
 def test_the_cli_filters_by_tier(capsys):
@@ -153,3 +156,56 @@ def test_the_cli_writes_json(tmp_path, capsys):
     capsys.readouterr()
     rows = json.loads(path.read_text())
     assert len(rows) == 1 and rows[0]["name"] == "DJI Neo" and rows[0]["tier"] == "B"
+
+
+# ------------------------------ corrected Remote ID semantics (verification)
+
+
+def test_exemption_is_documented_as_an_obligation_not_a_prediction():
+    """Three corrections the adversarial pass forced, all easy to lose again.
+
+    The obligation attaches to the class mark rather than the mass; a label
+    can be upgraded so the mark is not fixed; and exemption permits silence
+    without compelling it. Each is stated in the module docstring, because a
+    reader who takes ``remote_id_exempt`` for "will be silent" will read an
+    empty scan as an empty sky.
+    """
+    doc = fleet.__doc__
+    assert "wrong causal hook" in doc
+    assert "C1 upgrade" in doc
+    assert "does not compel it" in doc
+    assert "Specific category" in doc
+    prop_doc = fleet.Airframe.remote_id_exempt.__doc__
+    assert "Not a prediction of silence" in prop_doc
+
+
+def test_no_identity_never_means_nothing_is_observable():
+    """The distinction that keeps a detection network honest."""
+    assert "not that nothing is" in fleet.__doc__
+    assert "detectable, timeable and trackable" in fleet.__doc__
+    # And the airframes with no name available still have a link to detect.
+    for key in ("mini_4_pro", "neo"):
+        assert fleet.identity_sources(key) == []
+        assert fleet.AIRFRAMES[key].link, key
+
+
+def test_the_mini_4_pro_note_names_both_switches():
+    """Battery and label upgrade are independent, and either one flips it."""
+    note = fleet.AIRFRAMES["mini_4_pro"].note
+    assert "Battery Plus" in note
+    assert "C1 label upgrade" in note and "February 2024" in note
+
+
+def test_the_avata_is_recorded_as_contested_rather_than_settled():
+    """Its supported-model status and its encryption status both conflict."""
+    avata = fleet.AIRFRAMES["avata"]
+    assert avata.droneid_encrypted is None, "an unsettled question must not read as False"
+    assert "Contested" in avata.note
+    assert "excludes the Avata" in avata.note
+
+
+def test_the_neo_note_points_at_the_dji_wifi_vendor_ie():
+    """The cheapest untested experiment in the fleet, so it must be findable."""
+    note = fleet.AIRFRAMES["neo"].note
+    assert "26:37:12" in note
+    assert "untested" in note

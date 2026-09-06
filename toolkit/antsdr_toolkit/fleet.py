@@ -18,14 +18,38 @@ code, so the only thing that decodes it is MicroPhase's closed firmware on the
 E200.  OcuSync 4 needs a key nobody has published, and the only route to its
 payload is a paid cloud service that ``ADR-0006`` declines.
 
-**The EU class label.**  Standard Remote ID is mandated from C1 upward and
-**C0, under 250 g, is exempt** *(verified: verdict 7, ``dji-eu-rid``)*.  This
-is the trap in the whole subject: an OcuSync 4 airframe that is also C0 has an
-encrypted proprietary identity *and* no obligation to broadcast a standard
-one, so it is detectable and not identifiable by any means at all.  A Mini 4
-Pro sits at 249 g on its standard battery and at about 290 g on the
-Intelligent Flight Battery Plus, which puts it either side of the line: the
-battery decides whether the aircraft can be identified.
+**The EU class label**, and it is the label that matters, not the mass.
+Standard Remote ID is mandated from C1 upward; C0 need not carry it
+*(verified: verdict 7, ``dji-eu-rid``)*.  Three things follow that are easy
+to get wrong, and an earlier version of this module got all three wrong:
+
+* **"Sub-250 g" is the wrong causal hook.**  The obligation attaches to the
+  class mark under Regulation (EU) 2019/945, not to a weight.  The same
+  airframe flown in the Specific category, or inside a Member State
+  geographical zone that mandates direct Remote ID, is not exempt whatever it
+  weighs.
+* **A label can change.**  Since February 2024 DJI has offered EU Mini 4 Pro
+  and Mini 3 owners an official C1 upgrade through the DJI Fly service menu,
+  and a C1-marked aircraft must broadcast.  So "Mini 4 Pro is C0" is wrong for
+  an unknown share of the EU fleet, and ``eu_class`` here is what the aircraft
+  *shipped* as.
+* **Exemption permits silence, it does not compel it.**  Nothing stops a C0
+  aircraft broadcasting, the hardware is the same, and the gating is firmware
+  by region and configuration.  A C0-labelled Mini 5 Pro has been reported
+  broadcasting standard Remote ID against DJI's own manual.  So
+  ``broadcasts_remote_id=False`` means *no obligation and generally reported
+  silent*, never a guarantee of silence.
+
+The Mini 4 Pro shows all three at once: 249 g on its standard battery and
+about 290 g on the Intelligent Flight Battery Plus, either side of the line,
+with a C1 upgrade available on top.  Which battery flew, and whether the
+upgrade was taken, decide whether the aircraft is identifiable.
+
+**What none of this means is "invisible".**  An airframe with no Remote ID
+obligation still transmits its OcuSync link and its encrypted DroneID burst,
+which is detectable, timeable and trackable as a session by RSSI and a
+per-session hash.  :func:`identity_sources` returning empty means no *name* is
+available, not that nothing is.
 
 Confidence
 ----------
@@ -90,7 +114,14 @@ class Airframe:
 
     @property
     def remote_id_exempt(self) -> bool:
-        """C0 and unmarked legacy airframes carry no broadcast obligation."""
+        """No *obligation* to broadcast, as the aircraft shipped.
+
+        Not a prediction of silence, and not a property of the mass: the
+        obligation attaches to the class mark, so this can be false in
+        practice for an aircraft flown in the Specific category, inside a
+        geographical zone that mandates direct Remote ID, or after a C1 label
+        upgrade. See the module docstring.
+        """
         return self.eu_class in (None, "C0")
 
     @property
@@ -144,11 +175,15 @@ AIRFRAMES: Mapping[str, Airframe] = MappingProxyType({
         "DJI Avata", "OcuSync 3+", droneid_encrypted=None, open_decodable=False,
         firmware_decodable=True, eu_class=None, takeoff_weight_g=410.0,
         broadcasts_remote_id=False,
-        note="O3 DroneID is plaintext but no open decoder finishes it, so the "
-             "closed E200 firmware is the only route. Carries no C-class mark, "
-             "and its Remote ID support was added for the United States only, "
-             "so expect nothing on the EU Remote ID path. Whether DJI's 2024 "
-             "encryption rollout reached this model is not established."),
+        note="Contested, and recorded that way on purpose. O3 DroneID is "
+             "plaintext in general and no OPEN decoder finishes it, so the "
+             "closed E200 firmware would be the route; but that firmware's "
+             "own README lists only Mini 2, Mini 3 Pro, Air 2S and Mavic 3 as "
+             "supported, which excludes the Avata, and a counter-drone vendor "
+             "reports DJI encrypting DroneID on the Avata from January 2024. "
+             "No primary source settles it. Carries no C-class mark, and its "
+             "Remote ID support was added for the United States only, so "
+             "expect nothing on the EU Remote ID path."),
     "mini_3_pro": Airframe(
         "DJI Mini 3 Pro", "OcuSync 3", droneid_encrypted=False, open_decodable=False,
         firmware_decodable=True, eu_class="C0", takeoff_weight_g=249.0,
@@ -171,12 +206,15 @@ AIRFRAMES: Mapping[str, Airframe] = MappingProxyType({
         "DJI Mini 4 Pro", "OcuSync 4", droneid_encrypted=True, open_decodable=False,
         firmware_decodable=False, eu_class="C0", takeoff_weight_g=249.0,
         broadcasts_remote_id=False,
-        note="The battery decides. At 249 g on the standard Intelligent Flight "
-             "Battery it is C0, exempt, and broadcasts nothing; on the "
+        note="Configuration decides, and there are two switches, not one. At "
+             "249 g on the standard Intelligent Flight Battery it shipped as "
+             "C0, is under no obligation, and is reported silent; on the "
              "Intelligent Flight Battery Plus it passes 250 g and standard "
-             "Remote ID activates. A C1 label upgrade is offered through DJI "
-             "Fly, which would oblige it to broadcast. Ask which battery was "
-             "flown before concluding anything from a silent scan."),
+             "Remote ID activates. Separately, DJI has offered EU owners an "
+             "official C1 label upgrade through DJI Fly since February 2024, "
+             "which obliges it to broadcast whatever battery is fitted. Ask "
+             "which battery flew AND whether the upgrade was taken before "
+             "concluding anything from a silent scan."),
     "avata_2": Airframe(
         "DJI Avata 2", "OcuSync 4", droneid_encrypted=True, open_decodable=False,
         firmware_decodable=False, eu_class="C1", takeoff_weight_g=377.0,
@@ -189,10 +227,15 @@ AIRFRAMES: Mapping[str, Airframe] = MappingProxyType({
         "DJI Neo", "OcuSync 4, or plain Wi-Fi in phone mode",
         droneid_encrypted=True, open_decodable=False, firmware_decodable=False,
         eu_class="C0", takeoff_weight_g=135.0, broadcasts_remote_id=False,
-        note="The hardest of the fleet. Encrypted O4 with an RC, C0 so exempt "
-             "from Remote ID, and absent from every open receiver's device "
-             "list. Its phone-Wi-Fi mode is the one opening worth testing, "
-             "since ordinary 802.11 frames carry a MAC address."),
+        note="The hardest of the fleet on its OcuSync link: encrypted O4, "
+             "shipped C0 so under no Remote ID obligation, and absent from "
+             "every open receiver's device list. Its phone-Wi-Fi mode is a "
+             "real opening and a stronger one than a MAC address: DJI's "
+             "Wi-Fi-link aircraft put DroneID in an 802.11 vendor IE under "
+             "OUI 26:37:12 carrying serial, drone position, home and operator "
+             "position, which Kismet parses today. Whether the Neo emits that "
+             "IE in phone mode is untested by anyone in this record, and it "
+             "is the cheapest experiment on the list."),
     "air_3": Airframe(
         "DJI Air 3", "OcuSync 4", droneid_encrypted=True, open_decodable=False,
         firmware_decodable=False, eu_class="C1", takeoff_weight_g=720.0,

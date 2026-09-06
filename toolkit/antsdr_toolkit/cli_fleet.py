@@ -3,11 +3,16 @@
 Prints, per airframe, the link generation, the EU class label and every route
 to its identity. With no arguments it prints the whole table.
 
-The answer that matters most is the empty one. An OcuSync 4 airframe that is
-also class C0 has an encrypted proprietary identity and no legal obligation to
-broadcast a standard one, so it can be detected and tracked but not named. A
-DJI Neo is in that position permanently; a Mini 4 Pro is in it or out of it
-depending on which battery is fitted.
+The answer that matters most is the empty one. An OcuSync 4 airframe marked
+class C0 has an encrypted proprietary identity and no obligation to broadcast
+a standard one, so it can be detected and tracked but usually not named.
+
+Read "no identity" as "no published means yields a name", not as "invisible"
+and not as a guarantee of silence. The obligation attaches to the class mark
+rather than to the weight, a C0 aircraft may broadcast anyway, and DJI offers
+an official C1 label upgrade for some models that turns the obligation on. A
+Mini 4 Pro is in or out of this position depending on both its battery and
+whether that upgrade was taken.
 
 Examples::
 
@@ -116,7 +121,7 @@ def _detail(airframe: Any, fleet: Any) -> None:
     weight = "unknown" if airframe.takeoff_weight_g is None else f"{airframe.takeoff_weight_g:.0f} g"
     label = airframe.eu_class or "none (legacy, no class mark)"
     print(f"  EU class      {label}, {weight}"
-          + ("   exempt from Remote ID" if airframe.remote_id_exempt else ""))
+          + ("   no Remote ID obligation as shipped" if airframe.remote_id_exempt else ""))
     encrypted = {True: "encrypted", False: "plaintext", None: "not established"}
     print(f"  DroneID       {encrypted[airframe.droneid_encrypted]}")
     print(f"  tier {airframe.tier}        {fleet.TIERS[airframe.tier]}")
