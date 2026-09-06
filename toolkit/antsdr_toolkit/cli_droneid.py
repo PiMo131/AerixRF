@@ -1,10 +1,19 @@
 """``antsdr-tk droneid``: find and decode DJI DroneID bursts in a recording.
 
 Reads a SigMF capture, correlates against the Zadoff-Chu pilots, and prints
-one line per burst with the decode result.  A capture must be at a rate that
-is a multiple of the 15 kHz subcarrier spacing with a power-of-two FFT:
-15.36, 30.72 or 61.44 MSPS.  20 MSPS does not work, however convenient it is
-for the E200's host link.
+one line per burst with the decode result.
+
+Captures that are not already at a DroneID rate
+-----------------------------------------------
+The receiver itself needs a burst centred at zero and sampled at a multiple
+of the 15 kHz subcarrier spacing with a power-of-two FFT: 15.36, 30.72 or
+61.44 MSPS.  Recordings rarely arrive that way - you tune to a channel centre,
+sample at whatever the host link sustains, and the aircraft puts its burst
+where it likes inside the span - so ``--tune`` finds the occupied 9 MHz bands,
+mixes each to zero and resamples to 15.36 MSPS before decoding.  It engages by
+itself when the recording's own rate cannot work, which is what makes 20 MSPS
+usable after all: convenient for the E200's host link, impossible for the
+receiver directly, fine once retuned.
 
 What a result means
 -------------------
@@ -38,6 +47,14 @@ def configure(parser: argparse.ArgumentParser) -> None:
                              "root-agnostic cyclic-prefix structure, both merges them "
                              "(default). Only cp can see OcuSync 3 and 4 bursts, whose "
                              "Zadoff-Chu roots differ or vary")
+    parser.add_argument("--tune", dest="tune", action="store_true", default=None,
+                        help="find the occupied 9 MHz bands and resample each to "
+                             "15.36 MSPS before decoding. On by default when the "
+                             "recording's own rate cannot be decoded directly")
+    parser.add_argument("--no-tune", dest="tune", action="store_false",
+                        help="decode the capture as it is, even if that cannot work")
+    parser.add_argument("--bands", type=int, default=3, metavar="N",
+                        help="how many candidate bands --tune may return (default 3)")
     parser.add_argument("--legacy", action="store_true",
                         help="expect the 8-symbol burst of the Mavic Pro and Mavic 2")
     parser.add_argument("--max-samples", type=int, default=1 << 25, metavar="N",
@@ -73,39 +90,76 @@ def run(args: argparse.Namespace) -> int:
         x = x[0]
     fs = info.sample_rate_hz
 
+    # Can this rate be decoded at all as it stands? That decides whether tuning
+    # is a choice or a necessity, and the user is told which.
     try:
         C.fft_size(fs)
+        direct = C.is_supported_rate(fs)
+        direct_error = None
     except ValueError as exc:
-        print(f"error: {exc}", file=sys.stderr)
+        direct, direct_error = False, str(exc)
+
+    tuning = (not direct) if args.tune is None else bool(args.tune)
+    if not direct and not tuning:
+        print(f"error: {direct_error or f'{fs / 1e6:g} MSPS is not a DroneID rate'}"
+              " -- drop --no-tune to have the bands found and resampled",
+              file=sys.stderr)
         return 1
-    if not C.is_supported_rate(fs):
+    if not direct and args.tune is None:
+        print(f"# {fs / 1e6:g} MSPS cannot be decoded directly; finding the occupied "
+              "bands and resampling to 15.36 MSPS", file=sys.stderr)
+    elif direct and not C.is_supported_rate(fs):
         print(f"warning: {fs / 1e6:g} MSPS gives a non-power-of-two FFT; the reference "
               "implementations assume one", file=sys.stderr)
 
     threshold = rx.DEFAULT_THRESHOLD if args.threshold is None else float(args.threshold)
-    results = rx.process(x, fs, threshold=threshold, legacy=bool(args.legacy),
-                         method=str(args.method))
+    if tuning:
+        from .droneid import tune as tuner
+
+        bands = tuner.prepare(x, fs, max_centres=max(1, int(args.bands)))
+        band_rate = 15.36e6
+    else:
+        bands, band_rate = [(0.0, x)], fs
 
     channel = C.channel_for(info.center_freq_hz)
     print(f"# {info}")
     print(f"# {x.size} samples, {x.size / fs * 1e3:.1f} ms, threshold {threshold:g}"
           + (f", known DroneID channel {channel / 1e6:.1f} MHz" if channel
              else ", not a documented DroneID centre"))
-    decoded = sum(1 for _d, f in results if f and f.crc24_ok and f.crc16_ok)
+    if tuning:
+        print(f"# {len(bands)} candidate band(s) at "
+              + (", ".join(f"{c / 1e6:+.3f} MHz" for c, _ in bands) or "none")
+              + " from the capture centre")
+        if not bands:
+            print("# nothing in the span looks like an occupied 9 MHz channel",
+                  file=sys.stderr)
+
+    results: list[tuple[Any, Any, float]] = []
+    for centre, band in bands:
+        for detection, frame in rx.process(band, band_rate, threshold=threshold,
+                                           legacy=bool(args.legacy),
+                                           method=str(args.method)):
+            results.append((detection, frame, centre))
+    results.sort(key=lambda r: (r[2], r[0].sample_start))
+
+    decoded = sum(1 for _d, f, _c in results if f and f.crc24_ok and f.crc16_ok)
     print(f"# {len(results)} burst(s), {decoded} decoded")
 
     payload: dict[str, Any] = {
         "recording": str(args.recording),
         "sample_rate_hz": fs,
         "center_freq_hz": info.center_freq_hz,
+        "tuned": bool(tuning),
+        "band_offsets_hz": [centre for centre, _ in bands],
         "n_bursts": len(results),
         "n_decoded": decoded,
         "bursts": [],
     }
-    for index, (detection, frame) in enumerate(results, start=1):
+    for index, (detection, frame, centre) in enumerate(results, start=1):
         ok = bool(frame and frame.crc24_ok and frame.crc16_ok)
         if not args.quiet or ok:
-            print(f"\nburst {index}: t={detection.t_start_s * 1e3:8.3f} ms  "
+            where = (f"  band {centre / 1e6:+.3f} MHz" if tuning else "")
+            print(f"\nburst {index}: t={detection.t_start_s * 1e3:8.3f} ms{where}  "
                   f"score {detection.score:.3f}  prefix {detection.confirm_score:.3f}  "
                   f"root {detection.zc_root if detection.zc_root is not None else '?':>4}  "
                   f"cfo {detection.cfo_hz:+8.0f} Hz  snr {detection.snr_db:5.1f} dB")
@@ -124,6 +178,7 @@ def run(args: argparse.Namespace) -> int:
                       "too weak for a receiver without error correction, or an "
                       "encrypted OcuSync 4 payload")
         payload["bursts"].append({
+            "band_offset_hz": centre,
             "detection": detection.to_dict(),
             "frame": frame.to_dict() if frame else None,
         })
