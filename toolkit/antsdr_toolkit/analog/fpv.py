@@ -20,7 +20,7 @@ circulate in communities are the occupied width.  One measurement of a 25 mW
 transmitter kept more than 99 % of its energy within +-4.5 MHz.  A 10 MSPS
 capture therefore decodes colour NTSC, though 20 MSPS is the safer capture
 rate and is what the E200 is set to by the one project that supports it
-(verified: ``analog-fpv-bw`` in ``antsdr/research/verification-log.md``).
+(verified: ``analog-fpv-bandwidth`` in ``antsdr/research/verification-log.md``).
 
 Three measurements, in increasing order of cost
 -----------------------------------------------

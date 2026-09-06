@@ -20,7 +20,7 @@ def test_profile_encodes_verified_e200_facts():
     assert e.sample_rate_min == 521e3
     assert e.sample_rate_max_1ch == 61.44e6 and e.sample_rate_max_2ch == 30.72e6
     # Corrected against the adversarial verification of the streaming rate
-    # (research/verification-log.md, claim stream-rate): the stock IIO
+    # (research/verification-log.md, claim host-streaming-tiers): the stock IIO
     # firmware is CPU-bound in iiod, the 20 MSPS vendor figure belongs to the
     # UHD personality, and 29.6 MSPS is the sc16 wire limit of 1 GbE.
     assert dict(e.host_stream_ceiling_sps) == {
@@ -151,7 +151,7 @@ def test_check_stream_config_clean_and_warnings():
 
 def test_check_stream_config_tier_changes_the_rate_verdict():
     # DroneID's 15.36 MSPS: dropped buffers as a continuous stream, a duty
-    # cycle as a snapshot (verified: stream-rate).
+    # cycle as a snapshot (verified: host-streaming-tiers).
     cont = hw.check_stream_config(15.36e6, 2.4295e9)
     assert len(cont) == 1 and "dropped buffers" in cont[0] and "snapshot" in cont[0]
     snap = hw.check_stream_config(15.36e6, 2.4295e9, tier="snapshot")

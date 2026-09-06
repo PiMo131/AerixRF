@@ -111,7 +111,7 @@ def test_bursty_traffic_is_what_the_envelope_gate_catches():
 def test_the_occupied_bandwidth_is_about_ten_megahertz():
     # The research settled a contested number: analog FPV occupies about
     # 9-11 MHz, not the 19-20 MHz channel spacing or the 23-27 MHz Carson
-    # estimate (verified: analog-fpv-bw).
+    # estimate (verified: analog-fpv-bandwidth).
     freqs, psd = welch_psd_db(_video(), FS, 0.0, nfft=4096)
     linear = 10 ** (psd / 10.0)
     cumulative = np.cumsum(linear) / linear.sum()
