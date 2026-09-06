@@ -5,6 +5,13 @@ line, and prints the drone and operator identity each one carries.
 
 Where the frames come from
 --------------------------
+Two different payloads ride in these beacons and this command reads both.
+The ASD-STAN element (OUI FA:0B:BC) is standard Remote ID, the identity the
+law compels from class C1 upward.  The DJI element (OUI 26:37:12) is DJI's own
+proprietary DroneID, unregulated, carried by its Wi-Fi-link aircraft.  An
+airframe with no Remote ID obligation may still emit the second, which makes
+it worth looking for on anything with a Wi-Fi flight mode.
+
 Not from the E200.  DJI broadcasts standard Remote ID as an 802.11 Beacon, and
 openwifi on the E200 is OFDM-only, so it cannot demodulate the 802.11b rates
 that reference Remote ID beacons use on 2.4 GHz *(verified: verdict 6)*.  The
@@ -26,9 +33,14 @@ Remote ID is unauthenticated.  A decoded serial number is a *claim* made by
 whatever transmitted the frame, and spoofing it needs no special equipment.
 Treat it as one observation among several, not as ground truth.
 
-Silence proves even less.  The EU obligation attaches to the class label, and
-C0 aircraft under 250 g are exempt: a DJI Neo or a Mini 4 Pro on its standard
-battery transmits nothing here even while airborne.
+Silence proves even less, and for three separate reasons.  The EU obligation
+attaches to the class mark rather than to a weight, so C1 and above must
+broadcast while C0 need not; a DJI Neo or a Mini 4 Pro as shipped is generally
+reported silent on the standard element even while airborne.  But exemption
+permits silence without compelling it, a C0 aircraft may broadcast anyway, and
+DJI offers a C1 label upgrade that turns the obligation on.  So an empty
+result is not an empty sky, and the DJI element is worth checking separately
+on anything with a Wi-Fi flight mode.
 """
 
 from __future__ import annotations
@@ -42,7 +54,7 @@ from typing import Any
 
 __all__ = ["build_parser", "configure", "iter_pcap_frames", "main", "register", "run"]
 
-HELP = "decode standard Remote ID (ASTM F3411 / EN 4709) from captured Wi-Fi frames"
+HELP = "decode Remote ID and DJI DroneID from captured Wi-Fi frames"
 
 _PCAP_MAGIC = {0xA1B2C3D4: ("<", 1e-6), 0xD4C3B2A1: ("<", 1e-6),
                0xA1B23C4D: ("<", 1e-9), 0x4D3CB2A1: ("<", 1e-9)}
@@ -117,6 +129,10 @@ def configure(parser: argparse.ArgumentParser) -> None:
                         help="write every decoded beacon as JSON")
     parser.add_argument("--unique", action="store_true",
                         help="print each identifier once instead of every beacon")
+    parser.add_argument("--dji-extended", action="store_true",
+                        help="also decode the DJI element's fields past the 30 bytes "
+                             "the reference parser trusts; the layout is inferred, "
+                             "so results are marked unverified")
 
 
 def register(subparsers: Any) -> None:
@@ -134,8 +150,11 @@ def build_parser() -> argparse.ArgumentParser:
 
 def _show(summary: dict[str, Any], count: int | None = None) -> None:
     seen = f"  ({count} beacons)" if count else ""
+    label = {"dji_droneid_wifi": "DJI DroneID over Wi-Fi",
+             "standard_remote_id": "standard Remote ID"}.get(summary.get("kind"), "")
     print(f"\n{summary.get('uas_id') or '<no identifier>'}"
-          f"  [{summary.get('id_type', '?')}]{seen}")
+          f"  [{summary.get('id_type', '?')}]{seen}"
+          + (f"   {label}" if label else ""))
     position = summary.get("position")
     if position:
         print(f"  drone     {position[0]:.6f}, {position[1]:.6f}"
@@ -175,22 +194,50 @@ def run(args: argparse.Namespace) -> int:
         print("error: give a capture file or --hex", file=sys.stderr)
         return 1
 
+    from .remoteid import dji_wifi
+
     decoded: list[dict[str, Any]] = []
     malformed = 0
+    n_standard = n_dji = 0
     for timestamp, frame in frames:
+        # A frame can carry either element, and they are different things: the
+        # ASD-STAN one is the identity the law compels, the DJI one is DJI's
+        # own proprietary DroneID riding in a beacon. Both are checked.
         try:
             beacon = wifi.parse_beacon(frame)
         except ValueError as exc:
             malformed += 1
             print(f"# malformed Open Drone ID element: {exc}", file=sys.stderr)
+            beacon = None
+        if beacon is not None:
+            summary = beacon.summary()
+            summary["timestamp"] = timestamp
+            summary["kind"] = "standard_remote_id"
+            decoded.append(summary)
+            n_standard += 1
             continue
-        if beacon is None:
+        try:
+            dji = dji_wifi.parse_dji_beacon(frame, extended=bool(args.dji_extended))
+        except ValueError as exc:
+            malformed += 1
+            print(f"# malformed DJI DroneID element: {exc}", file=sys.stderr)
             continue
-        summary = beacon.summary()
+        if dji is None:
+            continue
+        summary = dji.to_dict()
         summary["timestamp"] = timestamp
+        summary["kind"] = "dji_droneid_wifi"
+        summary["uas_id"] = dji.serial
+        summary["id_type"] = "serial_number"
         decoded.append(summary)
+        n_dji += 1
 
-    print(f"# {len(decoded)} Remote ID beacon(s)"
+    kinds = []
+    if n_standard:
+        kinds.append(f"{n_standard} standard Remote ID")
+    if n_dji:
+        kinds.append(f"{n_dji} DJI DroneID (Wi-Fi)")
+    print(f"# {len(decoded)} beacon(s)" + (": " + ", ".join(kinds) if kinds else "")
           + (f", {malformed} malformed" if malformed else ""))
     if not decoded:
         print("# nothing decoded. Remember that EU class C0 aircraft under 250 g\n"
