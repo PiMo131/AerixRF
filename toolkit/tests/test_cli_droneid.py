@@ -51,10 +51,23 @@ def test_json_output_carries_detection_and_frame(recording, tmp_path):
     assert burst["frame"]["crc24_ok"] and burst["frame"]["crc16_ok"]
 
 
-def test_a_rate_that_is_not_a_multiple_of_the_spacing_is_refused(tmp_path, capsys):
+def test_a_rate_the_receiver_cannot_use_is_retuned_rather_than_refused(tmp_path, capsys):
+    # 20 MSPS is not a multiple of the subcarrier spacing, so it cannot be
+    # decoded as it stands - and it is exactly the rate the E200's host link
+    # likes. Rather than refusing it, the command says it is finding the
+    # occupied bands and resampling. This file has nothing in it to find, so
+    # the run still fails; what is asserted is *why*.
     stem = tmp_path / "wrong_rate"
     write_sigmf(stem, np.zeros(1000, np.complex64), StreamInfo(20e6, FC))
     assert cli_droneid.main([str(stem)]) == 1
+    err = capsys.readouterr().err
+    assert "cannot be decoded directly" in err and "resampling" in err
+
+
+def test_a_rate_the_receiver_cannot_use_is_refused_when_tuning_is_declined(tmp_path, capsys):
+    stem = tmp_path / "wrong_rate_no_tune"
+    write_sigmf(stem, np.zeros(1000, np.complex64), StreamInfo(20e6, FC))
+    assert cli_droneid.main([str(stem), "--no-tune"]) == 1
     assert "not a multiple" in capsys.readouterr().err
 
 

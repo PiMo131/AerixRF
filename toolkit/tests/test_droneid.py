@@ -320,14 +320,26 @@ def test_noise_alone_produces_no_detections():
     assert rx.find_bursts(noise, FS) == []
 
 
-def test_low_signal_to_noise_fails_the_crc_rather_than_lying():
-    # Without turbo decoding the receiver runs out of margin around 15 dB; the
-    # contract is that it says so through the CRC instead of inventing a frame.
-    x = _capture(snr_db=6.0)
+def test_a_burst_too_weak_to_decode_fails_the_crc_rather_than_lying():
+    # The contract is not "fails below some SNR" - that number keeps moving,
+    # and this test used to assert 6 dB was hopeless, which the turbo decoder
+    # and the averaged channel estimate between them made false. The contract
+    # is that a frame the receiver cannot recover is reported as a CRC failure
+    # rather than as a drone. Well below the noise there is nothing to recover.
+    x = _capture(snr_db=-12.0)
     for detection in rx.find_bursts(x, FS):
         frame = rx.decode_burst(x, FS, detection)
         if frame is not None:
             assert not (frame.crc16_ok and frame.crc24_ok)
+
+
+def test_the_receiver_still_decodes_where_it_used_to_give_up():
+    # 6 dB was out of reach for the hard-decision path this file was written
+    # against. It is not any more, and that is worth pinning: it is the whole
+    # return on the turbo decoder and the channel estimate.
+    x = _capture(snr_db=6.0)
+    frames = [rx.decode_burst(x, FS, d) for d in rx.find_bursts(x, FS)]
+    assert any(f is not None and f.crc24_ok and f.crc16_ok for f in frames)
 
 
 def test_detection_serialises():
