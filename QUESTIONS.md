@@ -33,24 +33,6 @@ Where I have a recommendation it is marked **(rec.)**.
   360-1020 MHz and video from 460 MHz to above 6 GHz).
 - **(rec.)** (a) and (b) in the default profile, (c) as an optional profile.
 
-**Q12. What should "the toolkit" be for you?**
-- A Python package and CLI for experiments (what exists now), a headless
-  daemon that feeds RF detection events into the AERIX ingest service, or an
-  operator screen? **(rec.)** CLI now, daemon next, no GUI until events are
-  trusted.
-
-**Q13. Which build step next?** Pick an order; my ranking follows.
-1. Field capture kit: capture, sweep, classify on real signals, plus the
-   RX1/RX2 phase characterisation script (numbers nobody has published).
-2. Finish the open DroneID decoder (turbo decoder, OcuSync 2 golden test,
-   then attempt OcuSync 3's four-Zadoff-Chu burst from your own captures).
-3. Sub-GHz ExpressLRS decoding through a channeliser and gr-lora_sdr in a
-   separate GPL process, validated with an owned transmitter.
-4. openwifi on the E200 as a Wi-Fi Remote ID sniffer feeding the existing
-   AERIX envelope with `source: future_sdr`.
-5. A sweep daemon emitting RF detection events to AERIX ingest.
-6. Moving the cheap stages onto the E200's ARM.
-
 ## C. Platform choices
 
 **Q3. Firmware personality.** (ADR-0004) Start on the stock IIO firmware with
@@ -98,7 +80,27 @@ Sr and the Telecommunicatiewet before a multi-node deployment records
 anything beyond Remote ID? Default for now: store metadata, raw IQ only on
 explicit opt-in. **(rec.)** yes, and metadata-first.
 
-## E. Things I need from you
+## E. Shape and order of the build
+
+**Q12. What should "the toolkit" be for you?**
+- A Python package and CLI for experiments (what exists now), a headless
+  daemon that feeds RF detection events into the AERIX ingest service, or an
+  operator screen? **(rec.)** CLI now, daemon next, no GUI until events are
+  trusted.
+
+**Q13. Which build step next?** Pick an order; my ranking follows.
+1. Field capture kit: capture, sweep, classify on real signals, plus the
+   RX1/RX2 phase characterisation script (numbers nobody has published).
+2. Finish the open DroneID decoder (turbo decoder, OcuSync 2 golden test,
+   then attempt OcuSync 3's four-Zadoff-Chu burst from your own captures).
+3. Sub-GHz ExpressLRS decoding through a channeliser and gr-lora_sdr in a
+   separate GPL process, validated with an owned transmitter.
+4. openwifi on the E200 as a Wi-Fi Remote ID sniffer feeding the existing
+   AERIX envelope with `source: future_sdr`.
+5. A sweep daemon emitting RF detection events to AERIX ingest.
+6. Moving the cheap stages onto the E200's ARM.
+
+## F. Things I need from you
 
 **Q11. Downloads.** The sandbox reaches only github.com and pypi.org. The
 full wish list with priorities is the last section of `research/sources.md`
