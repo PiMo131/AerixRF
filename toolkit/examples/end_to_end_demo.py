@@ -66,20 +66,25 @@ def build_scene(rng: np.random.Generator) -> syn.Scene:
     t, index = 0.002, 0
     while t < DURATION_S - 0.005:
         packet = syn.lora_chirps(SAMPLE_RATE_HZ, 812.5e3, 7, n_symbols, hop_rng)
-        # +5.5 to +7 MHz: the four channels of the 80-channel 2.4 GHz hop set
-        # that fall in the top of this 15.36 MHz window, clear of the DroneID
-        # burst's own 9 MHz. A real capture has no such courtesy: when a
-        # hopper lands inside the DroneID band the two overlap in time and
-        # frequency, no 2-D detector can separate them, and that is the usual
-        # reason a burst is found but does not decode.
-        offset = (5.5 + 0.5 * ((index // 4) % 4)) * 1e6
+        # +5, +6 and +7 MHz: the three channels of the 1 MHz-spaced,
+        # 80-channel 2.4 GHz hop set that fit in the top of this 15.36 MHz
+        # window while staying clear of both the Nyquist edge and the DroneID
+        # burst's own 9 MHz. ExpressLRS holds a channel for four packets
+        # before hopping, which is what the //4 is.
+        #
+        # A real capture has no such courtesy: when a hopper lands inside the
+        # DroneID band the two overlap in time and frequency, no 2-D detector
+        # can separate them, and that is the usual reason a burst is found
+        # but does not decode.
+        offset = (5.0 + 1.0 * ((index // 4) % 3)) * 1e6
         scene.add(packet, t_start_s=t, freq_offset_hz=offset, snr_db=22.0,
                   label="elrs_2g4", bandwidth_hz=812.5e3)
         t += 4e-3
         index += 1
 
-    # 3. A narrow telemetry link that does not hop, to show the classifier
-    #    refusing to call a fixed emitter an FHSS family.
+    # 3. A narrow telemetry link on a fixed frequency: 200 kHz of GFSK at
+    #    2422.9 MHz, every 10 ms, never hopping. Stage 2 gets this one wrong
+    #    too, and for a reason worth reading in the output.
     tel_rng = np.random.default_rng(13)
     t = 0.003
     while t < DURATION_S - 0.005:
@@ -152,12 +157,31 @@ def main(argv: list[str] | None = None) -> int:
             print(f"           {candidate.explanation}")
         if len(candidates) > 1:
             print(f"    margin {margin(candidates):.2f}")
-    print("\n  Read the third emitter carefully: it is the DroneID burst, and the\n"
-          "  generic detector gets it wrong. The 250 us closing that glues LoRa\n"
-          "  symbols back into packets also glues this 643 us burst to the hop\n"
-          "  that follows it, so it is measured as 3.3 ms and 11 MHz and named\n"
-          "  Wi-Fi. One detector setting cannot serve every waveform, which is\n"
-          "  why stage 4 runs a matched detector instead.")
+    print("\n  All three groups are mismeasured, each in its own way, and the\n"
+          "  reasons are worth more than the labels:\n"
+          "\n"
+          "  Emitter 1 is the ExpressLRS link, correctly named. Its channels are\n"
+          "  a real 1 MHz apart, but they read as half that: burst centres wander\n"
+          "  by a couple of hundred kilohertz and the 250 kHz centre tolerance\n"
+          "  splits each true channel into two. The tolerance has to sit between\n"
+          "  the centre jitter and the channel spacing, and for an 812 kHz chirp\n"
+          "  on a 1 MHz grid that gap is narrow.\n"
+          "\n"
+          "  Emitter 2 is the telemetry link, which never hops, yet it is named\n"
+          "  FrSky and HoTT on four distinct centres. The 1 MHz frequency closing\n"
+          "  pulls neighbouring noise cells into each 200 kHz burst, so the\n"
+          "  measured width swings between 450 and 1500 kHz and the centre swings\n"
+          "  with it. Invented hopping is what a closing wider than the signal\n"
+          "  looks like. The margin of 0.00 is the one honest number here: the\n"
+          "  classifier is saying it cannot separate its own top two.\n"
+          "\n"
+          "  Emitter 3 is the DroneID burst, named Wi-Fi. The 250 us time closing\n"
+          "  that glues LoRa symbols back into packets also glues this 643 us\n"
+          "  burst to the hop that follows it, so it measures 3.3 ms and 11 MHz.\n"
+          "\n"
+          "  One detector setting cannot serve every waveform. That is why stage 4\n"
+          "  runs a matched detector instead, and why a field deployment sweeps\n"
+          "  the same dwell more than once with different settings.")
 
     _section("3. cyclic prefixes: which OFDM numerology, if any")
     profile = cyclo.cyclic_profile(samples, SAMPLE_RATE_HZ, chunk_s=4e-3)
