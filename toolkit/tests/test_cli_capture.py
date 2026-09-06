@@ -28,7 +28,9 @@ def test_dry_run_prints_configuration_without_hardware(monkeypatch, tmp_path, ca
     argv = ["capture", "--uri", URI, "--freq", "2437e6", "--dry-run", str(stem)]
     assert cli_capture.main(argv) == 0
     out, err = capsys.readouterr()
-    assert err == ""
+    # 15.36 MSPS is above the stock IIO continuous ceiling, so the default
+    # snapshot tier reports a duty cycle instead of staying silent.
+    assert err.count("warning:") == 1 and "duty cycle" in err
     assert "dry run" in out
     assert row("uri", URI) in out
     assert row("hardware", "MicroPhase ANTSDR E200 (Zynq-7020, AD9363, fw=pluto-iio)") in out
@@ -39,23 +41,30 @@ def test_dry_run_prints_configuration_without_hardware(monkeypatch, tmp_path, ca
     assert row("gain mode", "manual") in out and row("gain", "40.0 dB") in out
     assert row("buffer", "262144 samples") in out and row("discard", "2 buffers") in out
     assert row("duration", "1.000000 s (15360000 samples per channel)") in out
+    assert row("tier", "snapshot") in out
     assert row("data file", f"{stem}.sigmf-data") in out
     assert row("meta file", f"{stem}.sigmf-meta") in out
-    assert row("warnings", "none") in out
+    assert "duty cycle" in out
     assert not (tmp_path / "scan.sigmf-data").exists()
+    # a rate inside the continuous ceiling warns about nothing
+    argv = ["capture", "--uri", URI, "--freq", "2437e6", "--rate", "10e6",
+            "--tier", "continuous", "--dry-run", str(stem)]
+    assert cli_capture.main(argv) == 0
+    out, err = capsys.readouterr()
+    assert err == "" and row("warnings", "none") in out and row("tier", "continuous") in out
 
 
 def test_dry_run_reports_host_ceiling_and_two_channel_settings(monkeypatch, tmp_path, capsys):
     monkeypatch.setitem(sys.modules, "adi", None)
     argv = ["capture", "--freq", "5.8e9", "--rate", "30.72e6", "--bw", "18e6", "--channels", "0,1",
-            "--gain-mode", "slow_attack", "--fw", "pluto-iio v0.39", "--dry-run",
-            str(tmp_path / "x")]
+            "--gain-mode", "slow_attack", "--fw", "pluto-iio v0.39", "--tier", "continuous",
+            "--dry-run", str(tmp_path / "x")]
     assert cli_capture.main(argv) == 0
     out, err = capsys.readouterr()
     assert row("channels", "0 (SMA RX1), 1 (IPEX RX2)") in out
     assert row("gain", "AGC (recorded as unknown)") in out
     assert "fw=pluto-iio v0.39" in out
-    assert "host-link" in out and "10 MSPS per channel" in out and "3.8 GHz" in out
+    assert "host-link" in out and "6 MSPS per channel" in out and "3.8 GHz" in out
     assert err.count("warning:") == 2  # host link + AD9363 LO envelope (18 MHz bw is fine)
 
 
@@ -161,7 +170,7 @@ def test_help_documents_2r2t_and_clock_calibration(capsys):
     assert "fw_setenv mode 2r2t" in out
     assert "in_voltage_dac_mode" in out and "ad5660mp" in out
     assert "SMA RX1" in out and "IPEX RX2" in out
-    assert "20 MSPS" in out and "61.44 MSPS" in out
+    assert "12 MSPS" in out and "61.44 MSPS" in out and "snapshot" in out
 
 
 def test_register_into_a_parent_parser(monkeypatch, tmp_path, capsys):

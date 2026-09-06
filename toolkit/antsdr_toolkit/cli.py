@@ -142,6 +142,28 @@ COMMANDS: tuple[Command, ...] = (
 )
 
 
+# Subcommands that live in their own module because they need heavy or
+# optional imports (hardware drivers, scipy).  Each exposes
+# ``register(subparsers)`` and sets ``func`` on its own parser.  They are
+# imported inside :func:`build_parser` so that one broken or half-installed
+# module costs its own subcommand, not the whole CLI.
+EXTERNAL_COMMANDS: tuple[str, ...] = ("cli_capture", "cli_sweep")
+
+
+def _register_external(subparsers: argparse._SubParsersAction) -> list[str]:
+    """Register the optional subcommand modules; return the names that failed."""
+    import importlib
+
+    failed: list[str] = []
+    for name in EXTERNAL_COMMANDS:
+        try:
+            module = importlib.import_module(f".{name}", __package__)
+            module.register(subparsers)
+        except Exception:  # noqa: BLE001 - a broken extra must not kill the CLI
+            failed.append(name)
+    return failed
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="antsdr-tk",
                                      description="ANTSDR E200 drone-detection toolkit")
@@ -151,6 +173,7 @@ def build_parser() -> argparse.ArgumentParser:
         sub = subparsers.add_parser(command.name, help=command.help, description=command.help)
         command.configure(sub)
         sub.set_defaults(_run=command.run)
+    _register_external(subparsers)
     return parser
 
 
@@ -158,7 +181,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     """Entry point for the ``antsdr-tk`` console script; returns the exit status."""
     parser = build_parser()
     args = parser.parse_args(argv)
-    run = getattr(args, "_run", None)
+    run = getattr(args, "_run", None) or getattr(args, "func", None)
     if run is None:
         parser.print_help()
         return 2

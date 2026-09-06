@@ -43,8 +43,11 @@ __all__ = [
     "run",
 ]
 
-#: LTE 10 MHz rate: covers a DJI OcuSync carrier and stays under the 20 MSPS host link.
+#: LTE 10 MHz rate: covers a DJI OcuSync carrier and a DroneID burst. It is
+#: above the stock IIO firmware's continuous host-link ceiling, so the default
+#: tier is "snapshot" (verified: stream-rate).
 DEFAULT_RATE_HZ = 15.36e6
+DEFAULT_TIER = "snapshot"
 DEFAULT_GAIN_DB = 40.0
 DEFAULT_BUFFER = 1 << 18
 DEFAULT_DISCARD = 2
@@ -59,8 +62,14 @@ hardware ({hw.E200.name}, {hw.E200.transceiver}, {hw.E200.adc_bits}-bit):
 (IIO voltage1; needs 2r2t firmware mode)
   sample rate  {hw.E200.sample_rate_min / 1e6:.3f} .. {hw.E200.sample_rate_max_1ch / 1e6:.2f} MSPS \
 single channel, {hw.E200.sample_rate_max_2ch / 1e6:.2f} MSPS per channel with two
-  host link    1 GbE, libiio: about {hw.E200.host_ceiling(1) / 1e6:.0f} MSPS single channel, \
-{hw.E200.host_ceiling(2) / 1e6:.0f} MSPS per channel with two
+  host link    1 GbE. Continuous stream: about {hw.E200.host_ceiling(1) / 1e6:.0f} MSPS \
+single channel and {hw.E200.host_ceiling(2) / 1e6:.0f} MSPS per channel with two on the stock \
+IIO firmware (CPU-bound in iiod), about {hw.E200.host_ceiling(1, "uhd_sc16") / 1e6:.0f} MSPS on \
+the UHD firmware; {hw.E200.host_ceiling(1, "uhd_wire_limit_sc16") / 1e6:.1f} MSPS is the sc16 \
+wire limit of 1 GbE
+  capture tier '--tier continuous' keeps the link inside those ceilings; '--tier snapshot' \
+allows any rate up to {hw.E200.sample_rate_max_1ch / 1e6:.2f} MSPS and accepts the resulting \
+duty cycle (gaps between buffers) - this is how DroneID gets its 15.36 MSPS
   LO           {hw.E200.lo_min / 1e6:.0f} MHz .. {hw.E200.lo_max / 1e9:.0f} GHz as configured \
 by the firmware (AD9363 datasheet: 325 MHz .. 3.8 GHz, 20 MHz)
   clean rates  {", ".join(f"{r / 1e6:g}" for r in hw.CLEAN_RATES)} MSPS \
@@ -116,6 +125,9 @@ def configure(parser: argparse.ArgumentParser) -> None:
                         help=f"samples per rx() buffer and per write (default {DEFAULT_BUFFER})")
     parser.add_argument("--discard", type=int, default=DEFAULT_DISCARD, metavar="K",
                         help=f"buffers dropped after tuning (default {DEFAULT_DISCARD})")
+    parser.add_argument("--tier", choices=tuple(hw.CAPTURE_TIERS), default=DEFAULT_TIER,
+                        help=f"capture tier judged against the host link (default {DEFAULT_TIER}); "
+                             "continuous = unbroken stream, snapshot = bursts with gaps")
     parser.add_argument("--fw", default="pluto-iio", metavar="TAG",
                         help="firmware personality written into core:hw (default pluto-iio)")
     parser.add_argument("--description", default="", metavar="TEXT",
@@ -152,9 +164,10 @@ def resolve_config(args: argparse.Namespace) -> dict[str, Any]:
         raise ValueError(f"--buffer must be positive, got {args.buffer}")
     if int(args.discard) < 0:
         raise ValueError(f"--discard must be >= 0, got {args.discard}")
+    tier = str(getattr(args, "tier", DEFAULT_TIER))
     warnings = hw.check_stream_config(
         rate, fc, channels=channels, rf_bandwidth_hz=bw,
-        gain_mode=args.gain_mode, gain_db=args.gain,
+        gain_mode=args.gain_mode, gain_db=args.gain, tier=tier,
     )
     data_path, meta_path = sigmf_paths(args.out_stem)
     return {
@@ -170,6 +183,7 @@ def resolve_config(args: argparse.Namespace) -> dict[str, Any]:
         "gain_db": float(args.gain),
         "buffer_size": int(args.buffer),
         "discard_buffers": int(args.discard),
+        "tier": tier,
         "seconds": seconds,
         "n_samples": int(n_samples),
         "description": str(args.description),
@@ -196,6 +210,7 @@ def format_config(cfg: dict[str, Any]) -> str:
         ("gain", gain),
         ("buffer", f"{cfg['buffer_size']} samples per channel"),
         ("discard", f"{cfg['discard_buffers']} buffers after tuning"),
+        ("tier", cfg["tier"]),
         ("duration", f"{cfg['seconds']:.6f} s ({cfg['n_samples']} samples per channel)"),
         ("data file", cfg["data_path"]),
         ("meta file", cfg["meta_path"]),

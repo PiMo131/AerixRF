@@ -19,8 +19,14 @@ def test_profile_encodes_verified_e200_facts():
     assert e.adc_bits == 12 and e.full_scale_counts == 2048.0
     assert e.sample_rate_min == 521e3
     assert e.sample_rate_max_1ch == 61.44e6 and e.sample_rate_max_2ch == 30.72e6
+    # Corrected against the adversarial verification of the streaming rate
+    # (research/verification-log.md, claim stream-rate): the stock IIO
+    # firmware is CPU-bound in iiod, the 20 MSPS vendor figure belongs to the
+    # UHD personality, and 29.6 MSPS is the sc16 wire limit of 1 GbE.
     assert dict(e.host_stream_ceiling_sps) == {
-        "iio_sc16_1ch": 20e6, "iio_sc16_2ch_per_ch": 10e6, "uhd_sc8_1ch": 40e6,
+        "iio_sc16_1ch": 12e6, "iio_sc16_2ch_per_ch": 6e6,
+        "uhd_sc16_1ch": 20e6, "uhd_sc16_2ch_per_ch": 10e6,
+        "uhd_wire_limit_sc16_1ch": 29.6e6, "uhd_sc8_1ch": 40e6,
     }
     assert e.rf_bandwidth_max == 56e6 and e.rf_bandwidth_min == 200e3
     assert e.lo_min == 70e6 and e.lo_max == 6e9
@@ -41,7 +47,8 @@ def test_port_names_and_interface_limits():
     for bad in (0, 3):
         with pytest.raises(ValueError):
             e.interface_max_rate(bad)
-    assert e.host_ceiling(1) == 20e6 and e.host_ceiling(2) == 10e6
+    assert e.host_ceiling(1) == 12e6 and e.host_ceiling(2) == 6e6
+    assert e.host_ceiling(1, "uhd_sc16") == 20e6 and e.host_ceiling(2, "uhd_sc16") == 10e6
     assert e.host_ceiling(1, "uhd_sc8") == 40e6
     assert e.host_ceiling(2, "uhd_sc8") is None
 
@@ -72,7 +79,11 @@ def test_rate_tables_and_constants():
         2.5e6, 4e6, 5e6, 8e6, 10e6, 14e6, 15.36e6, 20e6, 30.72e6, 40e6, 56e6, 61.44e6)
     assert hw.DRONEID_RATES == (15.36e6, 30.72e6, 61.44e6)
     assert all(r in hw.CLEAN_RATES for r in hw.DRONEID_RATES)
-    assert [r for r in hw.DRONEID_RATES if r <= hw.E200.host_ceiling(1)] == [15.36e6]
+    # No DroneID rate fits a continuous stock-IIO stream: DroneID is a
+    # snapshot-tier capture (or runs on the UHD personality / on the board).
+    assert [r for r in hw.DRONEID_RATES if r <= hw.E200.host_ceiling(1)] == []
+    assert [r for r in hw.DRONEID_RATES if r <= hw.E200.host_ceiling(1, "uhd_sc16")] == [15.36e6]
+    assert set(hw.CAPTURE_TIERS) == {"continuous", "snapshot"}
     assert hw.GAIN_MODES == ("manual", "slow_attack", "fast_attack", "hybrid")
     assert hw.TX_GAIN_OFF_DB == -89.0
     assert hw.IIO_DEVICE_NAMES["control"] == "ad9361-phy"
@@ -84,18 +95,28 @@ def test_rate_tables_and_constants():
 @pytest.mark.parametrize(
     "target_bw, channels, host_ceiling, expected",
     [
-        (10e6, 1, True, 15.36e6),     # DroneID: LTE 10 MHz -> 15.36 MSPS
-        (20e6, 2, True, 10e6),        # two channels under the 10 MSPS/ch host ceiling
+        (10e6, 1, True, 10e6),        # continuous on stock IIO: 12 MSPS ceiling bites
+        (20e6, 2, True, 5e6),         # two channels under the 6 MSPS/ch host ceiling
         (20e6, 2, False, 30.72e6),    # ceiling off: interface limit per channel
         (1e6, 1, True, 2.5e6),        # never below the smallest clean rate
-        (13e6, 1, True, 20e6),        # 19.5 MSPS wanted -> 20 MSPS
-        (50e6, 1, True, 20e6),        # cannot be covered: widest allowed
+        (13e6, 1, True, 10e6),        # 19.5 MSPS wanted, ceiling allows 10
+        (50e6, 1, True, 10e6),        # cannot be covered: widest allowed
         (50e6, 1, False, 61.44e6),
         (5.8e6, 1, True, 10e6),       # 8.7 MSPS wanted -> 10 MSPS (Wi-Fi-like 5.8 MHz)
     ],
 )
 def test_recommend_sample_rate(target_bw, channels, host_ceiling, expected):
     assert hw.recommend_sample_rate(target_bw, channels, host_ceiling) == expected
+
+
+def test_recommend_sample_rate_snapshot_tier_ignores_the_host_link():
+    # The host link sets the duty cycle of a snapshot, not its rate, so the
+    # LTE/DroneID convention (10 MHz -> 15.36 MSPS) survives there.
+    assert hw.recommend_sample_rate(10e6, tier="snapshot") == 15.36e6
+    assert hw.recommend_sample_rate(20e6, 2, tier="snapshot") == 30.72e6
+    assert hw.recommend_sample_rate(40e6, tier="snapshot") == 61.44e6
+    with pytest.raises(ValueError):
+        hw.recommend_sample_rate(10e6, tier="burst")
 
 
 def test_recommend_sample_rate_options_and_errors():
@@ -114,18 +135,30 @@ def test_recommend_sample_rate_options_and_errors():
 
 
 def test_check_stream_config_clean_and_warnings():
-    assert hw.check_stream_config(15.36e6, 2.437e9, gain_db=40.0) == []
-    assert hw.check_stream_config(10e6, 2.437e9, channels=(0, 1), rf_bandwidth_hz=8e6) == []
+    assert hw.check_stream_config(10e6, 2.437e9, gain_db=40.0) == []
+    assert hw.check_stream_config(5e6, 2.437e9, channels=(0, 1), rf_bandwidth_hz=4e6) == []
     warnings = hw.check_stream_config(30.72e6, 5.8e9)
     assert len(warnings) == 3
-    assert "host-link" in warnings[0] and "20 MSPS" in warnings[0]
+    assert "host-link" in warnings[0] and "12 MSPS" in warnings[0]
     assert "3.8 GHz" in warnings[1]
     assert "20 MHz" in warnings[2]
     assert hw.check_stream_config(30.72e6, 2.4e9, rf_bandwidth_hz=18e6, host_ceiling=False) == []
     low = hw.check_stream_config(1e6, 915e6)
     assert len(low) == 1 and "decimat" in low[0]
     two = hw.check_stream_config(15.36e6, 2.4e9, channels=(0, 1))
-    assert len(two) == 1 and "10 MSPS per channel" in two[0]
+    assert len(two) == 1 and "6 MSPS per channel" in two[0]
+
+
+def test_check_stream_config_tier_changes_the_rate_verdict():
+    # DroneID's 15.36 MSPS: dropped buffers as a continuous stream, a duty
+    # cycle as a snapshot (verified: stream-rate).
+    cont = hw.check_stream_config(15.36e6, 2.4295e9)
+    assert len(cont) == 1 and "dropped buffers" in cont[0] and "snapshot" in cont[0]
+    snap = hw.check_stream_config(15.36e6, 2.4295e9, tier="snapshot")
+    assert len(snap) == 1 and "duty cycle" in snap[0] and "78 %" in snap[0]
+    assert hw.check_stream_config(10e6, 2.4295e9, tier="snapshot") == []
+    with pytest.raises(ValueError):
+        hw.check_stream_config(10e6, 2.4e9, tier="continuous-ish")
 
 
 @pytest.mark.parametrize(

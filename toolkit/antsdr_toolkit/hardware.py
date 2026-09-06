@@ -62,6 +62,7 @@ from dataclasses import dataclass, field
 from types import MappingProxyType
 
 __all__ = [
+    "CAPTURE_TIERS",
     "CLEAN_RATES",
     "CLOCK_CALIBRATION_SYSFS",
     "DRONEID_RATES",
@@ -280,8 +281,14 @@ E200 = HardwareProfile(
     sample_rate_max_1ch=61.44e6,
     sample_rate_max_2ch=30.72e6,
     host_stream_ceiling_sps=MappingProxyType({
-        "iio_sc16_1ch": 20e6,
-        "iio_sc16_2ch_per_ch": 10e6,
+        # Sustained CONTINUOUS host-link rates per personality. Snapshot
+        # capture (one rx_buffer_size burst into DDR) reaches any AD9361 rate
+        # up to 61.44 MSPS on every personality; see CAPTURE_TIERS.
+        "iio_sc16_1ch": 12e6,
+        "iio_sc16_2ch_per_ch": 6e6,
+        "uhd_sc16_1ch": 20e6,
+        "uhd_sc16_2ch_per_ch": 10e6,
+        "uhd_wire_limit_sc16_1ch": 29.6e6,
         "uhd_sc8_1ch": 40e6,
     }),
     rf_bandwidth_max=56e6,
@@ -364,10 +371,50 @@ E200 = HardwareProfile(
             "pyadi writes rx_hardwaregain_chanX only while gain_control_mode_chanX is "
             "'manual': set the mode first. Firmware default is slow_attack AGC (dtsi)."
         ),
-        "uhd_sc8_1ch": "unverified inference (16 bit/sample OTW); never benchmarked.",
-        "iio_sc16_2ch_per_ch": "inferred: half of the vendor 20 MSPS figure.",
+        "iio_sc16_1ch": (
+            "Stock IIO (PlutoSDR-compatible) firmware is CPU-bound in iiod on the "
+            "Cortex-A9: measured 11-13 MSPS sc16 on this SoC class; about 20 MSPS "
+            "only with a speed-tuned kernel and iiod pinned to a core, 27.5 MSPS "
+            "only with an overclock. Plan continuous work at 10 MSPS. The vendor "
+            "table's 20 MSPS 'transmission bandwidth to host' is the UHD figure "
+            "(verified: stream-rate)."
+        ),
+        "iio_sc16_2ch_per_ch": "inferred: half of the measured single-channel IIO rate.",
+        "uhd_sc16_1ch": (
+            "MicroPhase's own figure for the UHD personality, whose PL-side Ethernet "
+            "engine bypasses the ARM. Their four-hour stress test defaults to "
+            "7.68 MSPS per device, which is a default and not a maximum "
+            "(verified: stream-rate)."
+        ),
+        "uhd_wire_limit_sc16_1ch": (
+            "Hard limit of 1 GbE at a 1500-byte MTU in sc16, not a measurement: "
+            "40 MSPS sc16 (1.28 Gbit/s) is impossible on any personality."
+        ),
+        "uhd_sc8_1ch": (
+            "unverified inference (16 bit/sample OTW). sc8/sc12 exist in the driver "
+            "and the FPGA but no measurement has been published."
+        ),
     }),
 )
+
+
+CAPTURE_TIERS: Mapping[str, str] = MappingProxyType({
+    "continuous": (
+        "Unbroken host stream. Bounded by the personality's host-link ceiling "
+        "(host_stream_ceiling_sps): about 10-12 MSPS on stock IIO firmware, "
+        "20 MSPS on UHD, 29.6 MSPS the sc16 wire limit. Use for anything that "
+        "must not miss a burst."
+    ),
+    "snapshot": (
+        "Repeated rx_buffer_size bursts into the Zynq's DDR, transferred between "
+        "bursts. Any AD9361 rate up to 61.44 MSPS works, at the cost of a duty "
+        "cycle of roughly 25-40 %: a 10.5 MB / 65 ms buffer takes 100-200 ms to "
+        "move over 1 GbE. Use for wideband survey, 40 MHz OcuSync video and "
+        "spectrogram classifiers, and record the duty cycle with the capture "
+        "(verified: stream-rate)."
+    ),
+})
+"""The two ways to get samples off the E200, and what each costs."""
 
 
 def hw_string(fw: str = "pluto-iio") -> str:
@@ -380,6 +427,7 @@ def recommend_sample_rate(
     channels: int = 1,
     host_ceiling: bool = True,
     *,
+    tier: str = "continuous",
     oversampling: float = OVERSAMPLING_DEFAULT,
     rates: Sequence[float] = CLEAN_RATES,
     profile: HardwareProfile = E200,
@@ -389,18 +437,24 @@ def recommend_sample_rate(
     The smallest rate in ``rates`` that is at least ``oversampling *
     target_bw_hz`` (1.5x by default, the LTE/DroneID convention: 10 MHz ->
     15.36 MSPS) and does not exceed the ceiling is returned. The ceiling is the
-    digital-interface limit for ``channels`` (61.44 / 30.72 MSPS) and, when
-    ``host_ceiling`` is true, the libiio host-link figure (20 MSPS single
-    channel, 10 MSPS per channel with two). A target that cannot be covered
-    under the ceiling returns the largest allowed rate, so the caller still
-    gets the widest usable span (and can warn that the band is clipped).
+    digital-interface limit for ``channels`` (61.44 / 30.72 MSPS) and, in the
+    ``"continuous"`` tier with ``host_ceiling`` true, the personality's
+    host-link figure as well (12 MSPS single channel on the stock IIO
+    firmware, 6 MSPS per channel with two). In the ``"snapshot"`` tier the
+    host link only sets the duty cycle, not the rate, so only the interface
+    limit applies: that is how DroneID gets its 15.36 MSPS. A target that
+    cannot be covered under the ceiling returns the largest allowed rate, so
+    the caller still gets the widest usable span (and can warn that the band
+    is clipped).
     """
+    if tier not in CAPTURE_TIERS:
+        raise ValueError(f"tier must be one of {tuple(CAPTURE_TIERS)}, got {tier!r}")
     if not target_bw_hz > 0.0:
         raise ValueError(f"target_bw_hz must be positive, got {target_bw_hz}")
     if not oversampling >= 1.0:
         raise ValueError("oversampling must be >= 1.0")
     ceiling = profile.interface_max_rate(channels)
-    if host_ceiling:
+    if host_ceiling and tier == "continuous":
         host = profile.host_ceiling(channels)
         if host is not None:
             ceiling = min(ceiling, host)
@@ -423,6 +477,7 @@ def check_stream_config(
     gain_mode: str = "manual",
     gain_db: float | None = None,
     host_ceiling: bool = True,
+    tier: str = "continuous",
     profile: HardwareProfile = E200,
 ) -> list[str]:
     """Validate a receive configuration against ``profile``.
@@ -432,7 +487,13 @@ def check_stream_config(
     value and the limit. Soft limits return warnings: the host-link ceiling
     (when ``host_ceiling``), the AD9363 datasheet envelope (LO > 3.8 GHz or
     RF bandwidth > 20 MHz) and rates that need the channel-0-only decimator.
+
+    ``tier`` selects how a rate above the host-link ceiling is judged: in
+    ``"continuous"`` it means dropped buffers, in ``"snapshot"`` it only means
+    a duty cycle below one (see :data:`CAPTURE_TIERS`).
     """
+    if tier not in CAPTURE_TIERS:
+        raise ValueError(f"tier must be one of {tuple(CAPTURE_TIERS)}, got {tier!r}")
     chans = tuple(int(c) for c in channels)
     if not chans:
         raise ValueError("channels must name at least one RX channel")
@@ -472,10 +533,18 @@ def check_stream_config(
     warnings: list[str] = []
     host = profile.host_ceiling(n_chan) if host_ceiling else None
     if host is not None and rate > host:
-        warnings.append(
-            f"{rate / 1e6:.3f} MSPS x {n_chan} channel(s) exceeds the libiio host-link "
-            f"ceiling of {host / 1e6:.0f} MSPS per channel over 1 GbE: expect dropped buffers"
-        )
+        if tier == "snapshot":
+            warnings.append(
+                f"{rate / 1e6:.3f} MSPS x {n_chan} channel(s) is above the "
+                f"{host / 1e6:.0f} MSPS host-link ceiling, so this is a snapshot: about "
+                f"{100.0 * host / (rate * n_chan):.0f} % duty cycle, gaps between buffers"
+            )
+        else:
+            warnings.append(
+                f"{rate / 1e6:.3f} MSPS x {n_chan} channel(s) exceeds the libiio host-link "
+                f"ceiling of {host / 1e6:.0f} MSPS per channel over 1 GbE: expect dropped "
+                "buffers (use tier='snapshot' for burst capture)"
+            )
     if rate < profile.sample_rate_no_fir_min:
         warnings.append(
             f"{rate / 1e6:.3f} MSPS needs the FIR/FPGA decimator (below "
