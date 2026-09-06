@@ -12,6 +12,7 @@ Where I have a recommendation it is marked **(rec.)**.
 | 2026-09-06 | Q2 scope | DJI and FPV first, wide sweep as an option | [ADR-0010](docs/decisions/ADR-0010-band-coverage.md) **Accepted** |
 | 2026-09-06 | Q8 recordings, in part | No time for field captures now. Available airframes: DJI Avata, Avata 2, Mini 4 Pro, Neo, possibly a Matrice, not all at once | Build order reordered; see Q13 |
 | 2026-09-06 | Q13 build order | Field captures deferred; prepare what needs no hardware | Reordered below |
+| 2026-09-06 | Analog FPV, unprompted | An analog FPV rig is available, with no GNSS on board | Video decoding built: `analog/video_decode.py`, `antsdr-tk video` |
 
 Questions still open are numbered as before. The numbering never changes,
 because the decision records cite these by number.
@@ -147,3 +148,52 @@ any GitHub repository I can read.
 
 **Q14. Branch.** Keep pushing to `claude/antsdr-drone-rf-detection-ac0uxs`,
 or open a pull request now for review?
+
+## G. Raised by the fleet research
+
+These are new, and each one changes what is worth building. The reasoning is
+in [`toolkit/antsdr_toolkit/fleet.py`](toolkit/antsdr_toolkit/fleet.py); run
+`antsdr-tk fleet` to see the table.
+
+**Q15. Which battery flies on the Mini 4 Pro?** This is the single question
+with the largest effect on what the toolkit can do for you. On the standard
+Intelligent Flight Battery the aircraft is 249 g, class C0, exempt from Remote
+ID, and broadcasts nothing; its OcuSync 4 DroneID is encrypted, so *no
+published means yields its serial number or position*. On the Intelligent
+Flight Battery Plus it passes 250 g and standard Remote ID activates, at which
+point it is fully identifiable. Have you also taken DJI's C1 label upgrade?
+
+**Q16. Which Matrice, exactly?** The family splits three ways. M30/M30T,
+M350 and M3D/M3TD are OcuSync 3, so plaintext DroneID that only the closed
+E200 firmware reads. M4E/M4T are OcuSync 4 and encrypted, but Remote ID is
+interlocked with flight, which makes them the most reliably identifiable
+aircraft you have. Photograph the nameplate in the battery bay and send me the
+model number. **Also relevant:** several of these use 5.150-5.250 GHz, which a
+5.725-5.875 GHz sweep misses entirely. ADR-0010 already covers that band; I
+want to confirm it matters before weighting the scan towards it.
+
+**Q17. Can you get hold of a DJI Mini 2?** Open code decodes exactly two
+airframes end to end, the Mini 2 and the Mavic Air 2, and you own neither.
+Without one, the open DroneID decoder in `droneid/` cannot be validated
+against a real transmitter at all, and neither can any improvement to it.
+Second-hand Mini 2s are common and cheap. **(rec.)** yes, this unblocks more
+than anything else on the list.
+
+**Q18. What is in the analog FPV rig?** The video decoder is built and passes
+a synthetic round trip, but these decide whether it works on your gear:
+- Camera output: **NTSC or PAL**? The decoder measures the line rate and picks,
+  but knowing the answer lets me check it against your capture.
+- Video transmitter model, output power and the channel you fly on.
+- Does the flight controller draw an **on-screen display** into the video? If
+  it does, the picture carries battery, timer and, with a GPS module, the
+  coordinates. Since the air unit has no GNSS of its own, the OSD is the only
+  telemetry available and it arrives as pixels.
+- Is the camera colour? Only luma is decoded today. Chroma is more work and I
+  will not start it unless the picture needs it.
+
+**Q20. Do you have a Wi-Fi adapter that does monitor mode?** Standard Remote
+ID is the only identity path for the Avata 2, and the E200 cannot receive it:
+openwifi is OFDM-only and cannot demodulate the 802.11b rates 2.4 GHz Remote
+ID beacons use *(verified: verdict 6)*. It needs a commodity USB adapter, an
+rtl8812au or similar. The parser and the capture instructions are in
+`antsdr-tk remoteid`; only the radio is missing.
