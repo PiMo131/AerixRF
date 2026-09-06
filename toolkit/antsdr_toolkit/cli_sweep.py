@@ -10,8 +10,16 @@ Sample sources: ``--uri ip:192.168.1.10`` opens the ANTSDR E200 through the
 Pluto-compatible IIO firmware (passive receive only - the driver never
 configures TX); ``--file capture`` replays a SigMF recording as one fixed
 dwell at its own centre (retuning is impossible, so ``--band``/``--freqs``
-only select which targets are reported).  ``--rate`` defaults to 20 MSPS,
-the realistic single-channel host rate of the E200 over 1 GbE.
+only select which targets are reported).  ``--rate`` defaults to 10 MSPS:
+the branch hardware model explicitly reserves that rate for continuous work
+on the stock IIO personality.  Higher rates remain available explicitly and
+the E200 driver's host-link warning is surfaced by this command.
+
+The E200 driver already flushes two physical ``rx_buffer_size`` buffers after
+every retune.  The sweep therefore adds no post-retune sleep or dwell-length
+discard by default.  ``--settle`` and ``--discard`` remain available for
+hardware experiments, but making the upstream HackRF/tracker delays additive
+to the E200's own flush caused most RF time to be deliberately thrown away.
 
 Family classification runs at **emitter** level, not dwell level. A dwell in
 the 2.4 GHz band routinely holds Wi-Fi, a control link and a video downlink at
@@ -28,8 +36,9 @@ model gets dropped in later (``ADR-0007``).
 Sources: https://github.com/lukeswitz/fpv-sdr (scanner defaults: settle
 0.08 s, dwell 0.06 s, usable 0.8, 4096-bin PSD),
 https://github.com/ALPssdz/RF-Vision-UAV-Tracker (discard buffers after
-retune, kurtosis ranking).  Constants verified there; the table layout and
-JSON document shape are this toolkit's own.
+retune, kurtosis ranking).  Those timing values describe their scanner paths;
+they are not layered on top of the E200 driver's own retune flush by default.
+The table layout and JSON document shape are this toolkit's own.
 """
 
 from __future__ import annotations
@@ -77,18 +86,17 @@ def register(subparsers: argparse._SubParsersAction) -> None:
     how = p.add_argument_group("receiver and timing")
     how.add_argument("--uri", metavar="URI", help="E200 IIO uri, e.g. ip:192.168.1.10")
     how.add_argument("--file", metavar="PATH", help="SigMF recording to replay instead of hardware")
-    how.add_argument("--rate", type=float, default=20e6, metavar="HZ",
-                     help="sample rate in Hz (default 20e6, the E200 1 GbE host ceiling)")
+    how.add_argument("--rate", type=float, default=10e6, metavar="HZ",
+                     help="sample rate in Hz (default 10e6: continuous-safe on stock E200 IIO)")
     how.add_argument("--gain", type=float, default=None, metavar="DB", help="E200 RX gain in dB")
     how.add_argument("--usable", type=float, default=0.8, metavar="FRAC",
                      help="usable fraction of the sample rate per dwell (default 0.8)")
     how.add_argument("--dwell", type=float, default=0.06, metavar="S",
                      help="capture length per dwell in seconds (default 0.06)")
-    how.add_argument("--settle", type=float, default=0.08, metavar="S",
-                     help="sleep after each retune in seconds (default 0.08)")
-    how.add_argument("--discard", type=int, default=2, metavar="N",
-                     help="dwell-length reads discarded after each retune, on top of the "
-                          "driver's own flush (default 2)")
+    how.add_argument("--settle", type=float, default=0.0, metavar="S",
+                     help="extra sleep after the E200 driver's retune flush (default 0)")
+    how.add_argument("--discard", type=int, default=0, metavar="N",
+                     help="extra dwell-length reads discarded after the driver's own flush (default 0)")
     how.add_argument("--runs", type=int, default=1, metavar="N",
                      help="number of full sweeps (default 1; 0 = until the file ends)")
     how.add_argument("--order", choices=("sequential", "random"), default="sequential",
@@ -262,6 +270,8 @@ def run_sweep(args: argparse.Namespace) -> int:
         source: SampleSource = SigmfFileSource(args.file)
     else:
         source = _open_e200(args.uri, args.rate, plan[0].center_freq_hz, args.gain)
+        for message in getattr(source, "warnings", ()):
+            print(f"warning: {message}", file=sys.stderr)
 
     rng = np.random.default_rng(args.seed) if args.seed is not None else None
     runs: list[list[DwellResult]] = []
