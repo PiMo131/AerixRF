@@ -75,8 +75,10 @@ __all__ = [
     "decode_burst",
     "estimate_cfo",
     "find_bursts",
+    "integer_offset_bins",
     "interpolate_peak",
     "process",
+    "resolve_cfo",
     "zc_shift_hz_per_sample",
 ]
 
@@ -352,10 +354,14 @@ CANDIDATE_ZC_ROOTS = (600, 147, 385)
 ROOT_MARGIN = 0.5
 
 #: How many whole subcarrier spacings either side of the prefix estimate to
-#: search when identifying a root. The prefix estimator wraps every 15 kHz;
-#: nine either way covers the +/-135 kHz an uncalibrated TCXO and a real
-#: aircraft between them can produce at 2.4 GHz.
-CFO_WRAP_SEARCH = 9
+#: search when resolving the offset, or ``None`` for as far as the guard band
+#: reaches. The prefix estimator wraps every 15 kHz and something else has to
+#: supply the integer, which :func:`integer_offset_bins` does by finding the
+#: occupied band; the natural limit on that search is the point where the band
+#: runs off the end of the spectrum, because past it the burst is clipped and
+#: no offset estimate saves it. That is 211 subcarriers at 15.36 MSPS, or
+#: +/-3.2 MHz, and it costs a cumulative-sum lookup per candidate.
+CFO_WRAP_SEARCH: int | None = None
 
 #: Cyclic-prefix coherence a window must reach to open a root-agnostic
 #: candidate. Lower than :data:`CONFIRM_MIN` because this is a coarse sweep
@@ -419,6 +425,21 @@ def estimate_zc_root(x: np.ndarray, start: int, sample_rate_hz: float, *,
     the detection threshold. Recording the answer per burst is how the roots
     of the unpublished generations eventually get measured: every capture of
     a real aircraft becomes a data point.
+
+    The match is made on the pilot's *subcarriers*, not on its samples, and
+    the difference matters. A timing error inside the cyclic prefix is a
+    linear phase ramp across the carriers, so dividing the received pilot by a
+    candidate root leaves a pure tone whose frequency is the timing error and
+    whose amplitude is the quality of the match: one inverse transform turns
+    that into a peak, and taking the peak wherever it lands scores the root
+    without needing the timing to be right first.
+
+    A time-domain inner product does need the timing to be right, to about a
+    sample, and being three samples early - which cyclic-prefix alignment
+    routinely is - costs enough correlation to lose the root entirely. Worse,
+    a chirp answers a frequency offset by sliding in time, so a wrong offset
+    whose slide happens to cancel the timing error scores *higher* than the
+    truth. That is not a hypothetical either: see ``integer_offset_bins``.
     """
     fs = float(sample_rate_hz)
     offset = C.zc_body_offsets(fs, legacy=legacy)[0]
@@ -427,14 +448,21 @@ def estimate_zc_root(x: np.ndarray, start: int, sample_rate_hz: float, *,
     xs = np.asarray(x, dtype=np.complex64).ravel()
     if at < 0 or at + n_fft > xs.size:
         return None, 0.0
+    idx = carrier_indices(n_fft)
+    received = np.fft.fftshift(np.fft.fft(xs[at:at + n_fft].astype(np.complex128)))[idx]
+    rx_norm = float(np.linalg.norm(received))
+    if rx_norm <= 0.0:
+        return None, 0.0
+    # Only lags a cyclic prefix wide are physical; anything further means the
+    # window is not on this symbol at all, which the prefix gate has excluded.
+    reach = int(max(C.cp_schedule(fs, legacy=legacy)))
     scored: list[tuple[float, int]] = []
     for root in roots:
-        ref = zc_time(int(root), fs)
-        piece = xs[at:at + ref.size]
-        if piece.size < ref.size:
-            continue
-        denom = np.linalg.norm(piece) * np.linalg.norm(ref)
-        scored.append((float(abs(np.vdot(piece, ref)) / denom) if denom > 0 else 0.0, int(root)))
+        known = zc_frequency(int(root), n_fft)[idx]
+        lags = np.fft.ifft(received * np.conj(known), n_fft)
+        peak = float(np.max(np.abs(np.concatenate([lags[:reach + 1], lags[-reach:]]))))
+        denom = rx_norm * float(np.linalg.norm(known))
+        scored.append((peak * n_fft / denom if denom > 0 else 0.0, int(root)))
     if not scored:
         return None, 0.0
     scored.sort(reverse=True)
@@ -449,6 +477,67 @@ def estimate_zc_root(x: np.ndarray, start: int, sample_rate_hz: float, *,
     if len(scored) > 1 and scored[1][0] > best_score * ROOT_MARGIN:
         return None, best_score
     return best_root, best_score
+
+
+def integer_offset_bins(x: np.ndarray, start: int, sample_rate_hz: float, *,
+                        legacy: bool = False,
+                        search: int | None = CFO_WRAP_SEARCH) -> int:
+    """How many whole subcarriers the occupied band sits away from centre.
+
+    :func:`cfo_from_prefix` is exact but wraps every 15 kHz, so something else
+    has to supply the whole number of subcarriers. This does it by asking
+    where the signal *is*: a DroneID burst fills exactly 601 of the 1024 bins
+    with sharp edges, so sliding a 601-bin window over the burst's mean power
+    spectrum and taking the brightest position says directly how far the band
+    has moved.
+
+    Why not use the Zadoff-Chu correlation for this
+    -----------------------------------------------
+    Because it cannot answer the question. A Zadoff-Chu sequence is a chirp,
+    and a chirp under a frequency offset keeps almost all of its correlation
+    and merely *slides in time* - which is exactly the property that makes it
+    a good detector, and exactly what disqualifies it as a way to tell one
+    wrap from another. Scoring the roots at each hypothesis and keeping the
+    winner therefore picks a wrap essentially at random.
+
+    That is not a hypothetical. It was the code here until it was measured
+    against the RUB-SysSec captures, where it chose a wrap three subcarriers
+    out on all ten bursts of ``mini2_sm``: detection, timing and root all
+    correct, every payload destroyed, because three subcarriers of offset
+    rotates the data onto its neighbours' carriers. See
+    ``antsdr/research/validation/``.
+    """
+    fs = float(sample_rate_hz)
+    n_fft = C.fft_size(fs)
+    xs = np.asarray(x, dtype=np.complex128).ravel()
+    schedule = C.cp_schedule(fs, legacy=legacy)
+    power = np.zeros(n_fft, dtype=np.float64)
+    pos, used = int(start), 0
+    for cp in schedule:
+        body = xs[pos + cp:pos + cp + n_fft]
+        if body.size < n_fft:
+            break
+        power += np.abs(np.fft.fftshift(np.fft.fft(body))) ** 2
+        pos += cp + n_fft
+        used += 1
+    if used == 0:
+        return 0
+    # Sliding sum of the occupied width, read at each candidate centre.
+    cumulative = np.concatenate([[0.0], np.cumsum(power)])
+    dc = n_fft // 2
+    half = C.N_CARRIERS // 2
+    # As far as the band can move before it clips, unless the caller says less.
+    reach = max(0, dc - half - 1)
+    limit = reach if search is None else min(int(search), reach)
+    best_k, best_energy = 0, -1.0
+    for k in range(-limit, limit + 1):
+        lo, hi = dc + k - half, dc + k + half + 1
+        if lo < 0 or hi > n_fft:
+            continue
+        energy = float(cumulative[hi] - cumulative[lo])
+        if energy > best_energy:
+            best_k, best_energy = k, energy
+    return best_k
 
 
 def cfo_from_prefix(x: np.ndarray, start: int, sample_rate_hz: float, *,
@@ -488,6 +577,33 @@ def cfo_from_prefix(x: np.ndarray, start: int, sample_rate_hz: float, *,
     # whenever the true offset happens to be near a multiple of the subcarrier
     # spacing, which is exactly where a lazy test would look.
     return float(np.angle(total) * fs / (2.0 * np.pi * n_fft)), float(spacing)
+
+
+def resolve_cfo(x: np.ndarray, start: int, sample_rate_hz: float, *,
+                legacy: bool = False) -> float:
+    """The whole frequency offset of a burst: fraction plus integer.
+
+    Two measurements of two different things.  The cyclic prefixes give the
+    fractional part exactly and wrap every 15 kHz
+    (:func:`cfo_from_prefix`); where the occupied band sits gives the whole
+    number of subcarriers (:func:`integer_offset_bins`).  Neither can do the
+    other's job, and both alternatives that look like they could are traps:
+    a Zadoff-Chu matched filter slides under an offset instead of fading, so
+    scoring roots per hypothesis picks a wrap at random, and the size of that
+    slide is confounded one-for-one with the timing error, so reading the
+    slide as a frequency reports a three-sample misalignment as 30 kHz.
+    Both were in this file, and both survived every synthetic test, because a
+    synthesised burst starts exactly where the synthesiser put it.
+    """
+    fs = float(sample_rate_hz)
+    xs = np.asarray(x, dtype=np.complex64).ravel()
+    fine, spacing = cfo_from_prefix(xs, start, fs, legacy=legacy)
+    length = C.burst_length(fs, legacy=legacy)
+    window = xs[int(start):int(start) + length]
+    if window.size < length:
+        return float(fine)
+    turns = np.exp(-2j * np.pi * fine * np.arange(window.size) / fs)
+    return float(fine + integer_offset_bins(window * turns, 0, fs, legacy=legacy) * spacing)
 
 
 def _symbol_starts_before(boundary: int, sample_rate_hz: float, *,
@@ -584,23 +700,18 @@ def find_bursts_cp(
         if any(abs(start - u) < length // 2 for u in used):
             continue
 
-        # The prefix estimator is exact but wraps every 15 kHz, so identifying
-        # the root means searching the wraps: de-rotate by the fine estimate
-        # plus each whole subcarrier within range, and keep the hypothesis that
-        # matches a known root best. A matched filter decorrelates under any
-        # uncorrected offset, so without this an ordinary OcuSync 2 burst
-        # 30 kHz off its centre reports "no known root".
-        fine, spacing = cfo_from_prefix(signal, start, fs, legacy=legacy)
-        n = np.arange(signal.size, dtype=np.float64)
-        best = (None, 0.0, fine)
-        for k in range(-CFO_WRAP_SEARCH, CFO_WRAP_SEARCH + 1):
-            hypothesis = fine + k * spacing
-            probe = signal if k == 0 and abs(fine) < 1.0 else (
-                signal * np.exp(-2j * np.pi * hypothesis * n / fs)).astype(np.complex64)
-            root, score = estimate_zc_root(probe, start, fs, legacy=legacy)
-            if score > best[1]:
-                best = (root, score, hypothesis)
-        root, root_score, cfo = best
+        # The offset is the prefix estimator's fractional part plus a whole
+        # number of subcarriers, and the two are measured by different means:
+        # the prefix gives the fraction exactly and the occupied band's
+        # position gives the integer (:func:`integer_offset_bins`). Only once
+        # both are removed is the burst worth matching against a root, because
+        # a matched filter run at the wrong offset answers with the wrong root
+        # rather than with no root.
+        cfo = resolve_cfo(signal, start, fs, legacy=legacy)
+        probe = signal if abs(cfo) < 1.0 else (
+            signal * np.exp(-2j * np.pi * cfo * np.arange(signal.size) / fs)
+        ).astype(np.complex64)
+        root, root_score = estimate_zc_root(probe, start, fs, legacy=legacy)
         detections.append(BurstDetection(
             sample_start=int(start), score=float(root_score), confirm_score=float(confirm),
             cfo_hz=float(cfo), snr_db=_burst_snr_db(signal, start, length),
@@ -693,7 +804,8 @@ def find_bursts(
         zc147 = float(score147[lo:hi].max()) if hi > lo else 0.0
         used.append(int(idx))
         peak = interpolate_peak(score600, int(idx))
-        cfo, _coarse = estimate_cfo(signal, peak, start, fs, legacy=legacy)
+        cfo = resolve_cfo(signal, start, fs, legacy=legacy)
+        _ = peak  # the chirp slide is reported by estimate_cfo, not used here
         detections.append(BurstDetection(
             sample_start=start, score=float(score600[idx]), confirm_score=confirm,
             zc147_score=zc147, cfo_hz=cfo,
@@ -745,9 +857,33 @@ def _symbols(burst: np.ndarray, sample_rate_hz: float, legacy: bool) -> np.ndarr
 def _equalise(symbols: np.ndarray, sample_rate_hz: float, legacy: bool) -> np.ndarray:
     """Zero-forcing equalisation from the two Zadoff-Chu pilots.
 
-    The channel is estimated on each pilot symbol as ``received / known`` and
-    interpolated linearly across the symbols between them, which tracks the
-    slow phase ramp a residual frequency offset leaves behind.
+    The channel is estimated on each pilot as ``received / known`` and the two
+    estimates are *averaged* into one applied to the whole burst.
+
+    Why an average and not an interpolation
+    ---------------------------------------
+    Interpolating between the pilots tracks a phase ramp across the burst, and
+    a residual frequency offset is exactly such a ramp - so interpolation
+    looks like the more careful choice, and it is what this function used to
+    do. It is not. A burst is 643 microseconds long and the prefix estimator
+    leaves well under a hundred hertz behind, which is a couple of degrees
+    end to end: there is no ramp there to track, and what interpolation
+    actually tracks is the difference in *noise* between the two estimates.
+
+    The pilots also sit at symbols 3 and 5 of nine, so interpolation between
+    them leaves four data symbols outside their span. Extrapolating to reach
+    those - weights of -1 and +2 - amplifies that noise instead of averaging
+    it, and it does so whatever the signal-to-noise ratio: measured against
+    the RUB-SysSec ``mini2_sm`` bursts it left a raw bit error rate of 5.5e-4
+    at 30 dB, an error *floor* with no noise left to blame, and it cost one
+    of the ten frames. Averaging measured 0 at the same point and stayed two
+    to four times better than holding the endpoints at every level down to
+    8 dB. See ``antsdr/research/validation/``.
+
+    The assumption this rests on is that :func:`decode_burst` has already
+    removed the frequency offset, which it does by default. A caller that
+    passes ``correct_cfo=False`` on a burst genuinely off frequency gets a
+    channel estimate averaged over a rotation, and should not.
     """
     n_fft = C.fft_size(sample_rate_hz)
     idx = carrier_indices(n_fft)
@@ -760,14 +896,11 @@ def _equalise(symbols: np.ndarray, sample_rate_hz: float, legacy: bool) -> np.nd
         with np.errstate(divide="ignore", invalid="ignore"):
             h = np.where(np.abs(known) > 0, symbols[pos] / known, 0.0)
         estimates.append(h)
-    h0, h1 = estimates
+    channel = sum(estimates) / len(estimates)
     out = np.empty_like(symbols)
-    span = max(zc_positions[1] - zc_positions[0], 1)
-    for k in range(symbols.shape[0]):
-        weight = np.clip((k - zc_positions[0]) / span, -1.0, 2.0)
-        h = h0 * (1.0 - weight) + h1 * weight
-        with np.errstate(divide="ignore", invalid="ignore"):
-            out[k] = np.where(np.abs(h) > 1e-12, symbols[k] / h, 0.0)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        for k in range(symbols.shape[0]):
+            out[k] = np.where(np.abs(channel) > 1e-12, symbols[k] / channel, 0.0)
     return out
 
 
@@ -844,6 +977,27 @@ def decode_burst(
         return None
     equalised = _equalise(symbols, fs, detection.legacy)
     data_idx = C.data_symbol_indices(legacy=detection.legacy)
+    # The channel estimate from the Zadoff-Chu pilots fixes the constellation
+    # only up to a quarter turn, so the data may sit rotated by 0, 90, 180 or
+    # 270 degrees and there is nothing in the burst that says which. The
+    # reference implementation brute-forces the same four, and a synthetic
+    # round trip can never expose the need for it: the synthesiser and the
+    # equaliser agree on the phase by construction. Real captures do not.
+    for rotation in range(4):
+        turned = equalised * (1j ** rotation)
+        frame = _frame_from_symbols(turned, data_idx, soft=soft,
+                                    turbo_iterations=turbo_iterations)
+        if frame is not None and frame.crc24_ok and frame.crc16_ok:
+            return frame
+    # Nothing checked out. Return the un-rotated attempt so the caller still
+    # sees the CRC flags and can report a detected-but-undecoded burst.
+    return _frame_from_symbols(equalised, data_idx, soft=soft,
+                               turbo_iterations=turbo_iterations)
+
+
+def _frame_from_symbols(equalised: np.ndarray, data_idx, *, soft: bool,
+                        turbo_iterations: int) -> DroneIdFrame | None:
+    """Demodulate one constellation rotation and parse whatever comes out."""
     if soft:
         llrs = np.concatenate([_qpsk_llrs(equalised[i]) for i in data_idx])
         if llrs.size != C.RATE_MATCH_E:
@@ -904,7 +1058,12 @@ def parse_frame(payload: bytes) -> DroneIdFrame | None:
         fields = struct.unpack("<BBBHH16siihhhhhhQiiiiBB19sBH", frame)
     except struct.error:
         return None
-    (_length, _type, _version, sequence, state, serial_raw, lon, lat, height, altitude,
+    # The two vertical fields are altitude first, then height, and both are in
+    # feet. Getting either wrong is silent: the numbers stay plausible and only
+    # a capture with a published ground truth catches it. This order and this
+    # unit are the ones that reproduce the RUB-SysSec `mavic_air_2` figure of
+    # 12.8 m; the reverse order reports the aircraft three times too high.
+    (_length, _type, _version, sequence, state, serial_raw, lon, lat, altitude, height,
      v_n, v_e, v_u, yaw, gps_time, pilot_lat, pilot_lon, home_lon, home_lat,
      product, uuid_len, uuid_raw, _pad, _crc) = fields
 
@@ -938,7 +1097,8 @@ def parse_frame(payload: bytes) -> DroneIdFrame | None:
         pilot_lon=_pair(pilot_lat, pilot_lon)[1],
         home_lat=_pair(home_lat, home_lon)[0],
         home_lon=_pair(home_lat, home_lon)[1],
-        height_m=float(height), altitude_m=float(altitude),
+        height_m=float(height) / C.FEET_PER_METRE,
+        altitude_m=float(altitude) / C.FEET_PER_METRE,
         v_north_m_s=float(v_n), v_east_m_s=float(v_e), v_up_m_s=float(v_u),
         yaw_deg=float(yaw) / 100.0, gps_time_ms=int(gps_time),
         uuid=bytes(uuid_raw[: int(uuid_len)]),
