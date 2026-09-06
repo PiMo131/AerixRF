@@ -241,7 +241,7 @@ def test_closing_merges_bursts_fragmented_in_time_and_frequency():
     x = scene.render()
     power_db, freqs_hz, times_s = sp.stft_power_db(x, fs, FC, fft_size=1024)
     dt, df = times_s[1] - times_s[0], freqs_hz[1] - freqs_hz[0]
-    common = dict(threshold_db=10.0, min_duration_s=3 * dt, min_bandwidth_hz=3 * df)
+    common = {"threshold_db": 10.0, "min_duration_s": 3 * dt, "min_bandwidth_hz": 3 * df}
 
     plain = bu.detect_bursts(power_db, freqs_hz, times_s, **common)
     assert len(plain) == 4
@@ -265,7 +265,7 @@ def test_closing_merges_bursts_fragmented_in_time_and_frequency():
     both = bu.detect_bursts(power_db, freqs_hz, times_s, close_time_s=150e-6,
                             close_freq_hz=500e3, **common)
     assert len(both) == 2
-    wide = [b for b in both if b.center_freq_hz > FC][0]
+    wide = next(b for b in both if b.center_freq_hz > FC)
     # the merged box spans both sub-bands; closing may also bridge a stray false-alarm
     # cell within close_freq_hz of the burst, inflating the box by up to that much
     assert notch[0].f_low_hz - 500e3 <= wide.f_low_hz <= notch[0].f_low_hz + df / 2

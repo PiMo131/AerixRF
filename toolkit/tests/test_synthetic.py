@@ -71,7 +71,7 @@ def test_lora_chirps_sweep_the_bandwidth():
     n_chips = 2**sf
     symbols = [0, 37, 64, 100, 127, 1, 50, 90]
     x = syn.lora_chirps(fs, bw, sf, len(symbols), rng, symbols=symbols)
-    n_sym = int(round(n_chips / bw * fs))  # 1024 samples per symbol at 1 MS/s
+    n_sym = round(n_chips / bw * fs)  # 1024 samples per symbol at 1 MS/s
     assert x.dtype == np.complex64
     assert len(x) == n_sym * len(symbols)
     assert _power(x) == pytest.approx(1.0, abs=1e-3)  # constant envelope
@@ -235,7 +235,7 @@ def test_scene_fhss_sequences():
     rng = np.random.default_rng(11)
 
     def burst(duration_s: float) -> np.ndarray:
-        return syn.gfsk_burst(FS, 100e3, int(round(duration_s * 100e3)), rng)
+        return syn.gfsk_burst(FS, 100e3, round(duration_s * 100e3), rng)
 
     scene = _scene(duration_s=50e-3)
     seq = scene.fhss(

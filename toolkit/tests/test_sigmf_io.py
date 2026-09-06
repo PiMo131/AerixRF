@@ -215,7 +215,7 @@ def test_channel_count_mismatch_raises(tmp_path, rng, info):
 def test_read_ci16_le_scales_to_unit_full_scale(tmp_path, mmap):
     comps = np.array([-32768, 0, 32767, 16384, 0, -16384, 1, -1], dtype="<i2")
     data = write_raw_dataset(tmp_path, "i16", comps, "ci16_le")
-    samples, info, meta = read_sigmf(data, mmap=mmap)
+    samples, info, _meta = read_sigmf(data, mmap=mmap)
     expected = np.array(
         [-1.0 + 0j, 32767 / 32768 + 0.5j, 0 - 0.5j, (1 - 1j) / 32768], dtype=np.complex64
     )

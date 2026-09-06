@@ -91,7 +91,7 @@ def test_errors_return_nonzero_and_go_to_stderr(tmp_path, capsys):
 def test_module_entry_point_runs_as_subprocess(recording):
     proc = subprocess.run(
         [sys.executable, "-m", "antsdr_toolkit.cli", "info", str(recording)],
-        capture_output=True, text=True, timeout=60,
+        capture_output=True, text=True, timeout=60, check=False,
     )
     assert proc.returncode == 0, proc.stderr
     assert "antsdr-e200" in proc.stdout

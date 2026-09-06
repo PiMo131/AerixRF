@@ -76,7 +76,7 @@ def build_scene(rng: np.random.Generator, duration_s: float) -> Scene:
     scene = Scene(fs, CENTER_FREQ_HZ, duration_s, rng, noise_power_db=NOISE_POWER_DB)
 
     # 1. DJI-like OFDM burst train: fixed carrier, periodic bursts.
-    n_bursts = int(math.floor((duration_s - 1e-3) / DJI_PERIOD_S)) + 1
+    n_bursts = math.floor((duration_s - 1e-3) / DJI_PERIOD_S) + 1
     for k in range(max(n_bursts, 0)):
         t_start_s = 1e-3 + k * DJI_PERIOD_S
         if t_start_s >= duration_s:
@@ -95,7 +95,7 @@ def build_scene(rng: np.random.Generator, duration_s: float) -> Scene:
     symbol_s = 2**ELRS_SPREADING_FACTOR / ELRS_BANDWIDTH_HZ  # 256 us per SF7 symbol
 
     def lora_packet(burst_duration_s: float) -> np.ndarray:
-        n_symbols = max(1, int(math.ceil(burst_duration_s / symbol_s)))
+        n_symbols = max(1, math.ceil(burst_duration_s / symbol_s))
         return lora_chirps(fs, ELRS_BANDWIDTH_HZ, ELRS_SPREADING_FACTOR, n_symbols, rng)
 
     scene.fhss(
@@ -129,8 +129,8 @@ def truth_annotations(scene: Scene) -> list[dict]:
     fs = scene.sample_rate_hz
     rows = []
     for truth, emission in zip(scene.truth_bursts(), scene.emissions):
-        start = int(round(truth["t_start_s"] * fs))
-        stop = int(round(truth["t_end_s"] * fs))
+        start = round(truth["t_start_s"] * fs)
+        stop = round(truth["t_end_s"] * fs)
         rows.append(
             {
                 "sample_start": start,

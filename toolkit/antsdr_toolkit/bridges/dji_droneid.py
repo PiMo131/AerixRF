@@ -151,7 +151,7 @@ def _float(text: str) -> float | None:
 
 def _int(text: str) -> int | None:
     value = _float(text)
-    return None if value is None else int(round(value))
+    return None if value is None else round(value)
 
 
 def _position(lat: float | None, lon: float | None) -> tuple[float | None, float | None]:
@@ -380,7 +380,7 @@ class LegacyFramer:
 def _deliver(on_report: ReportCallback, report: DjiDroneIdReport) -> None:
     try:
         on_report(report)
-    except Exception:  # noqa: BLE001 - a bridge must survive a bad consumer
+    except Exception:
         log.exception("DroneID report callback failed")
 
 
@@ -398,7 +398,7 @@ def _recv_loop(sock: socket.socket, stop: threading.Event) -> Iterable[bytes]:
     while not stop.is_set():
         try:
             data = sock.recv(_RECV_BYTES)
-        except socket.timeout:
+        except TimeoutError:
             continue
         except OSError:
             return
@@ -439,7 +439,7 @@ def serve_new_firmware(host: str, port: int, on_report: ReportCallback, *,
         while not stop.is_set():
             try:
                 conn, peer = srv.accept()
-            except socket.timeout:
+            except TimeoutError:
                 continue
             log.info("DroneID firmware connected from %s", peer)
             thread = threading.Thread(target=_serve_text_connection,
@@ -470,7 +470,7 @@ def receive_udp(host: str, port: int, on_report: ReportCallback, *,
         while not stop.is_set():
             try:
                 data, peer = sock.recvfrom(65535)
-            except socket.timeout:
+            except TimeoutError:
                 continue
             if len(framers) > 64 and peer not in framers:
                 framers.clear()

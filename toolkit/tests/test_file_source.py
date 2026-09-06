@@ -58,9 +58,9 @@ def test_stream_info_normalises_and_validates():
     assert info == StreamInfo(1e6, 100.0, rx_channels=(1, 0), gain_db=3.0)
     assert info.to_dict()["rx_channels"] == [1, 0] and info.to_dict()["bandwidth_hz"] == 1e6
     assert "MS/s" in str(info)
-    for bad in (dict(sample_rate_hz=0, center_freq_hz=1),
-                dict(sample_rate_hz=1, center_freq_hz=1, rx_channels=()),
-                dict(sample_rate_hz=1, center_freq_hz=1, rf_bandwidth_hz=-1)):
+    for bad in ({"sample_rate_hz": 0, "center_freq_hz": 1},
+                {"sample_rate_hz": 1, "center_freq_hz": 1, "rx_channels": ()},
+                {"sample_rate_hz": 1, "center_freq_hz": 1, "rf_bandwidth_hz": -1}):
         with pytest.raises(ValueError):
             StreamInfo(**bad)
 

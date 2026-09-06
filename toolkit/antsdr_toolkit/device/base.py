@@ -154,7 +154,7 @@ class SampleSource(abc.ABC):
 
     def close(self) -> None:
         """Release resources; safe to call more than once."""
-        return None
+        return
 
     def iter_chunks(self, n_samples: int) -> Iterator[np.ndarray]:
         """Yield successive :meth:`read` results until an empty chunk is returned."""

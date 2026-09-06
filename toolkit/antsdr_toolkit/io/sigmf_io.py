@@ -296,7 +296,7 @@ class SigmfRecorder:
         self._closed = False
         validate_metadata(self.metadata())
         self.data_path.parent.mkdir(parents=True, exist_ok=True)
-        self._fh: IO[bytes] | None = open(self.data_path, "wb")
+        self._fh: IO[bytes] | None = open(self.data_path, "wb")  # noqa: SIM115 - closed in close()
 
     @property
     def closed(self) -> bool:

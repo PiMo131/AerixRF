@@ -29,16 +29,16 @@ from scipy import ndimage, special
 from .base import SampleSource, StreamInfo
 
 __all__ = [
-    "awgn",
-    "bandlimited_noise_burst",
-    "lora_chirps",
-    "fm_video_like",
-    "gfsk_burst",
-    "occupied_bandwidth_hz",
-    "instantaneous_frequency_hz",
     "Emission",
     "Scene",
     "SyntheticSource",
+    "awgn",
+    "bandlimited_noise_burst",
+    "fm_video_like",
+    "gfsk_burst",
+    "instantaneous_frequency_hz",
+    "lora_chirps",
+    "occupied_bandwidth_hz",
 ]
 
 _TWO_PI = 2.0 * math.pi
@@ -147,7 +147,7 @@ def bandlimited_noise_burst(
     """
     fs = float(sample_rate_hz)
     bw = float(bandwidth_hz)
-    n = int(round(float(duration_s) * fs))
+    n = round(float(duration_s) * fs)
     if n <= 0:
         raise ValueError("duration_s * sample_rate_hz must round to >= 1 sample")
     if bw <= 0.0:
@@ -203,7 +203,7 @@ def lora_chirps(
         if np.any((sym < 0) | (sym >= n_chips)):
             raise ValueError(f"symbols must lie in [0, {n_chips})")
     t_symbol = n_chips / bw
-    n = int(round(int(n_symbols) * t_symbol * fs))
+    n = round(int(n_symbols) * t_symbol * fs)
     t = np.arange(n, dtype=np.float64) / fs
     k = np.minimum((t / t_symbol).astype(np.int64), int(n_symbols) - 1)
     tau = t - k * t_symbol
@@ -230,7 +230,7 @@ def fm_video_like(
     avoid aliasing.  Constant envelope, unit power.
     """
     fs = float(sample_rate_hz)
-    n = int(round(float(duration_s) * fs))
+    n = round(float(duration_s) * fs)
     if n <= 0:
         raise ValueError("duration_s * sample_rate_hz must round to >= 1 sample")
     m = rng.standard_normal(n)
@@ -277,14 +277,14 @@ def gfsk_burst(
         if b.shape != (n_bits,):
             raise ValueError("bits must have length n_bits")
     sps = fs / rs
-    n = int(round(n_bits * sps))
+    n = round(n_bits * sps)
     idx = np.minimum((np.arange(n) / sps).astype(np.int64), n_bits - 1)
     nrz = (2.0 * b[idx] - 1.0).astype(np.float64)
     if float(bt) > 0.0:
         sigma = math.sqrt(math.log(2.0)) / (_TWO_PI * float(bt) * rs) * fs  # samples
         nrz = ndimage.gaussian_filter1d(nrz, sigma, mode="nearest")
     freq = float(modulation_index) * rs / 2.0 * nrz
-    x = _apply_ramps(_phase_to_iq(freq, fs), int(round(sps)))
+    x = _apply_ramps(_phase_to_iq(freq, fs), round(sps))
     return _unit_power(x)
 
 
@@ -337,7 +337,7 @@ class Scene:
         self.sample_rate_hz = float(sample_rate_hz)
         self.center_freq_hz = float(center_freq_hz)
         self.noise_power_db = float(noise_power_db)
-        self.n_samples = int(round(float(duration_s) * self.sample_rate_hz))
+        self.n_samples = round(float(duration_s) * self.sample_rate_hz)
         if self.n_samples <= 0:
             raise ValueError("duration_s * sample_rate_hz must round to >= 1 sample")
         self.duration_s = self.n_samples / self.sample_rate_hz
@@ -381,7 +381,7 @@ class Scene:
         p_target = 10.0 ** (float(snr_db) / 10.0) * self.noise_psd * bw
         scale = math.sqrt(p_target / p_in)
 
-        start = int(round(float(t_start_s) * fs))
+        start = round(float(t_start_s) * fs)
         s0, s1 = max(start, 0), min(start + len(x), self.n_samples)
         if s1 <= s0:
             raise ValueError("emission lies entirely outside the scene")
@@ -440,8 +440,8 @@ class Scene:
         except (TypeError, ValueError):  # callables without an introspectable signature
             takes_duration = False
         period = 1.0 / float(hop_rate_hz)
-        n_burst = max(1, int(round(float(burst_duration_s) * self.sample_rate_hz)))
-        n_hops = int(math.ceil((float(t_end_s) - float(t_start_s)) / period - 1e-9))
+        n_burst = max(1, round(float(burst_duration_s) * self.sample_rate_hz))
+        n_hops = math.ceil((float(t_end_s) - float(t_start_s)) / period - 1e-9)
         added: list[Emission] = []
         for k in range(max(n_hops, 0)):
             t = float(t_start_s) + k * period

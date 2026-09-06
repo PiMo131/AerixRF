@@ -80,12 +80,12 @@ from .spectrum import db, estimate_noise_floor_db, stft_power_db
 
 __all__ = [
     "Burst",
-    "robust_noise_floor_db",
     "closing_structure",
     "detect_bursts",
     "detect_bursts_from_iq",
-    "time_freq_iou",
     "match_bursts",
+    "robust_noise_floor_db",
+    "time_freq_iou",
 ]
 
 _EIGHT_CONNECTED = np.ones((3, 3), dtype=bool)
@@ -170,7 +170,7 @@ def closing_structure(
     def half(close: float, step: float) -> int:
         if close <= 0.0 or step <= 0.0:
             return 0
-        return int(math.ceil(close / (2.0 * step) - 1e-9))
+        return math.ceil(close / (2.0 * step) - 1e-9)
 
     n_t, n_f = half(float(close_time_s), float(time_step_s)), half(
         float(close_freq_hz), float(freq_step_hz)

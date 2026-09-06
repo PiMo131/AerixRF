@@ -13,8 +13,8 @@ from .file_source import SigmfFileSource
 __all__ = [
     "IQ_DTYPE",
     "SampleSource",
-    "StreamInfo",
     "SigmfFileSource",
+    "StreamInfo",
     "empty_iq",
 ]
 

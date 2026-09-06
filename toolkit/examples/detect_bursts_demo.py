@@ -68,10 +68,12 @@ def label_detections(
     return labels, missed
 
 
-def format_feature(name: str, value: float | int) -> str:
+def format_feature(name: str, value: float) -> str:
     """Human units for a BurstFeatures field: Hz -> MHz, s -> ms, dB as is."""
     if name in ("n_bursts", "n_distinct_centers"):
         return f"{int(value)}"
+    if name == "hop_rate_hz":
+        return f"{value:.1f} Hz"
     if name.endswith("_hz"):
         return f"{value / 1e6:.3f} MHz"
     if name.endswith("_s"):

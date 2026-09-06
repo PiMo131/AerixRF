@@ -28,11 +28,11 @@ from scipy import ndimage, signal
 __all__ = [
     "db",
     "db_amplitude",
+    "estimate_noise_floor_db",
     "fft_freqs_hz",
+    "percentile_bias_db",
     "stft_power_db",
     "welch_psd_db",
-    "estimate_noise_floor_db",
-    "percentile_bias_db",
 ]
 
 # Largest number of samples per STFT chunk; bounds the transient memory of the
