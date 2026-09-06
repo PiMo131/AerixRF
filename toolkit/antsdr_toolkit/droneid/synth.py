@@ -74,7 +74,7 @@ def make_frame_bytes(tx: DroneIdTx = DEFAULT_TX) -> bytes:
     Layout (little-endian), as documented by the reference transmitter::
 
         length(1) type(1) version(1) sequence(2) state(2) serial(16)
-        lon(4) lat(4) height(2) altitude(2) v_n(2) v_e(2) v_u(2) yaw(2)
+        lon(4) lat(4) altitude(2) height(2) v_n(2) v_e(2) v_u(2) yaw(2)
         gps_time(8) pilot_lat(4) pilot_lon(4) home_lon(4) home_lat(4)
         product(1) uuid_len(1) uuid(19) pad(1) crc16(2)
     """
@@ -90,8 +90,12 @@ def make_frame_bytes(tx: DroneIdTx = DEFAULT_TX) -> bytes:
         serial,
         _deg_to_int(tx.drone_lon),
         _deg_to_int(tx.drone_lat),
-        round(tx.height_m),
-        round(tx.altitude_m),
+        # Altitude comes first and both are in feet; see the note on
+        # :data:`constants.FEET_PER_METRE`. The receiver reads them the same
+        # way, so a round trip cannot catch this being wrong - only the
+        # RUB-SysSec capture with its published height could, and did.
+        round(tx.altitude_m * C.FEET_PER_METRE),
+        round(tx.height_m * C.FEET_PER_METRE),
         round(tx.v_north_m_s),
         round(tx.v_east_m_s),
         round(tx.v_up_m_s),

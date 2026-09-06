@@ -55,6 +55,7 @@ __all__ = [
     "CRC16_POLY",
     "CRC24A_POLY",
     "DATA_SYMBOLS",
+    "FEET_PER_METRE",
     "FRAME_BYTES",
     "HOP_CENTRES_HZ",
     "LEGACY_SYMBOLS",
@@ -295,6 +296,16 @@ def channel_for(frequency_hz: float, *, tolerance_hz: float = 2e6) -> float | No
     best = min(HOP_CENTRES_HZ, key=lambda f: abs(f - float(frequency_hz)))
     return best if abs(best - float(frequency_hz)) <= float(tolerance_hz) else None
 
+
+#: Feet to the metre. The frame's two vertical fields are sent in feet, which
+#: is not written down in any specification this project could find: it is
+#: inferred, and it is inferred from a number that can be checked. The RUB
+#: -SysSec ``mavic_air_2`` capture is published with a height of 12.8 m, and
+#: the field holds 42; 42 / 3.28084 is 12.80. The altitude field on the same
+#: frame holds 141, which is 43.0 m, and the two together read as an aircraft
+#: 12.8 m above its takeoff point on ground about 30 m below it. Any other
+#: scaling makes one of the two absurd.
+FEET_PER_METRE = 3.28084
 
 def occupied_bandwidth_hz() -> float:
     """9.0 MHz: 600 data carriers at 15 kHz spacing."""
