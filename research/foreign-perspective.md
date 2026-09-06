@@ -328,13 +328,16 @@ NCC 7.85 % against 3.25 %; a switch-mode power supply burst at alpha 14.4 kHz wi
 Three things make this the most instructive foreign artefact in the sweep:
 
 1. **It is the only foreign project with a documented false-alarm strategy** - per-sector
-   calibration, a Wi-Fi ambient monitor at the 250 kHz Wi-Fi cyclic frequency, a peak-to-sidelobe
-   ratio, a cyclic-frequency-stability test and a temporal persistence filter. The RU/UA scene has
-   nothing comparable (section 3).
+   calibration (`rf_zynq/calibrate_s3.py`), a Wi-Fi ambient monitor at the 250 kHz Wi-Fi cyclic
+   frequency, a peak-to-sidelobe ratio, a cyclic-frequency-stability test and a temporal persistence
+   filter in `system_hub.py`. The RU/UA scene has nothing comparable (section 3)
+   (<https://github.com/ALPssdz/RF-Vision-UAV-Tracker>).
 2. **Its own report admits what does not work**: stage 2 is not a hard gate, Wi-Fi is expected to
    pass it, the YOLO training set contains no Wi-Fi/4G/5G negatives, and **LTE 15 kHz / 5G NR 30 kHz
    numerologies produce OcuSync-like cyclic peaks in the same alpha windows** - 4G/5G rejection is
-   unsolved. Training mAP@0.5 was 0.995 but live confidence only 0.2-0.7, a textbook domain shift.
+   unsolved. Training mAP@0.5 was 0.995 but live confidence only 0.2-0.7, a textbook domain shift
+   (`docs/rf_midterm_technical_report.md` sections 0, 4, 6.9, 7.2, 8 and `backend_rk3588/config.py`
+   in <https://github.com/ALPssdz/RF-Vision-UAV-Tracker>).
 3. **Its 40 MSPS is not sustained streaming.** At int16 I/Q that is 160 MB/s, above GbE, so it
    burst-captures 2,621,440 samples (65.5 ms, 10.5 MB) per tick with gaps and retune sleeps. This
    directly contradicted the round-1 reading and was corrected *(verified: verdict 2, host streaming
