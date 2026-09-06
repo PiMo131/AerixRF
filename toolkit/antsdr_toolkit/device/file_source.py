@@ -5,6 +5,13 @@ and :meth:`SigmfFileSource.read` only touches the pages it returns. Samples are
 converted to ``complex64`` at full scale ``|x| == 1.0`` whatever the on-disk
 datatype is (``cf32_le`` written by this toolkit, ``ci16_le``/``ci8`` produced
 natively by the E200/AD9361 firmware).
+
+Snapshot recordings produced by this toolkit can contain capture segments
+marked ``antsdr:continuity = 'unknown-gap-before'``. Reads never cross such a
+boundary: a caller asking for more samples receives a short read ending at the
+segment boundary and can call again to enter the next segment. That prevents
+burst timing, duty cycle and cyclostationary features from treating two host
+buffers separated by unknown RF time as adjacent samples.
 """
 
 from __future__ import annotations
@@ -20,14 +27,18 @@ if TYPE_CHECKING:  # pragma: no cover - typing only, keeps the runtime import la
     from ..io.sigmf_io import SigmfReader
 
 
+_DISCONTINUOUS = "unknown-gap-before"
+
+
 class SigmfFileSource(SampleSource):
     """Sequential (optionally looping) reader over a SigMF dataset.
 
     Args:
         path: ``.sigmf-meta``, ``.sigmf-data`` or the common stem.
-        loop: When ``True`` the recording wraps around forever and ``read``
-            always returns exactly ``n_samples`` (useful to feed live-style
-            pipelines from a capture). When ``False`` the source is finite.
+        loop: When ``True`` a contiguous recording wraps around forever and
+            ``read`` always returns exactly ``n_samples``. Looping is rejected
+            for recordings with explicit discontinuities because wrapping or
+            filling a requested read across a gap would fabricate timing.
         channel: Index into the recording's channels (0-based position along
             axis 0, not the hardware channel number). Selecting one channel
             makes ``read`` return ``(n,)`` arrays and narrows ``info.rx_channels``
@@ -58,6 +69,19 @@ class SigmfFileSource(SampleSource):
                 )
         self._channel = channel
 
+        captures = self._reader.metadata.get("captures") or []
+        self._discontinuity_starts = tuple(sorted({
+            int(c["core:sample_start"])
+            for c in captures
+            if c.get("antsdr:continuity") == _DISCONTINUOUS
+            and 0 < int(c.get("core:sample_start", 0)) < self._reader.n_samples
+        }))
+        if self._loop and self._discontinuity_starts:
+            raise ValueError(
+                "loop=True is unsafe for a discontinuous SigMF snapshot: replay would splice "
+                "segments separated by unknown RF time"
+            )
+
         info = self._reader.info
         if "core:hw" not in self._reader.metadata.get("global", {}):
             info = info.replace(hardware="file")
@@ -86,12 +110,23 @@ class SigmfFileSource(SampleSource):
         return self._loop
 
     @property
+    def timing_contiguous(self) -> bool:
+        """Whether sequential reads may be interpreted as one RF timeline."""
+        return not self._discontinuity_starts
+
+    @property
+    def discontinuity_starts(self) -> tuple[int, ...]:
+        """Packed sample indices whose preceding RF gap is explicitly unknown."""
+        return self._discontinuity_starts
+
+    @property
     def n_samples(self) -> int:
         """Samples per channel in the recording."""
         return self._reader.n_samples
 
     @property
     def duration_s(self) -> float:
+        """Observed sample duration only; unknown snapshot gaps are not included."""
         return self.n_samples / self._info.sample_rate_hz
 
     @property
@@ -113,6 +148,12 @@ class SigmfFileSource(SampleSource):
             raise ValueError(f"sample_index {sample_index} outside [0, {n}]")
         self._pos = int(sample_index)
 
+    def _limit_before_discontinuity(self, n_samples: int) -> int:
+        for boundary in self._discontinuity_starts:
+            if boundary > self._pos:
+                return min(int(n_samples), boundary - self._pos)
+        return int(n_samples)
+
     # -- streaming ----------------------------------------------------------
     def read(self, n_samples: int) -> np.ndarray:
         if self._closed:
@@ -121,7 +162,8 @@ class SigmfFileSource(SampleSource):
             raise ValueError(f"n_samples must be positive, got {n_samples}")
         n_total = self.n_samples
         if not self._loop or n_total == 0:
-            chunk = self._reader.read(self._pos, n_samples)
+            safe_count = self._limit_before_discontinuity(n_samples)
+            chunk = self._reader.read(self._pos, safe_count)
             self._pos += chunk.shape[-1]
             return self._select(chunk)
 
