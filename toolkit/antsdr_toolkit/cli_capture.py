@@ -45,7 +45,7 @@ __all__ = [
 
 #: LTE 10 MHz rate: covers a DJI OcuSync carrier and a DroneID burst. It is
 #: above the stock IIO firmware's continuous host-link ceiling, so the default
-#: tier is "snapshot" (verified: stream-rate).
+#: tier is "snapshot" (verified: host-streaming-tiers).
 DEFAULT_RATE_HZ = 15.36e6
 DEFAULT_TIER = "snapshot"
 DEFAULT_GAIN_DB = 40.0

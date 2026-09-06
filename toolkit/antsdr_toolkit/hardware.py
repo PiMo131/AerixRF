@@ -377,14 +377,14 @@ E200 = HardwareProfile(
             "only with a speed-tuned kernel and iiod pinned to a core, 27.5 MSPS "
             "only with an overclock. Plan continuous work at 10 MSPS. The vendor "
             "table's 20 MSPS 'transmission bandwidth to host' is the UHD figure "
-            "(verified: stream-rate)."
+            "(verified: host-streaming-tiers)."
         ),
         "iio_sc16_2ch_per_ch": "inferred: half of the measured single-channel IIO rate.",
         "uhd_sc16_1ch": (
             "MicroPhase's own figure for the UHD personality, whose PL-side Ethernet "
             "engine bypasses the ARM. Their four-hour stress test defaults to "
             "7.68 MSPS per device, which is a default and not a maximum "
-            "(verified: stream-rate)."
+            "(verified: host-streaming-tiers)."
         ),
         "uhd_wire_limit_sc16_1ch": (
             "Hard limit of 1 GbE at a 1500-byte MTU in sc16, not a measurement: "
@@ -411,7 +411,7 @@ CAPTURE_TIERS: Mapping[str, str] = MappingProxyType({
         "cycle of roughly 25-40 %: a 10.5 MB / 65 ms buffer takes 100-200 ms to "
         "move over 1 GbE. Use for wideband survey, 40 MHz OcuSync video and "
         "spectrogram classifiers, and record the duty cycle with the capture "
-        "(verified: stream-rate)."
+        "(verified: host-streaming-tiers)."
     ),
 })
 """The two ways to get samples off the E200, and what each costs."""

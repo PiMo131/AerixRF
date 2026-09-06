@@ -3,6 +3,14 @@
 RF-based drone detection with an **ANTSDR E200** (AD936x, 70 MHz to 6 GHz,
 Ethernet). Passive receive only.
 
+Docstrings and comments here cite their evidence. A marker like
+*(verified: `host-streaming-tiers`)* names a claim that went through the
+adversarial verification pass; the corrected wording, the primary sources and
+what was found to be wrong about the original are under that key in
+[`../research/verification-log.md`](../research/verification-log.md). Anything
+marked *inferred* or *unverified* is arithmetic or a single unconfirmed
+report, and is worth re-checking before you rely on it.
+
 | Module | What it does |
 |---|---|
 | `antsdr_toolkit.hardware` | The verified E200 facts as data: RF ports, sample-rate limits, host-link ceilings per firmware personality, capture tiers, the 2r2t and clock-calibration procedures |

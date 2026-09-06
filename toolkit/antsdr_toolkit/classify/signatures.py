@@ -250,7 +250,7 @@ SIGNATURES: tuple[Signature, ...] = (
             "with roots 600 and 147 on symbols 4 and 6, QPSK data. A burst is "
             "643.2 us and repeats about every 600 ms, which is why the duty cycle is "
             "near zero. Decodable in the clear on OcuSync 2 and 3; the O4 generation "
-            "encrypts the payload (verified: droneid-decodability). Whether a drone "
+            "encrypts the payload (verified: dji-generation-coverage). Whether a drone "
             "transmits before its motors spin is contested and model-dependent."
         ),
         sources=(_PROTO17, _DRONESEC, _ANTSDR_DRONEID),
@@ -495,7 +495,7 @@ SIGNATURES: tuple[Signature, ...] = (
             "estimate quoted in communities: one measurement of a 25 mW transmitter "
             "kept more than 99 % of the energy within +/-4.5 MHz, and 10 MSPS "
             "decodes NTSC colour, though 20 MSPS is the safer capture rate "
-            "(verified: analog-fpv-bw). The distinguishing measurement is the "
+            "(verified: analog-fpv-bandwidth). The distinguishing measurement is the "
             "envelope: constant-modulus FM reads a coefficient of variation of "
             "0.3-0.56 against 1.2-3.2 for Wi-Fi and other OFDM."
         ),
