@@ -1865,7 +1865,7 @@ Real-time color NTSC decoder for 5.8 GHz analog FPV using a HackRF at 10 MSPS wi
 - Performance: ~2.4x real time at 10 MSPS on an i7-9700K; raw IQ record ~20 MB/s (cs8).
 - License MIT; forked from GOROman/famicom-rf-hackrf-decoder.
 
-*E200:* Decoder core can be fed E200 IQ (10 MSPS int8/float) via UHD or libiio with a small source shim; its measured +/-4.5 MHz occupancy justifies 10-12 MSPS per analog channel on the E200 and leaves 56 MHz for multi-channel sweeps.
+*E200:* Decoder core can be fed E200 IQ (10 MSPS int8/float) via UHD or libiio with a small source shim; its measured +/-4.5 MHz occupancy is an *energy* figure for one VTX, not a capture requirement in general: the audio subcarriers and PAL chroma need more, and this project's own signal model swings to +6.4 MHz at peak white and aliases below 12.75 MSPS. Capture at 20 MSPS, which still leaves room for multi-channel sweeps.
 
 ### Kismet kismet_uav.conf - Wi-Fi drone SSID/OUI fingerprint rules
 `4/5` · English · github · 2026 · verified  

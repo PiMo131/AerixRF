@@ -19,7 +19,7 @@ Verdicts: **CONFIRMED**, **PARTLY**, **REJECTED**, **UNRESOLVED**.
 | H9 | AERIX observation and event contract | in progress | |
 | H10 | CRC failure and OcuSync 4 inference | in progress | |
 | H11 | CI and reproducibility | **CONFIRMED** | none yet; recorded as a gap |
-| H12 | Documentation contradictions | in progress | |
+| H12 | Documentation contradictions | **CONFIRMED**, both named cases | README and three research documents corrected |
 | H13 | New work added after the previous review | in progress | |
 
 ---
@@ -120,3 +120,64 @@ are reached.
 Recorded rather than fixed, because adding CI to this repository is a change
 to the repository's own configuration rather than to the toolkit, and belongs
 to the maintainer. See `baseline.md`.
+
+---
+
+## H12 — Documentation contradictions
+
+**Verdict: CONFIRMED**, on both of the cases the plan named, and the second
+one caught this audit making the opposite error.
+
+### 1. openwifi as a Remote ID identity path
+
+The top-level `README.md` said DJI's EU Remote ID "goes out over Wi-Fi Beacon,
+so AERIX's existing receivers, or openwifi on the E200, are the identity path
+for O4 drones". Two things wrong with one sentence.
+
+openwifi cannot receive it: it is OFDM-only and cannot demodulate the 802.11b
+rates that 2.4 GHz Remote ID beacons use *(verified: verdict 6,
+`openwifi-personality`)*, which `regulatory.md` already stated. The E200 is
+the wrong radio and a commodity monitor-mode adapter is the right one.
+
+And it is not the identity path for O4 drones as a class. The obligation
+attaches to the class label: C0 aircraft under 250 g broadcast nothing
+*(verified: verdict 7, `dji-eu-rid`)*. An encrypted O4 airframe under 250 g,
+which is a common configuration, has no identity available by any published
+means. Corrected in `README.md`.
+
+### 2. The analog sample rate, where this audit over-corrected first
+
+The plan asked that older "10 MSPS" analog claims not survive unnoticed after
+the decoder work found that low-rate captures can appear to lock while
+producing a wrong image. Correct as far as it goes, and the first pass of this
+audit duly rewrote three documents to say 12.75 MSPS is a hard floor.
+
+That was an overreach, and re-reading `landscape.md` caught it. The two claims
+are about different things:
+
+* **verdict 5, about a real transmitter:** a 25 mW whoop VTX captured with a
+  HackRF at 10 MSPS gave a usable NTSC colour picture, with under 0.3 % of its
+  energy outside +/-4.5 MHz. That is a measurement, and it stands.
+* **this project's decoder, about its own signal model:** the toolkit's
+  demodulator scaling puts peak white at +6.4 MHz, so a signal generated at
+  that depth aliases below 12.75 MSPS.
+
+Those do not contradict each other. They say the real VTX swung less than the
+model does, which `landscape.md` had already noticed from a different
+direction: "a true +/-5 MHz swing would park roughly 7 % of line time outside
++/-4.5 MHz, so the tested VTX must have swung less". The RTC6705 datasheet
+specifies no video deviation at all, so what a given transmitter swings is
+unestablished until measured.
+
+Replacing a measurement of real hardware with a measurement of our own
+synthetic signal would have been the H8 error in reverse. Both are now stated
+with their scope attached, in the code and in the documents, and the
+recommendation that survives either reading is 20 MSPS: it clears the model,
+it clears a +/-5 MHz real swing, and it is the only rate at which the audio
+subcarriers and PAL chroma are inside Nyquist at all.
+
+### Changes made
+
+`README.md` (both items), `research/README.md`, `research/sources.md`, and the
+scope wording in `analog/video_decode.py` and `cli_video.py`. `landscape.md`
+was left alone: it was right.

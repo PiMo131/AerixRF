@@ -180,18 +180,35 @@ class DecodedField:
 #: of 2.3 us (ratio 0.49) and broad pulses of 27.1 us (ratio 5.8).
 SYNC_WIDTH_RANGE = (0.6, 2.0)
 
-#: Below this the FM cannot be discriminated without aliasing, whatever the
-#: line rate says.
+#: Below this, a signal at *this toolkit's* modulation depth aliases,
+#: whatever the line rate says.
 #:
-#: The demodulator scaling is 106.25 MHz per unit, so the sync tip at -0.040
-#: is -4.25 MHz of deviation and peak white at +0.060 is +6.38 MHz. Nyquist
-#: has to clear the larger of those, which needs more than 12.75 MSPS. Below
-#: that the white end of the picture folds back into the band and the decode
-#: is worthless, while the sync pulses survive well enough that the line rate
-#: still measures correctly. That combination is the dangerous one: a decoder
-#: that trusts the line rate alone reports a confident, complete, wrong
-#: picture. Measured against a synthetic test pattern, correlation with the
-#: source picture runs:
+#: Read the scope of this number carefully, because it is easy to overstate.
+#: It follows from the demodulator scaling this toolkit uses, 106.25 MHz per
+#: unit: the sync tip at -0.040 is -4.25 MHz of deviation and peak white at
+#: +0.060 is +6.38 MHz, so Nyquist must clear 6.38 MHz and the rate must
+#: exceed 12.75 MSPS.
+#:
+#: That is a property of the signal model, **not an established fact about
+#: every real video transmitter**. The one real measurement in the research
+#: record went the other way: a 25 mW whoop VTX captured with a HackRF at
+#: 10 MSPS gave a usable NTSC colour picture, with under 0.3 % of its energy
+#: outside +/-4.5 MHz, which means that transmitter swung less than the model
+#: here does *(verified: verdict 5, ``analog-fpv-bandwidth``)*. The RTC6705
+#: datasheet specifies no video deviation at all, and the widely quoted
+#: "5 MHz peak" is a decoder constant rather than a specification, so what a
+#: given VTX actually swings is unestablished until measured.
+#:
+#: What survives both readings: **capture at 20 MSPS.** It clears the model
+#: here, it clears a +/-5 MHz real swing, and it is what ``fpv-sdr`` uses as
+#: its own E200 default. It is also the only rate at which the 6.0 and
+#: 6.5 MHz audio subcarriers and PAL chroma are inside Nyquist at all.
+#:
+#: The reason this is a warning rather than a footnote is the *shape* of the
+#: failure. Sync pulses survive aliasing, so the line rate still measures
+#: correctly and the decoder returns a complete, confident, wrong field.
+#: Measured against a synthetic test pattern at this toolkit's modulation
+#: depth, correlation with the source picture runs:
 #:
 #: ===========  =========  =========  ==========
 #: Sample rate  low noise  3x noise   6x noise
@@ -204,10 +221,9 @@ SYNC_WIDTH_RANGE = (0.6, 2.0)
 #: 30.72 MSPS   1.00       0.99       0.22
 #: ===========  =========  =========  ==========
 #:
-#: So 20 MSPS is the right capture rate, which is also what ``fpv-sdr`` uses
-#: as its own E200 default. Note that the stock IIO firmware streams only
-#: 11-13 MSPS continuously, so analog video is a snapshot capture there, or a
-#: job for the UHD personality (``ADR-0004``).
+#: Note that the stock IIO firmware streams only 11-13 MSPS continuously, so
+#: analog video at 20 MSPS is a snapshot capture there, or a job for the UHD
+#: personality (``ADR-0004``).
 MIN_SAMPLE_RATE_HZ = 12.75e6
 
 #: Where to slice sync from picture: halfway down the sync excursion.
@@ -481,9 +497,11 @@ def decode_from_iq(
     if float(sample_rate_hz) <= MIN_SAMPLE_RATE_HZ:
         warnings.warn(
             f"{float(sample_rate_hz) / 1e6:g} MSPS is at or below "
-            f"{MIN_SAMPLE_RATE_HZ / 1e6:g} MSPS, so peak white aliases and any "
-            f"picture decoded here is wrong even where the line rate measures "
-            f"correctly. Capture analog FPV at 20 MSPS.",
+            f"{MIN_SAMPLE_RATE_HZ / 1e6:g} MSPS. At this toolkit's modulation "
+            f"depth peak white aliases there, and the line rate still measures "
+            f"correctly, so a decoded picture can be confidently wrong. A real "
+            f"transmitter may swing less; one measured VTX decoded at 10 MSPS. "
+            f"Capture at 20 MSPS and the question does not arise.",
             RuntimeWarning, stacklevel=2)
     demod = fm_demod(x, sample_rate_hz, lowpass_hz=lowpass_hz)
     if demod.size == 0:

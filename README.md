@@ -24,13 +24,21 @@ decoding inside AERIX. Passive receive only.
 3. DJI DroneID is unencrypted on OcuSync 2 and 3 and encrypted from O4 (Air 3,
    2023) onward; open decoders handle OcuSync 2 only, the closed MicroPhase
    firmware also handles OcuSync 3, and O4 yields a hash, frequency and RSSI.
-4. DJI's EU Remote ID goes out over Wi-Fi Beacon, so AERIX's existing
-   receivers, or openwifi on the E200, are the identity path for O4 drones.
+4. DJI's EU Remote ID goes out over Wi-Fi Beacon, and it is the identity path
+   for O4 drones **that carry a class label of C1 or above**. Two caveats,
+   both load-bearing: the E200 is the wrong receiver for it, because openwifi
+   is OFDM-only and cannot demodulate the 802.11b rates 2.4 GHz Remote ID
+   beacons use, so it needs a commodity monitor-mode adapter; and C0 aircraft
+   under 250 g are exempt and broadcast nothing at all, which leaves an
+   encrypted O4 airframe under 250 g with no identity available by any
+   published means.
 5. ExpressLRS 2.4 GHz is detect-only (SX1280 long-interleaver LoRa and FLRC,
    80 channels over 79 MHz); sub-GHz ExpressLRS and Crossfire are decodable in
    principle with existing LoRa/FSK tooling, unproven end to end.
-6. Analog 5.8 GHz FPV keeps its energy within about +/-4.5 MHz and decodes at
-   10 MSPS; the useful detector metrics are in-band versus shoulder power,
+6. Analog 5.8 GHz FPV keeps most of its energy within about +/-4.5 MHz but
+   should be captured at 20 MSPS: the audio subcarriers and PAL chroma need
+   it, and below about 13 MSPS a deep-modulating transmitter aliases while
+   sync survives, so the decoder can return a confident wrong picture; the useful detector metrics are in-band versus shoulder power,
    envelope constancy and line-sync periodicity.
 7. Hop period and hop-set size separate the 2.4 GHz RC families (FrSky 9 ms,
    Flysky 3.85 ms, Futaba 6.8 ms, HoTT 10 ms, DSMX 11/22 ms) without decoding.

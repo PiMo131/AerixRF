@@ -17,17 +17,22 @@ short by many is a weak or interfered signal.
 
 Sample rate
 -----------
-**Capture at 20 MSPS.**  This is not a preference, it is a floor with a
-little headroom: the FM deviation reaches +6.4 MHz at peak white, so anything
-at or below 12.75 MSPS aliases the white end of the picture back into the
-band.  Measured correlation against a known source picture is essentially
-perfect at 15.36 MSPS and above and near zero at 12 MSPS and below.
+**Capture at 20 MSPS.**  Two independent reasons, and they do not depend on
+each other.  The 6.0 and 6.5 MHz audio subcarriers and PAL chroma are outside
+Nyquist below about 14 MSPS, so a lower rate cannot carry the whole signal
+whatever the deviation.  And at this toolkit's modulation depth peak white
+sits at +6.4 MHz, which aliases below 12.75 MSPS.
 
-The failure is quiet, and that is the point.  Sync pulses survive the
-aliasing, so the line rate still measures correctly and a naive decoder
-reports a complete NTSC field full of nonsense.  This command warns instead.
+How much a real transmitter actually swings is not established: the RTC6705
+datasheet gives no video deviation, and the one real measurement in the
+research record decoded a whoop VTX at 10 MSPS, so that unit swung less than
+the model here.  20 MSPS makes the question moot.
 
-That rate is above what the stock IIO firmware streams continuously (11 to
+The failure below that rate is quiet, which is why this command warns.  Sync
+pulses survive aliasing, so the line rate still measures correctly and a naive
+decoder reports a complete field of nonsense.
+
+20 MSPS is above what the stock IIO firmware streams continuously (11 to
 13 MSPS), so analog video is a snapshot capture on that personality, or a job
 for the UHD firmware.  See ADR-0004.
 """

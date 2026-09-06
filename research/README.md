@@ -48,8 +48,14 @@ Decisions that came out of this are in [../docs/decisions/](../docs/decisions/);
    Futaba S-FHSS 6.8 ms over 30, Graupner HoTT 10 ms over 75, Spektrum DSM2/DSMX 11 or 22 ms over 23
    ([DIY-Multiprotocol-TX-Module](https://github.com/pascallanger/DIY-Multiprotocol-TX-Module)). See [signal-reference.md](signal-reference.md).
 7. **Analog 5.8 GHz FPV decodes, but 10 MSPS does not capture all of it.** It is wideband FM of composite video; one HackRF measurement on a 25 mW whoop VTX found under 0.3 % of the energy
-   outside +/-4.5 MHz, yet the 6.0 and 6.5 MHz audio subcarriers and PAL chroma sit beyond a 10 MSPS Nyquist, so 20 MSPS (fpv-sdr's own E200 default) is the capture default and 10-12 MSPS
-   the fallback *(verified: verdict 5, `analog-fpv-bandwidth`; [5G8atv](https://github.com/zubon2003/5G8atv-rf-hackrf-decoder), [fpv-sdr](https://github.com/lukeswitz/fpv-sdr))*.
+   outside +/-4.5 MHz, yet the 6.0 and 6.5 MHz audio subcarriers and PAL chroma sit beyond a 10 MSPS Nyquist, so 20 MSPS (fpv-sdr's own E200 default) is the capture rate
+   *(verified: verdict 5, `analog-fpv-bandwidth`; [5G8atv](https://github.com/zubon2003/5G8atv-rf-hackrf-decoder), [fpv-sdr](https://github.com/lukeswitz/fpv-sdr))*. This project's own decoder adds a
+   second, independent reason for that rate, at a different scope: at the modulation depth
+   the toolkit's own signal model uses, peak white sits at +6.4 MHz and aliases below
+   12.75 MSPS, and the failure is quiet because sync survives and the line rate still
+   measures right. That is a property of the model, not an established fact about every
+   VTX; the one real transmitter measured swung less. See
+   `toolkit/antsdr_toolkit/analog/video_decode.py`.
 8. **Use a time-frequency front end, and distrust published accuracies.** VGG11 scored 0.842 balanced accuracy on a complex STFT against 0.413 on raw IQ at -12 dB SNR (Glüge et al., NCTA
    2023), the gap closing to zero at 0 dB and above; grouped evaluation collapses DroneRF type identification from macro-F1 0.742 to 0.455, which is chance *(verified: verdict 8,
    `rf-ml-inputs-and-leakage`; [Noisy-Drone-RF](https://github.com/sgluege/Noisy-Drone-RF-Signal-Classification), [spectrahawk](https://github.com/shulm/spectrahawk))*. Domain shift bites
