@@ -36,6 +36,7 @@ antsdr-tk classify capture --band ism-2g4
 antsdr-tk droneid capture --json result.json
 antsdr-tk video capture -o frames/ --frames  # analog FPV to PNG
 antsdr-tk remoteid rid.pcap --unique         # Remote ID from a Wi-Fi capture
+antsdr-tk fleet "Mini 4 Pro"                 # what can I get from this drone?
 ```
 
 ### The hardware facts that shape everything

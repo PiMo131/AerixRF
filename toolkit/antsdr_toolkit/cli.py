@@ -149,7 +149,7 @@ COMMANDS: tuple[Command, ...] = (
 # module costs its own subcommand, not the whole CLI.
 EXTERNAL_COMMANDS: tuple[str, ...] = (
     "cli_capture", "cli_sweep", "cli_classify", "cli_droneid", "cli_video",
-    "cli_remoteid",
+    "cli_remoteid", "cli_fleet",
 )
 
 

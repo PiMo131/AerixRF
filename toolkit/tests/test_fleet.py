@@ -109,3 +109,47 @@ def test_product_types_are_only_claimed_where_open_code_maps_one():
     for key, airframe in fleet.AIRFRAMES.items():
         if airframe.product_type is not None:
             assert airframe.open_decodable, key
+
+
+# --------------------------------------------------------------------- cli
+
+
+def test_the_cli_prints_the_whole_table(capsys):
+    from antsdr_toolkit import cli_fleet
+    assert cli_fleet.main([]) == 0
+    out = capsys.readouterr().out
+    assert "DJI Mini 4 Pro" in out and "DJI Avata 2" in out
+    assert "none: detectable, not identifiable" in out
+
+
+def test_the_cli_explains_a_named_airframe(capsys):
+    from antsdr_toolkit import cli_fleet
+    assert cli_fleet.main(["Mini 4 Pro"]) == 0
+    out = capsys.readouterr().out
+    assert "exempt from Remote ID" in out
+    assert "NONE." in out
+    assert "battery decides" in out.replace("\n", " ").replace("  ", " ")
+
+
+def test_the_cli_filters_by_tier(capsys):
+    from antsdr_toolkit import cli_fleet
+    assert cli_fleet.main(["--tier", "B"]) == 0
+    out = capsys.readouterr().out
+    assert "DJI Neo" in out and "DJI Mavic 3" not in out
+
+
+def test_the_cli_reports_an_unknown_airframe_without_guessing(capsys):
+    from antsdr_toolkit import cli_fleet
+    assert cli_fleet.main(["Parrot Anafi"]) == 1
+    assert "not in the table" in capsys.readouterr().err
+
+
+def test_the_cli_writes_json(tmp_path, capsys):
+    import json
+
+    from antsdr_toolkit import cli_fleet
+    path = tmp_path / "fleet.json"
+    assert cli_fleet.main(["neo", "--json", str(path)]) == 0
+    capsys.readouterr()
+    rows = json.loads(path.read_text())
+    assert len(rows) == 1 and rows[0]["name"] == "DJI Neo" and rows[0]["tier"] == "B"
