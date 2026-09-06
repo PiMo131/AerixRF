@@ -58,6 +58,7 @@ __all__ = [
     "FRAME_BYTES",
     "HOP_CENTRES_HZ",
     "LEGACY_SYMBOLS",
+    "MAX_KNOWN_PRODUCT_TYPE",
     "N_CARRIERS",
     "N_DATA_CARRIERS",
     "N_SYMBOLS",
@@ -76,6 +77,7 @@ __all__ = [
     "cp_schedule",
     "fft_size",
     "is_supported_rate",
+    "product_name",
     "zc_body_offsets",
 ]
 
@@ -142,6 +144,20 @@ HOP_CENTRES_HZ = (
 
 #: Product type byte to model name, as transcribed by both reference projects.
 #: Gaps in the numbering are gaps in the published table, not in the protocol.
+#:
+#: **The table stops at 70, "Mini SE", and that is a real limitation rather
+#: than an oversight.** Every airframe DJI has released since carries a higher
+#: product type, so a successful decode of a recent aircraft resolves to no
+#: name at all. That includes the Mini 3 Pro, which the closed E200 firmware
+#: explicitly claims to decode in full. Numbers circulate for the later models,
+#: but no primary source reachable from this project confirms any of them:
+#: neither reference decoder ships a lookup table, Kismet's parser has none,
+#: and the values in circulation trace back to forum posts. Guessing here would
+#: be worse than the gap, because a wrong model name on a detection is a
+#: confident false identification rather than a missing one.
+#:
+#: :func:`product_name` therefore says which case it is in, rather than
+#: printing a bare "unknown".
 PRODUCT_TYPES = MappingProxyType({
     1: "Inspire 1", 2: "Phantom 3 Series", 3: "Phantom 3 Series", 4: "Phantom 3 Std",
     5: "M100", 6: "ACEONE", 7: "WKM", 8: "NAZA", 9: "A2", 10: "A3",
@@ -156,6 +172,28 @@ PRODUCT_TYPES = MappingProxyType({
     66: "Air 2S", 67: "M30", 68: "DJI Mavic 3", 69: "Mavic 2 Enterprise Advanced",
     70: "Mini SE",
 })
+
+#: Highest product type the published table covers. Anything above this is a
+#: model released after the reference projects last updated their lists.
+MAX_KNOWN_PRODUCT_TYPE = max(PRODUCT_TYPES)
+
+
+def product_name(product_type: int) -> str:
+    """Model name for a product type byte, saying *why* when there is none.
+
+    A decode that resolves everything except the model is a successful decode,
+    and the message has to make that obvious. "unknown (73)" reads like a
+    failure; "product type 73, released after the published table ends at 70"
+    reads like what it is.
+    """
+    code = int(product_type)
+    if code in PRODUCT_TYPES:
+        return PRODUCT_TYPES[code]
+    if code > MAX_KNOWN_PRODUCT_TYPE:
+        return (f"unnamed model, product type {code}: newer than the published "
+                f"table, which ends at {MAX_KNOWN_PRODUCT_TYPE} "
+                f"({PRODUCT_TYPES[MAX_KNOWN_PRODUCT_TYPE]})")
+    return f"unnamed model, product type {code}: a gap in the published table"
 
 
 def fft_size(sample_rate_hz: float) -> int:

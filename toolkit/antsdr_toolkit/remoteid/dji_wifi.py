@@ -127,7 +127,7 @@ class DjiWifiDroneId:
         if not self.extended:
             return None
         code = self.extended.get("product_type")
-        return None if code is None else C.PRODUCT_TYPES.get(int(code), f"unknown ({code})")
+        return None if code is None else C.product_name(int(code))
 
     def to_dict(self) -> dict[str, Any]:
         out: dict[str, Any] = {

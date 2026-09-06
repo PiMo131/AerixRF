@@ -570,7 +570,7 @@ def parse_frame(payload: bytes) -> DroneIdFrame | None:
     return DroneIdFrame(
         serial=serial,
         product_type=int(product),
-        product_name=C.PRODUCT_TYPES.get(int(product), f"unknown ({product})"),
+        product_name=C.product_name(int(product)),
         sequence=int(sequence), state_info=int(state),
         drone_lat=_pair(lat, lon)[0], drone_lon=_pair(lat, lon)[1],
         pilot_lat=_pair(pilot_lat, pilot_lon)[0],

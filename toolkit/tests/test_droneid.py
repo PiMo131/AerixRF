@@ -10,6 +10,8 @@ the turbo code, which this toolkit does not implement (see
 
 from __future__ import annotations
 
+import pathlib
+
 import numpy as np
 import pytest
 
@@ -383,3 +385,61 @@ def test_the_encoder_and_decoder_share_one_coordinate_scale():
     old = 174533.0
     error_m = 52.0 * (old / C.COORD_SCALE - 1.0) * 111_320
     assert abs(error_m) > 2.0, "the mismatch this test guards was smaller than thought"
+
+
+# ------------------------------------- the product-type table's ceiling
+
+
+def test_the_product_table_ceiling_is_stated_rather_than_hidden():
+    """It stops at 70 and every DJI airframe since is above that.
+
+    Found by an independent audit: a Mini 3 Pro decode would have rendered
+    "unknown (73)", which reads like a failed decode when in fact everything
+    except the model name resolved.
+    """
+    from antsdr_toolkit.droneid import constants as C
+    assert C.MAX_KNOWN_PRODUCT_TYPE == 70
+    assert C.PRODUCT_TYPES[C.MAX_KNOWN_PRODUCT_TYPE] == "Mini SE"
+    # The limitation is documented where a reader will meet it: in the source
+    # comment above the table, and in what product_name() returns.
+    source = pathlib.Path(C.__file__).read_text(encoding="utf-8")
+    assert "The table stops at 70" in source
+    assert "Guessing here would" in source
+
+
+def test_a_newer_model_says_it_is_newer_not_merely_unknown():
+    from antsdr_toolkit.droneid import constants as C
+    name = C.product_name(73)
+    assert "73" in name
+    assert "newer than the published table" in name
+    assert "70" in name and "Mini SE" in name
+    assert not name.startswith("unknown ("), "the old, misleading message is back"
+
+
+def test_a_gap_below_the_ceiling_reads_differently_from_a_newer_model():
+    """Two different situations, and conflating them loses information."""
+    from antsdr_toolkit.droneid import constants as C
+    gap = C.product_name(62)          # inside the range, absent from the table
+    newer = C.product_name(90)        # above the range
+    assert "gap in the published table" in gap
+    assert "newer than the published table" in newer
+    assert gap != newer
+
+
+def test_a_known_product_type_is_unchanged():
+    from antsdr_toolkit.droneid import constants as C
+    assert C.product_name(63) == "Mini 2"
+    assert C.product_name(58) == "Mavic Air 2"
+
+
+def test_no_unsourced_model_names_were_invented():
+    """The audit suggested adding 73, 75, 90 and others.
+
+    No primary source reachable from this project confirms any of them:
+    neither reference decoder ships a lookup table and Kismet's parser has
+    none. A wrong model name on a detection is a confident false
+    identification, which is worse than a missing one, so the gap stays.
+    """
+    from antsdr_toolkit.droneid import constants as C
+    for code in (73, 75, 77, 82, 90):
+        assert code not in C.PRODUCT_TYPES, f"{code} was added without a source"
