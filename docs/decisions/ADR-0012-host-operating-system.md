@@ -54,14 +54,19 @@ firmware work, and do not build it until something needs it.**
 | openwifi | no | Linux host, kernel modules, SD-card image build |
 | Rebuilding firmware or FPGA images | partly | Vivado runs on Windows; petalinux and buildroot do not |
 
-WSL2 is deliberately **not** the recommendation. It buys nothing for the IIO
-path, which is an outbound TCP connection the host makes to the board, and it
-introduces a NAT that complicates the UDP paths without removing the Linux
-requirement for the tasks that actually need Linux.
+WSL2 is deliberately **not** the recommendation, and the reason is sharper
+than "it adds a layer". It buys nothing for the capture path, which is an
+outbound TCP connection the host makes to the board and works either way. What
+its default NAT breaks is exactly one existing feature: the new-firmware
+DroneID bridge, where the *board* dials in to the host on TCP 52002. An
+inbound connection from the LAN cannot cross that NAT at all. Windows 11
+22H2's `networkingMode=mirrored` restores it, at the cost of a newer network
+path with live defects. Taking on that trade to reach a Linux userspace that
+still cannot build the UHD fork or run openwifi is a poor bargain.
 
 ## Consequences
 
-- Three Windows-specific traps are known in advance and are worth writing down
+- Four Windows-specific traps are known in advance and are worth writing down
   because each costs an afternoon:
   1. **The installer is not where the documentation says it is.** ADI's own
      docs point at the GitHub release for `libiio-setup.exe`, and it is not
@@ -73,6 +78,14 @@ requirement for the tasks that actually need Linux.
   3. **Do not install the PlutoSDR USB drivers.** They serve `usb:` URIs only
      and are the source of the classic Windows driver trouble. The E200 needs
      none of it.
+  4. **The DroneID firmware bridge needs an inbound firewall rule.** The two
+     wire formats in `bridges/dji_droneid.py` run in opposite directions, and
+     only one of them is a problem. The legacy binary path is fine: the host
+     connects out to the board on TCP 41030. The new firmware path is the
+     reverse, with the board connecting *in* to the host on TCP 52002, or
+     pushing UDP there. Windows Defender Firewall blocks that by default and
+     the symptom is silence, not an error. Open TCP and UDP 52002 inbound
+     before concluding the firmware is not reporting.
 - Address the board by explicit URI (`ip:192.168.1.10`), not by discovery.
   mDNS binds UDP 5353 as a listener, which Windows Defender Firewall gates,
   and an explicit URI sidesteps the whole question.

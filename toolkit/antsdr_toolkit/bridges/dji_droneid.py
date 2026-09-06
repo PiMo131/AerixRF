@@ -21,6 +21,13 @@ optionally ending with ``;``::
 Longitudes precede latitudes.  Other lines (debug prints, ``=`` heart-beats)
 are ignored.
 
+Note which end connects, because the two formats run in opposite directions
+and it decides what a firewall has to allow.  For the new firmware the host
+*listens* and the board dials in, so on Windows an inbound rule for TCP and
+UDP 52002 is required and its absence looks exactly like a firmware that is
+not reporting (``antsdr/docs/decisions/ADR-0012``).  Under WSL2's default NAT
+this path cannot work at all; mirrored networking mode restores it.
+
 Legacy firmware (binary): the host connects to the E200 on TCP 41030 and reads
 frames ``[?, ?, type, len_lo, len_hi, payload...]`` where type 0x01 is DroneID
 and ``len`` (little-endian) is the total frame length including the header.
