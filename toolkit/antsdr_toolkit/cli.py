@@ -147,7 +147,7 @@ COMMANDS: tuple[Command, ...] = (
 # ``register(subparsers)`` and sets ``func`` on its own parser.  They are
 # imported inside :func:`build_parser` so that one broken or half-installed
 # module costs its own subcommand, not the whole CLI.
-EXTERNAL_COMMANDS: tuple[str, ...] = ("cli_capture", "cli_sweep")
+EXTERNAL_COMMANDS: tuple[str, ...] = ("cli_capture", "cli_sweep", "cli_classify")
 
 
 def _register_external(subparsers: argparse._SubParsersAction) -> list[str]:
