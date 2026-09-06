@@ -37,6 +37,8 @@ antsdr-tk droneid capture --json result.json
 antsdr-tk video capture -o frames/ --frames  # analog FPV to PNG
 antsdr-tk remoteid rid.pcap --unique         # Remote ID from a Wi-Fi capture
 antsdr-tk fleet "Mini 4 Pro"                 # what can I get from this drone?
+antsdr-tk firstrun --dry-run                 # plan the first session with the board
+antsdr-tk firstrun -o firstrun               # then run the whole thing
 ```
 
 ### The hardware facts that shape everything
