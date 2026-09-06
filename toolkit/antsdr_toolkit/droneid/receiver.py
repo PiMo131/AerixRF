@@ -40,16 +40,24 @@ independently.  The distance between the two is therefore a coarse frequency
 estimate with a range of hundreds of kilohertz, and the cyclic-prefix phase
 refines it (:func:`estimate_cfo`).
 
-What this does not do
----------------------
-No turbo decoding, so a burst that a real decoder would correct is reported
-as a CRC failure. That hard path is about 10 dB less sensitive than the soft
-one, measured on this toolkit's own bursts, rather than the 3 dB an earlier
-note guessed at; ten decibels is a factor of three in range. Compared with a complete
-implementation.  On synthetic bursts this receiver decodes cleanly at an
-in-band signal-to-noise ratio of about 20 dB and fails below roughly 15 dB.
+Where it stands
+---------------
+Validated against the RUB-SysSec DJI captures: ten of ten frames on
+``mini2_sm``, where the NDSS reference receiver gets seven, and two frames on
+``mavic_air_2`` where it gets one. Getting there cost four defects that a
+synthetic burst cannot expose, because a synthetic burst starts exactly where
+the synthesiser put it; ``antsdr/research/validation/real-captures.md`` has
+them and the measurements.
+
+Turbo decoding is in :mod:`antsdr_toolkit.droneid.turbo` and on by default
+(``soft=True``), worth a measured 10 dB over hard decisions - a factor of
+three in range. The hard path is still tried after it, because on a strong
+burst it costs nothing and is the one with years of use behind it.
+
 Bursts of OcuSync 4 drones are found and reported but their payload is
-encrypted, so the CRC will fail (see ``antsdr/research/landscape.md``).
+encrypted, so the CRC will fail (see ``antsdr/research/landscape.md``). A
+capture that is not already centred at a multiple of the subcarrier spacing
+goes through :mod:`antsdr_toolkit.droneid.tune` first.
 """
 
 from __future__ import annotations

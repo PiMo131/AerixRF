@@ -17,16 +17,18 @@ This module implements everything except the turbo code itself.
 
 Why the turbo decoder is not here
 ---------------------------------
-Rate matching writes the systematic bits into the circular buffer first, and
-E = 7200 is large enough that the whole systematic block appears in the buffer
-before it wraps.  A receiver can therefore read the 1412 systematic bits
-straight back out and check the CRC-24A, with no error correction at all.
-That is what the NDSS reference receiver does, and it recovers about 78 % of
-frames on a clean capture.  Turbo decoding, now in
-:mod:`antsdr_toolkit.droneid.turbo`, is worth a measured 10 dB and is a
-worthwhile follow-up (:func:`turbo_decode` is the hook), but the honest
-statement today is that this toolkit decodes DroneID without error
-correction and reports the CRC result.
+It lives in :mod:`antsdr_toolkit.droneid.turbo`, which is large enough to
+deserve its own module; :func:`turbo_decode` here forwards to it.
+
+The reason this module can stand alone at all is that error correction is
+optional for DroneID. Rate matching writes the systematic bits into the
+circular buffer first, and E = 7200 is large enough that the whole systematic
+block appears before the buffer wraps, so a receiver can read the 1412
+systematic bits straight back out and check the CRC-24A with no decoding.
+That is what the NDSS reference receiver does, and it recovers 7 of 10 frames
+on the ``mini2_sm`` capture. This toolkit's soft path recovers 10 of 10 on the
+same file: turbo decoding is worth a measured 10 dB, which is a factor of
+three in range, and :func:`rate_dematch_llr` is what feeds it.
 """
 
 from __future__ import annotations
