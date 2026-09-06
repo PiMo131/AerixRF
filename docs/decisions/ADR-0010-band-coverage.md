@@ -1,6 +1,6 @@
 # ADR-0010: Band coverage: consumer and hobby links first, optional wide sweep
 
-- **Status:** Proposed (needs Q2 in `../../QUESTIONS.md`)
+- **Status:** Accepted (Q2 answered 2026-09-06: DJI and FPV first, wide sweep optional)
 - **Date:** 2026-09-06
 - **Sources:** `../../research/signal-reference.md`, `../../research/foreign-perspective.md`
 
@@ -13,6 +13,11 @@ Ukrainian sources document links that have drifted far outside those bands
 6 GHz, OpenIPC at 3.6 and 5.9-7.1 GHz). The E200 tunes 70 MHz to 6 GHz and
 sweeps 56 MHz at a time, so wide coverage is a scheduling and revisit-time
 question, not a hardware one, except above 6 GHz.
+
+The maintainer answered Q2 on 2026-09-06: consumer DJI and the FPV/hobby
+families come first, and the security-style wide sweep is an option rather
+than a default. That is the split this record already proposed, so it is
+adopted unchanged.
 
 ## Decision
 

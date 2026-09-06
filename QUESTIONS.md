@@ -5,6 +5,17 @@ in `docs/decisions/`, and a first toolkit lives in `toolkit/`. The questions
 below are what I could not decide for you. Each one names the ADR it unlocks.
 Where I have a recommendation it is marked **(rec.)**.
 
+## Answered
+
+| Date | Question | Answer | Effect |
+|---|---|---|---|
+| 2026-09-06 | Q2 scope | DJI and FPV first, wide sweep as an option | [ADR-0010](docs/decisions/ADR-0010-band-coverage.md) **Accepted** |
+| 2026-09-06 | Q8 recordings, in part | No time for field captures now. Available airframes: DJI Avata, Avata 2, Mini 4 Pro, Neo, possibly a Matrice, not all at once | Build order reordered; see Q13 |
+| 2026-09-06 | Q13 build order | Field captures deferred; prepare what needs no hardware | Reordered below |
+
+Questions still open are numbered as before. The numbering never changes,
+because the decision records cite these by number.
+
 ## A. Facts only you can check on the unit
 
 **Q1. What exactly is on your board and in the box?**
@@ -24,7 +35,9 @@ Where I have a recommendation it is marked **(rec.)**.
 
 ## B. Scope
 
-**Q2. Which links matter first?** (ADR-0010)
+**Q2. Which links matter first?** (ADR-0010) — **answered 2026-09-06:**
+(a) and (b), with (c) as an option. ADR-0010 is Accepted.
+
 - (a) Consumer DJI: DroneID for OcuSync 2/3, presence for O4, Remote ID.
 - (b) FPV and hobby: ExpressLRS 2.4 GHz and 868 MHz, Crossfire, FrSky, analog
   5.8 GHz video, HDZero/Walksnail, OpenIPC.
@@ -64,7 +77,11 @@ fields? **(rec.)** yes.
 
 ## D. Ambition
 
-**Q8. Machine learning and recordings.** (ADR-0007) Do you want to invest in
+**Q8. Machine learning and recordings.** (ADR-0007) — **partly answered
+2026-09-06:** no time for captures now; the fleet is DJI Avata, Avata 2,
+Mini 4 Pro, Neo and possibly a Matrice, not all available at once. The
+remaining half of this question is below.
+ Do you want to invest in
 own SigMF recordings and training, or stay rule-based for now? Which drones
 and transmitters can you borrow for recordings (DJI Mini 2 or Air 2S for
 OcuSync 2/3, a Mini 4 Pro or Air 3 for O4, an ExpressLRS handset, an analog
@@ -88,7 +105,9 @@ explicit opt-in. **(rec.)** yes, and metadata-first.
   operator screen? **(rec.)** CLI now, daemon next, no GUI until events are
   trusted.
 
-**Q13. Which build step next?** Pick an order; my ranking follows.
+**Q13. Which build step next?** — **answered 2026-09-06:** no field
+captures for now, so item 1 is deferred and the no-hardware work comes
+first. Revised order:
 1. Field capture kit: capture, sweep, classify on real signals, plus the
    RX1/RX2 phase characterisation script (numbers nobody has published).
 2. Finish the open DroneID decoder (turbo decoder, OcuSync 2 golden test,

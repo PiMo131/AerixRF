@@ -44,7 +44,7 @@ about 56 MHz span cannot be reproduced on this board at all, only consumed after
 | 1.3 | CardRF | 2022 | Keysight MSOS604A scope, 20 GSa/s | 250 us per capture, real | RF, not baseband | no | 65+ GB | IEEE DataPort | not replayable |
 | 1.4 | Ezuma RC dataset | 2020 | oscilloscope | 0.25 ms per record, real | 2.4 GHz | no | not stated | IEEE DataPort | not replayable |
 | 1.5 | DroneRFa | 2024 | NI USRP-2955 dual channel | 100 MS/s per channel, 80 MHz IBW | 915 / 2440 / 5800 MHz | yes | >= 1 TB, 574 GB RAR mirror | SciDB, registration | decimate 5 to 20 MSPS |
-| 1.6 | DroneRFb-DIR | 2025 | SDR, model unstated | 80 MSPS | 2.4 to 2.48 GHz | yes | 64 GB zip / 65 GB | SciDB, registration | decimate 4 to 20 MSPS |
+| 1.6 | DroneRFb-DIR | 2025 | NI USRP-2955 (secondary source) | 80 MSPS | 2.4 to 2.48 GHz | yes | 64 GB zip / 65 GB | SciDB, registration | decimate 4 to 20 MSPS |
 | 1.7 | DRFF-R2 | 2026 | not stated | not stated | not stated | yes (.mat) | 400.6 GB, 730 files | SciDB, registration | unknown |
 | 1.8 | S3R dataset | 2024 | DroneRFa-format | 100 MS/s, 2440 / 5800 MHz | 2.4 / 5.8 GHz | yes | not stated | IEEE DataPort + Google Drive | decimate 5 |
 | 1.9 | RFUAV | 2025 | USRP X310 (third-party) | 100 MSPS float32 | 2.4 / 5.8 GHz | yes | 102 GB rar, ~263 GB out | Hugging Face | decimate 5, or 2/5 to 40 |
@@ -199,6 +199,7 @@ GHz capture cannot be reproduced on an E200, because the AD9361's two RX chains 
 |---|---|
 | Paper | 任俊宇 / 俞宁宁 / 周成伟 / 史治国 / 陈积明 (Zhejiang University, Hangzhou Dianzi University, ZJU Jinhua Institute), JEIT 2025 47(3):573-581, [doi 10.11999/JEIT240804](https://jeit.ac.cn/cn/article/doi/10.11999/JEIT240804); PDF at [sciengine](https://cdn.sciengine.com/doi/pdf/148A3ABAED5C4D2D97D17B63A9671CF4) |
 | Download | [SciDB dataSetId 84cf9101e739402784b1396783881202](https://www.scidb.cn/en/detail?dataSetId=84cf9101e739402784b1396783881202), registration required |
+| Capture front end | NI USRP-2955, the same receiver family as DroneRFa, named only in the group description attached to the DroneRFa paper entry ([JEIT 10.11999/JEIT230570](https://jeit.ac.cn/cn/article/doi/10.11999/JEIT230570), snippet). No primary DroneRFb-DIR page was reachable to confirm it |
 | Span and rate | 2.4 to 2.48 GHz (80 MHz span), 80 MSps ([rfml-moe-hub `datasets/droneRFb_dir.md`](https://github.com/r4d10n/rfml-moe-hub)) |
 | Format | MATLAB v7.3 (HDF5) `.mat`, I and Q float32 arrays of shape (1, 4,000,000) = 50 ms per file; each class >= 40 segments of >= 4 M samples ([rfml-moe-hub](https://github.com/r4d10n/rfml-moe-hub), [SciDB listing](https://www.scidb.cn/en/detail?dataSetId=84cf9101e739402784b1396783881202)) |
 | Classes | 13: 6 drone types x 2 training individuals plus a background class, with individual 3 of each type held out for test ([rfml-moe-hub](https://github.com/r4d10n/rfml-moe-hub)) |
@@ -247,9 +248,18 @@ should imitate.
 | Reference STFT | 2048 bins, Hamming window, fs = 100e6, colour scale -80 to -20 dB (`raw2tfs/plt.py`) ([S3R](https://github.com/DaftJun/S3R)) |
 | Citation | Yu, Wu, Zhou, Shi, Chen, IEEE TIFS 19:9894-9909, doi 10.1109/TIFS.2024.3463535 ([S3R](https://github.com/DaftJun/S3R)) |
 
-The assignment brief listed this as "S3R / DroneRFb-Spectra". **No dataset named DroneRFb-Spectra
-appears anywhere in the evidence**; only S3R and DroneRFb-DIR were found. Treat the name as
-unconfirmed.
+The assignment brief listed this as "S3R / DroneRFb-Spectra". DroneRFb-Spectra does appear in the
+evidence, as a companion **spectrogram** dataset from the same Zhejiang University group that
+produced DroneRFa and DroneRFb-DIR: 14,460 samples over 7 brands (DJI, Vbar, FrSky, Futaba, Taranis,
+RadioLink, Skydroid), with the paper reporting 96.64% average closed-set accuracy
+([S3R](https://github.com/DaftJun/S3R), snippet;
+[JEIT 10.11999/JEIT230570](https://jeit.ac.cn/cn/article/doi/10.11999/JEIT230570), snippet). Those
+three figures are **snippet-grade**: the sample count, the brand list and the accuracy were never
+read from a dataset page or from the paper, only from search snippets attached to the S3R and
+DroneRFa entries. Everything in the table above, by contrast, was read from the S3R clone. Nothing
+in the evidence gives DroneRFb-Spectra a host URL, a licence, an STFT parameter set of its own or a
+sample rate, so it is catalogued here rather than as its own numbered entry; the same summary is used
+in [landscape.md](landscape.md) section 5.4.
 
 E200 fit: same 100 MS/s decimation as DroneRFa, and one loader serves both. The reason to take it is
 the **open-set protocol**: nine predefined known/unknown splits, which is the only ready-made way to
@@ -796,9 +806,11 @@ What the evidence could not establish, drawn from the lens `gaps_or_open_questio
   licence for both ZHAW datasets, the Zenodo weights licence, and DroneRF's CC BY 4.0 claim (taken
   from a third-party README, not the Mendeley page) are all unconfirmed.
 * **Capture hardware.** The SDR model is unknown for DroneRF (an NI USRP driven by LabVIEW, model not
-  in the repo), DroneDetect (a BladeRF, variant unstated), CageDroneRF (nothing stated) and
-  DroneRFb-DIR ("SDR"). RFUAV's USRP X310 and UAVSig's B205mini come from third parties only. The
-  AD9361-equivalence arguments for DroneDetect and UAVSig therefore rest on second-hand statements.
+  in the repo), DroneDetect (a BladeRF, variant unstated) and CageDroneRF (nothing stated).
+  DroneRFb-DIR's NI USRP-2955, RFUAV's USRP X310 and UAVSig's B205mini are each named only in a
+  secondary source, never on a primary dataset page. The AD9361-equivalence arguments for DroneDetect
+  and UAVSig therefore rest on second-hand statements, and so does the observation that DroneRFb-DIR
+  and DroneRFa share a receiver family (relevant to rule 4 of section 3.4).
 * **DRFF-R2's sample rate, centre frequencies and bandwidth are unknown**, so its E200 compatibility
   cannot be assessed at all.
 * **Contradictions left standing.** DroneRF size 3.75 GB versus ~40 GB; Noisy Drone RF v2 size ~23 GB
@@ -807,8 +819,12 @@ What the evidence could not establish, drawn from the lens `gaps_or_open_questio
   its README examples but 5.765 GHz per rfml-moe-hub; CardRF listed as "17 controllers, 8
   manufacturers" by the survey while its own README lists six UAVs, five Bluetooth and two Wi-Fi
   devices. None of these could be resolved from a primary source.
-* **No dataset named "DroneRFb-Spectra" was found** anywhere in the evidence, only S3R and
-  DroneRFb-DIR.
+* **DroneRFb-Spectra is known only from snippets.** Its size (14,460 samples), brand list (7 brands)
+  and headline accuracy (96.64%) come from search snippets attached to the
+  [S3R](https://github.com/DaftJun/S3R) and
+  [DroneRFa](https://jeit.ac.cn/cn/article/doi/10.11999/JEIT230570) entries. No host URL, licence,
+  sample rate or STFT parameter set for it was reachable, so it cannot be catalogued as a dataset in
+  its own right (section 1.8).
 * **No public SigMF-formatted UAV dataset exists** in anything the sweep could reach. IQT Labs'
   `rfml` pipeline uses SigMF but its Mavic 3, Mini 2 and bladeRF Wi-Fi collections are not published,
   and gamutRF (archived) links no datasets. Our recordings would be among the first.
