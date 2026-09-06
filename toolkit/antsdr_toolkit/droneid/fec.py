@@ -22,7 +22,8 @@ E = 7200 is large enough that the whole systematic block appears in the buffer
 before it wraps.  A receiver can therefore read the 1412 systematic bits
 straight back out and check the CRC-24A, with no error correction at all.
 That is what the NDSS reference receiver does, and it recovers about 78 % of
-frames on a clean capture.  Turbo decoding would buy roughly 3 dB and is a
+frames on a clean capture.  Turbo decoding, now in
+:mod:`antsdr_toolkit.droneid.turbo`, is worth a measured 10 dB and is a
 worthwhile follow-up (:func:`turbo_decode` is the hook), but the honest
 statement today is that this toolkit decodes DroneID without error
 correction and reports the CRC result.
@@ -267,16 +268,90 @@ def check_payload_crc(payload: bytes) -> bool:
     return crc24a(payload) == 0
 
 
-def turbo_decode(_llrs: np.ndarray) -> np.ndarray:  # pragma: no cover - not implemented
-    """Placeholder for an LTE turbo decoder.
+def turbo_decode(*args, **kwargs):
+    """Moved to :func:`antsdr_toolkit.droneid.turbo.turbo_decode`.
 
-    Not implemented.  The systematic-only path in
-    :func:`rate_unmatch_systematic` decodes clean captures without it; adding
-    a max-log-MAP decoder is the next step for weak signals and would buy
-    about 3 dB.  Raising here rather than silently degrading keeps the
-    toolkit's capability claims honest.
+    This was a stub that raised, and it lived here because rate matching and
+    the turbo code are neighbours in the standard. The decoder is large enough
+    to deserve its own module, so it has one; this forwards for anything that
+    still imports it from here.
     """
-    raise NotImplementedError(
-        "no turbo decoder yet: DroneID is decoded from the systematic bits only, "
-        "which costs about 3 dB of sensitivity. See antsdr/research/landscape.md."
-    )
+    from .turbo import turbo_decode as _turbo_decode
+
+    return _turbo_decode(*args, **kwargs)
+
+
+def _interleave_positions(d: int) -> tuple[np.ndarray, np.ndarray]:
+    """The sub-block interleaver as a position map rather than as bits.
+
+    Returns ``(source, is_dummy)`` where ``source[i]`` is which of the ``d``
+    input positions ends up at output ``i``. Mirrors
+    :func:`sub_block_interleave` exactly; it exists because that function
+    carries bits in ``uint8`` and a position index needs more room than that.
+    """
+    size = int(d)
+    n_cols = 32
+    n_rows = int(np.ceil(size / n_cols))
+    n_dummy = n_rows * n_cols - size
+    padded = np.full(n_rows * n_cols, -1, dtype=np.int32)
+    padded[n_dummy:] = np.arange(size, dtype=np.int32)
+    permuted = padded.reshape(n_rows, n_cols)[:, list(RM_PERM)]
+    out = permuted.reshape(-1, order="F")
+    return out, out < 0
+
+
+def rate_match_map(d: int = RATE_MATCH_D, e: int = RATE_MATCH_E) -> np.ndarray:
+    """Where each rate-matched bit came from: ``(e, 2)`` of ``(stream, index)``.
+
+    Streams are 0 systematic, 1 first parity, 2 second parity. Running the
+    transmitter's own construction over position labels rather than over bits
+    guarantees the inverse cannot drift from the forward direction, which
+    hand-deriving it would eventually allow.
+
+    A position may appear more than once when ``e`` exceeds the usable buffer,
+    and that is not a problem to be avoided: repeated transmissions of the same
+    bit are extra evidence, and the soft de-matcher adds them.
+    """
+    v0, null0 = _interleave_positions(d)
+    v1, null1 = _interleave_positions(d)
+    v2, null2 = _interleave_positions(d)
+    interlaced = np.empty(v1.size + v2.size, dtype=np.int32)
+    interlaced[0::2] = v1
+    interlaced[1::2] = v2
+    stream = np.empty(v1.size + v2.size, dtype=np.int32)
+    stream[0::2] = 1
+    stream[1::2] = 2
+    interlaced_null = np.empty(null1.size + null2.size, dtype=bool)
+    interlaced_null[0::2] = null1
+    interlaced_null[1::2] = null2
+
+    positions = np.concatenate([v0, interlaced])
+    streams = np.concatenate([np.zeros(v0.size, dtype=np.int32), stream])
+    buffer_null = np.concatenate([null0, interlaced_null])
+    keep = ~buffer_null
+    usable_pos = positions[keep]
+    usable_stream = streams[keep]
+    if usable_pos.size == 0:
+        raise ValueError("rate matching buffer is entirely null")
+    start = int(np.count_nonzero(keep[:_k0(v0.size)]))
+    idx = (np.arange(int(e)) + start) % usable_pos.size
+    return np.stack([usable_stream[idx], usable_pos[idx]], axis=1)
+
+
+def rate_dematch_llr(llrs: np.ndarray, d: int = RATE_MATCH_D,
+                     e: int = RATE_MATCH_E) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Scatter ``e`` soft values back into the three ``d``-length streams.
+
+    Returns ``(systematic, parity1, parity2)`` as log-likelihood ratios ready
+    for :func:`~antsdr_toolkit.droneid.turbo.turbo_decode`. Positions the
+    transmitter sent more than once are summed, which is what combining
+    independent observations of the same bit means in the log domain; positions
+    it never sent stay at zero, meaning no information either way.
+    """
+    values = np.asarray(llrs, dtype=np.float64).ravel()
+    if values.size != int(e):
+        raise ValueError(f"expected {e} soft values, got {values.size}")
+    mapping = rate_match_map(d, e)
+    out = np.zeros((3, int(d)), dtype=np.float64)
+    np.add.at(out, (mapping[:, 0], mapping[:, 1]), values)
+    return out[0], out[1], out[2]

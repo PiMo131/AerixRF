@@ -7,13 +7,12 @@ scrambling, QPSK mapping, Zadoff-Chu pilots, cyclic prefixes, timing - and can
 then be given a frequency offset, a timing offset and noise.  A decode of that
 burst exercises the whole chain.
 
-One deliberate simplification: the two parity streams of the turbo code are
-filled with a deterministic pseudo-random pattern instead of being computed by
-a real LTE turbo encoder.  The receiver reads only the systematic bits (see
-:mod:`antsdr_toolkit.droneid.fec`), so the parity content does not affect the
-result, and writing an encoder whose decoder does not exist yet would be
-pretence.  What this does mean is that these bursts cannot be used to measure
-coding gain - they measure everything *except* the turbo code.
+The parity streams are real: :mod:`antsdr_toolkit.droneid.turbo` encodes them
+with the LTE turbo code, so a burst from here exercises the receiver's error
+correction and the pair can be used to measure coding gain.  They were once
+filled with a pseudo-random pattern, on the reasoning that the receiver read
+only the systematic bits anyway; that was true and it was also the thing
+keeping the receiver stuck at high signal-to-noise.
 
 This is test and calibration material.  It is never transmitted: the toolkit
 is receive-only (``antsdr/docs/decisions/ADR-0001``).
@@ -27,7 +26,7 @@ from dataclasses import dataclass
 import numpy as np
 
 from . import constants as C
-from . import fec
+from . import fec, turbo
 from .zc import carrier_indices, zc_frequency
 
 __all__ = ["DEFAULT_TX", "DroneIdTx", "make_burst", "make_frame_bytes", "place_burst"]
@@ -127,14 +126,15 @@ def make_payload_bytes(tx: DroneIdTx = DEFAULT_TX, *,
 def _coded_bits(payload: bytes, rng: np.random.Generator) -> np.ndarray:
     """Rate-matched, scrambled bits for one burst.
 
-    The systematic stream is the payload; the parity streams are noise, for
-    the reason given in the module docstring.
+    The parity streams are produced by a real LTE turbo encoder
+    (:mod:`antsdr_toolkit.droneid.turbo`), so a burst from here exercises the
+    receiver's error correction rather than bypassing it. They used to be
+    filled with pseudo-random noise, which made the round trip prove only that
+    the systematic path was self-consistent.
     """
-    systematic = np.concatenate([fec.bytes_to_bits(payload),
-                                 np.zeros(4, dtype=np.uint8)])  # four tail bits
+    del rng  # the encoder is deterministic; nothing here is random any more
+    systematic, parity1, parity2 = turbo.turbo_encode(fec.bytes_to_bits(payload))
     assert systematic.size == C.RATE_MATCH_D
-    parity1 = rng.integers(0, 2, C.RATE_MATCH_D).astype(np.uint8)
-    parity2 = rng.integers(0, 2, C.RATE_MATCH_D).astype(np.uint8)
     coded = fec.rate_match(systematic, parity1, parity2)
     return fec.scramble(coded)
 

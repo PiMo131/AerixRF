@@ -3,9 +3,9 @@
 The loopback tests build a burst with :mod:`antsdr_toolkit.droneid.synth`,
 put it in noise with a frequency and timing offset, and require the receiver
 to recover the exact frame that went in.  That is the only honest way to test
-a decoder without a drone on the bench, and it exercises everything except
-the turbo code, which this toolkit does not implement (see
-:mod:`antsdr_toolkit.droneid.fec`).
+a decoder without a drone on the bench, and since the synthesiser began
+emitting real LTE turbo parity it exercises the error correction too.  See
+:mod:`tests.test_turbo` for the codec itself.
 """
 
 from __future__ import annotations
@@ -156,9 +156,17 @@ def test_crcs():
     assert fec.crc16_dji(b"123456789") != fec.crc16_dji(b"123456789", init=0)
 
 
-def test_turbo_decoder_is_absent_and_says_so():
-    with pytest.raises(NotImplementedError, match="systematic bits only"):
-        fec.turbo_decode(np.zeros(10))
+def test_the_old_turbo_entry_point_still_forwards():
+    """It used to raise NotImplementedError; now it delegates to the real one."""
+    from antsdr_toolkit.droneid import turbo
+    bits = np.random.default_rng(0).integers(0, 2, 1408).astype(np.uint8)
+    d0, d1, d2 = turbo.turbo_encode(bits)
+
+    def llr(stream):
+        return np.where(stream == 0, 6.0, -6.0)
+
+    out = fec.turbo_decode(llr(d0), llr(d1), llr(d2), iterations=2)
+    assert np.array_equal(out, bits)
 
 
 def test_bit_and_byte_conversion():
