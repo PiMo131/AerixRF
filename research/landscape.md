@@ -24,10 +24,17 @@ Conventions used throughout:
 
 The three E200 constraints that shape everything below, in one paragraph: the AD9361 front end
 covers 70 MHz to 6 GHz with up to 56 MHz analog bandwidth, but the host link is a single 1 GbE port
-with a 1500-byte MTU, which caps continuous single-channel sc16 streaming at about 29.6 MSPS by
-arithmetic and at the vendor's stated **20 MSPS** in practice, with roughly 10 MSPS per channel in
-two-channel mode *(verified: verdict 2, host streaming tiers,
+with a 1500-byte MTU, which caps continuous single-channel sc16 streaming at **29.6 MSPS** by
+arithmetic. What is reachable in practice depends on which firmware is booted, and the vendor's
+often-quoted 20 MSPS is the figure for the UHD personality, not for the factory one: the stock
+PlutoSDR-compatible IIO firmware is CPU-bound in `iiod` on the Cortex-A9 and sustains about
+**11 to 13 MSPS** single-channel, roughly half that per channel with two
+*(verified: verdict 2, host streaming tiers,
+[libiio #875](https://github.com/analogdevicesinc/libiio/discussions/875),
 [vendor table](https://github.com/MicroPhase/antsdr_doc_en/blob/master/source/device_and_usage_manual/ANTSDR_E_Series_Module/ANTSDR_E200_Reference_Manual/AntsdrE200_RF_parameters.md))*.
+The practical consequence runs through this whole document: **DroneID's 15.36 MSPS does not fit a
+continuous stock-firmware stream**, so it is captured as a snapshot, decoded on the board, or run
+on the UHD personality.
 Snapshot capture at up to 61.44 MSPS is possible on both firmware personalities because the DMA
 lands in DDR first; sustained streaming at that rate is not *(verified: verdict 2)*. The board has
 one SMA RX/TX pair and a second pair on internal u.FL, both fed by one AD9361 and therefore sharing
@@ -248,8 +255,10 @@ the board: the DroneID image is a full alternative Linux personality shipped as 
 at a time because the stock IIO firmware lives in QSPI while UHD and the SD images are selected by
 the BOOT DIP switch *(verified: verdict 6, personality exclusivity;
 [unpacking guide](https://github.com/MicroPhase/antsdr_doc_en/blob/master/source/device_and_usage_manual/ANTSDR_E_Series_Module/ANTSDR_E200_Reference_Manual/AntsdrE200_Unpacking_examination.md))*. Host
-processing at 15.36 MSPS is comfortably inside the 20 MSPS Ethernet budget and covers exactly one
-DroneID channel per tune; note that **20 MSPS itself is not a valid DroneID rate** because
+processing at 15.36 MSPS covers exactly one DroneID channel per tune, but it is *above* the stock
+IIO firmware's continuous ceiling of 11 to 13 MSPS, so on the factory personality it has to be a
+snapshot with a stated duty cycle rather than an unbroken stream (verdict 2); the UHD personality
+carries it continuously. Note also that **20 MSPS itself is not a valid DroneID rate** because
 20e6/15e3 = 1333.3 is not an integer, so the AD9361 must be set to 15.36 MSPS or the stream
 resampled ([deep read of DroneSecurity/proto17](https://github.com/proto17/dji_droneid)). This split
 is what [ADR-0005](../docs/decisions/ADR-0005-processing-location.md) and
@@ -323,7 +332,7 @@ The host-side alternative, [gr-ieee802-11](https://github.com/bastibl/gr-ieee802
 its README. It also cannot ACK in time and needs `volk_profile` to keep up
 ([gr-ieee802-11](https://github.com/bastibl/gr-ieee802-11)). And the three BLE primary advertising
 channels (2402/2426/2480 MHz) plus Wi-Fi ch 6 (2437 MHz) span 78 MHz, more than the E200's 56 MHz
-analog bandwidth and far more than its ~20 MSPS Ethernet budget, so a single E200 must choose one
+analog bandwidth and far more than any of its Ethernet budgets, so a single E200 must choose one
 window ([regulatory lens](https://github.com/bastibl/gr-ieee802-11),
 [openwifi](https://github.com/open-sdr/openwifi)).
 
