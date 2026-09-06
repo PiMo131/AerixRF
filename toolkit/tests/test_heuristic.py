@@ -295,6 +295,31 @@ def test_classify_clusters_separates_two_emitters():
     assert hc.classify_clusters([], window_s=1.0) == []
 
 
+def test_clusters_split_by_bandwidth_as_well_as_frequency():
+    # A wide burst sitting on the same centre as a hop set would otherwise
+    # chain every narrow burst into one group through it.
+    from antsdr_toolkit.dsp.bursts import Burst
+
+    narrow = [
+        Burst(t_start_s=0.001 * k, t_end_s=0.001 * k + 3e-4,
+              f_low_hz=2.44e9 + k * 1e6, f_high_hz=2.44e9 + k * 1e6 + 8e5,
+              peak_db=-40.0, mean_db=-50.0, snr_db=20.0)
+        for k in range(5)
+    ]
+    wide = Burst(t_start_s=0.01, t_end_s=0.0106, f_low_hz=2.4375e9, f_high_hz=2.4465e9,
+                 peak_db=-40.0, mean_db=-50.0, snr_db=20.0)
+    groups = hc.classify_clusters([*narrow, wide], window_s=0.1, cluster_gap_hz=3e6)
+    assert len(groups) == 2, [f.n_bursts for f, _ in groups]
+    sizes = sorted(f.n_bursts for f, _ in groups)
+    assert sizes == [1, 5]
+    # a wide burst that is only twice as wide still joins, so a hop set whose
+    # bursts vary a little is not split apart
+    similar = Burst(t_start_s=0.02, t_end_s=0.0203, f_low_hz=2.4425e9,
+                    f_high_hz=2.4441e9, peak_db=-40.0, mean_db=-50.0, snr_db=20.0)
+    joined = hc.classify_clusters([*narrow, similar], window_s=0.1, cluster_gap_hz=3e6)
+    assert len(joined) == 1
+
+
 def _fake_features(**kwargs):
     """A BurstFeatures with only the named statistics set (others 0.0)."""
     from antsdr_toolkit.dsp.features import BurstFeatures

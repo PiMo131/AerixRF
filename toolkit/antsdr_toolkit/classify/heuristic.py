@@ -343,30 +343,46 @@ def classify_clusters(
     window_s: float,
     center_tolerance_hz: float = 250e3,
     cluster_gap_hz: float = 5e6,
+    bandwidth_ratio: float = 4.0,
     band_hint: str | None = None,
     extra: Mapping[str, float] | None = None,
     top_k: int = 3,
 ) -> list[tuple[BurstFeatures, list[Candidate]]]:
-    """Split bursts into emitters by centre frequency, then classify each.
+    """Split bursts into emitters, then classify each one separately.
 
     Two emitters in one dwell (a video downlink and a hopping control link,
     say) would otherwise be averaged into one meaningless feature vector.
-    Bursts are grouped greedily: a burst joins the current group while its
-    centre lies within ``cluster_gap_hz`` of the previous burst's centre.
-    That separates emitters that are far apart in frequency while keeping a
-    hopping link, whose hops are much closer together than the gap, in one
-    group.
+
+    Grouping uses two properties, because centre frequency alone is not
+    enough: a 9 MHz burst and a 0.8 MHz burst can share a centre and still be
+    different emitters, and a wideband signal sitting across a hop set would
+    chain every narrowband burst into one group.  A burst therefore joins a
+    group only when its centre is within ``cluster_gap_hz`` of the group's
+    nearest member *and* its bandwidth is within a factor of
+    ``bandwidth_ratio`` of the group's median.  Hopping links stay together
+    because their hops are much closer than the gap and their bursts are all
+    the same width.
 
     Returns one ``(features, candidates)`` pair per group, most bursts first.
     """
     if not bursts:
         return []
     ordered = sorted(bursts, key=lambda b: b.center_freq_hz)
-    groups: list[list[Burst]] = [[ordered[0]]]
-    for burst in ordered[1:]:
-        if burst.center_freq_hz - groups[-1][-1].center_freq_hz <= float(cluster_gap_hz):
-            groups[-1].append(burst)
-        else:
+    groups: list[list[Burst]] = []
+    for burst in ordered:
+        placed = False
+        for group in groups:
+            near = min(abs(burst.center_freq_hz - other.center_freq_hz) for other in group)
+            if near > float(cluster_gap_hz):
+                continue
+            widths = sorted(other.bandwidth_hz for other in group)
+            median = widths[len(widths) // 2]
+            ratio = max(burst.bandwidth_hz, median) / max(min(burst.bandwidth_hz, median), 1e-9)
+            if ratio <= float(bandwidth_ratio):
+                group.append(burst)
+                placed = True
+                break
+        if not placed:
             groups.append([burst])
     out: list[tuple[BurstFeatures, list[Candidate]]] = []
     for group in sorted(groups, key=len, reverse=True):
