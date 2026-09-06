@@ -23,6 +23,7 @@ and can reverse it deliberately instead of by accident.
 | [0009](ADR-0009-localisation-deferred.md) | Localisation is deferred | Proposed |
 | [0010](ADR-0010-band-coverage.md) | Band coverage | Accepted |
 | [0011](ADR-0011-legal-posture.md) | Legal posture | Proposed |
+| [0012](ADR-0012-host-operating-system.md) | Host operating system: Windows for capture, Linux for firmware | Accepted |
 
 The proposed records are the research phase's recommendations. Each names the
 question in `../../QUESTIONS.md` whose answer turns it into Accepted or sends

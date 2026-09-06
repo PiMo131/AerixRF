@@ -12,6 +12,7 @@ Where I have a recommendation it is marked **(rec.)**.
 | 2026-09-06 | Q2 scope | DJI and FPV first, wide sweep as an option | [ADR-0010](docs/decisions/ADR-0010-band-coverage.md) **Accepted** |
 | 2026-09-06 | Q8 recordings, in part | No time for field captures now. Available airframes: DJI Avata, Avata 2, Mini 4 Pro, Neo, possibly a Matrice, not all at once | Build order reordered; see Q13 |
 | 2026-09-06 | Q13 build order | Field captures deferred; prepare what needs no hardware | Reordered below |
+| 2026-09-06 | Windows? | Yes for capture and analysis, no for firmware work | [ADR-0012](docs/decisions/ADR-0012-host-operating-system.md) **Accepted** |
 | 2026-09-06 | Analog FPV, unprompted | An analog FPV rig is available, with no GNSS on board | Video decoding built: `analog/video_decode.py`, `antsdr-tk video` |
 
 Questions still open are numbered as before. The numbering never changes,
