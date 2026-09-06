@@ -9,6 +9,7 @@ decoding inside AERIX. Passive receive only.
 | `research/` | The research record: annotated sources in three languages, the state of the art per signal family, the hardware truth for the E200, dataset catalogue, signal parameter tables, regulation, what the Chinese and Russian/Ukrainian scenes add, and a verification log. Start at `research/README.md`. |
 | `docs/decisions/` | Architecture Decision Records. Accepted ones are in force; Proposed ones are the research phase's recommendations waiting for answers. |
 | `toolkit/` | `antsdr_toolkit`, a Python package and the `antsdr-tk` CLI: E200 capture, SigMF recording and replay, synthetic drone-like scenes, band sweeps, burst detection and features, a heuristic signal-family classifier, a numpy DJI DroneID detector and decoder, analog FPV metrics, the DJI DroneID firmware bridge. Tests run without hardware. |
+| `VALIDATION_PLAN.md` | The next work phase: independently re-audit the existing implementation and peer-review findings first, resolve disagreements through `QUESTIONS.md`, then validate against independent public real RF/IQ datasets before own flight testing. |
 | `QUESTIONS.md` | The questions the maintainer must answer before the next phase, each tied to an ADR. |
 | `research/inbox/` | Drop point for pages and papers the development sandbox cannot reach. |
 
