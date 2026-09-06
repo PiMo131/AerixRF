@@ -697,6 +697,10 @@ def find_bursts(
             zc147_score=zc147, cfo_hz=cfo,
             snr_db=_burst_snr_db(signal, start, C.burst_length(fs, legacy=legacy)),
             t_start_s=start / fs, legacy=legacy,
+            # This gate *is* a root-600 matched filter, so the root is known by
+            # construction rather than measured. Recording it keeps the field
+            # meaningful whichever gate produced the detection.
+            zc_root=C.ZC_ROOTS[0], root_agnostic=False,
         ))
     detections.sort(key=lambda d: d.sample_start)
     _ = cps  # kept for readability of the schedule above
@@ -875,9 +879,38 @@ def process(
     *,
     threshold: float = DEFAULT_THRESHOLD,
     legacy: bool = False,
+    method: str = "both",
 ) -> list[tuple[BurstDetection, DroneIdFrame | None]]:
-    """Find every burst in a capture and try to decode each one."""
-    out: list[tuple[BurstDetection, DroneIdFrame | None]] = []
-    for detection in find_bursts(x, sample_rate_hz, threshold=threshold, legacy=legacy):
-        out.append((detection, decode_burst(x, sample_rate_hz, detection)))
-    return out
+    """Find every burst in a capture and try to decode each one.
+
+    ``method`` chooses the gate:
+
+    ``"zc"``
+        The root-600 matched filter only. Sharpest on OcuSync 2, and blind to
+        any generation using different roots.
+    ``"cp"``
+        Cyclic-prefix structure only (:func:`find_bursts_cp`). Finds a burst
+        whatever its pilots are, which is the only way to see OcuSync 3 and 4.
+    ``"both"``
+        The default: run each and merge, keeping the matched-filter detection
+        where the two agree, because its timing is the finer of the two.
+
+    Merging rather than choosing matters because the two gates fail in
+    opposite directions. The matched filter misses unknown roots entirely; the
+    prefix gate needs a burst long enough to show its schedule and will miss a
+    fragment the correlator still catches.
+    """
+    if method not in ("zc", "cp", "both"):
+        raise ValueError(f"method must be 'zc', 'cp' or 'both', got {method!r}")
+    fs = float(sample_rate_hz)
+    found: list[BurstDetection] = []
+    if method in ("zc", "both"):
+        found.extend(find_bursts(x, fs, threshold=threshold, legacy=legacy))
+    if method in ("cp", "both"):
+        length = C.burst_length(fs, legacy=legacy)
+        already = [d.sample_start for d in found]
+        for detection in find_bursts_cp(x, fs, legacy=legacy):
+            if not any(abs(detection.sample_start - s) < length // 2 for s in already):
+                found.append(detection)
+    found.sort(key=lambda d: d.sample_start)
+    return [(d, decode_burst(x, fs, d)) for d in found]

@@ -33,6 +33,11 @@ def configure(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("recording", help="SigMF stem, .sigmf-meta or .sigmf-data")
     parser.add_argument("--threshold", type=float, default=None, metavar="X",
                         help="Zadoff-Chu correlation threshold, 0 to 1 (default 0.5)")
+    parser.add_argument("--method", choices=("zc", "cp", "both"), default="both",
+                        help="detection gate: zc is the root-600 matched filter, cp is "
+                             "root-agnostic cyclic-prefix structure, both merges them "
+                             "(default). Only cp can see OcuSync 3 and 4 bursts, whose "
+                             "Zadoff-Chu roots differ or vary")
     parser.add_argument("--legacy", action="store_true",
                         help="expect the 8-symbol burst of the Mavic Pro and Mavic 2")
     parser.add_argument("--max-samples", type=int, default=1 << 25, metavar="N",
@@ -78,7 +83,8 @@ def run(args: argparse.Namespace) -> int:
               "implementations assume one", file=sys.stderr)
 
     threshold = rx.DEFAULT_THRESHOLD if args.threshold is None else float(args.threshold)
-    results = rx.process(x, fs, threshold=threshold, legacy=bool(args.legacy))
+    results = rx.process(x, fs, threshold=threshold, legacy=bool(args.legacy),
+                         method=str(args.method))
 
     channel = C.channel_for(info.center_freq_hz)
     print(f"# {info}")
@@ -101,6 +107,7 @@ def run(args: argparse.Namespace) -> int:
         if not args.quiet or ok:
             print(f"\nburst {index}: t={detection.t_start_s * 1e3:8.3f} ms  "
                   f"score {detection.score:.3f}  prefix {detection.confirm_score:.3f}  "
+                  f"root {detection.zc_root if detection.zc_root is not None else '?':>4}  "
                   f"cfo {detection.cfo_hz:+8.0f} Hz  snr {detection.snr_db:5.1f} dB")
             if frame is None:
                 print("  no decode: the burst geometry did not resolve")

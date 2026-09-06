@@ -581,3 +581,38 @@ def test_the_root_agnostic_path_works_at_30_msps():
     found = rx.find_bursts_cp(x, fs)
     assert len(found) == 1 and found[0].sample_start == truth
     assert found[0].zc_root == 600
+
+
+def test_both_gates_report_a_root_so_merging_never_loses_it():
+    """The matched filter knows its root by construction; the other measures it."""
+    from antsdr_toolkit.droneid import receiver as rx
+    x, _truth = _place(cfo_hz=60e3, snr_db=25.0, seed=6)
+    zc = rx.find_bursts(x, 15.36e6)
+    cp = rx.find_bursts_cp(x, 15.36e6)
+    assert zc and cp
+    assert zc[0].zc_root == 600 and zc[0].root_agnostic is False
+    assert cp[0].zc_root == 600 and cp[0].root_agnostic is True
+
+
+@pytest.mark.parametrize("method", ["zc", "cp", "both"])
+def test_every_detection_method_decodes_the_same_frame(method):
+    from antsdr_toolkit.droneid import receiver as rx
+    x, _truth = _place(cfo_hz=60e3, snr_db=25.0, seed=6)
+    results = rx.process(x, 15.36e6, method=method)
+    assert len(results) == 1
+    _detection, frame = results[0]
+    assert frame is not None and frame.crc24_ok and frame.crc16_ok
+    assert frame.serial == "TEST0123456789AB"
+
+
+def test_both_does_not_report_one_burst_twice():
+    """The two gates find the same burst; merging must dedupe it."""
+    from antsdr_toolkit.droneid import receiver as rx
+    x, _truth = _place(cfo_hz=10e3, snr_db=25.0, seed=6)
+    assert len(rx.process(x, 15.36e6, method="both")) == 1
+
+
+def test_an_unknown_method_is_refused():
+    from antsdr_toolkit.droneid import receiver as rx
+    with pytest.raises(ValueError, match="must be 'zc', 'cp' or 'both'"):
+        rx.process(np.zeros(1000, dtype=np.complex64), 15.36e6, method="magic")
