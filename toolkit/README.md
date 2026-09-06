@@ -1,17 +1,46 @@
 # antsdr_toolkit
 
-RF-based drone detection with an **ANTSDR E200** (AD9361, 2x2, up to 56 MHz,
-Ethernet). This package holds the research-independent core:
+RF-based drone detection with an **ANTSDR E200** (AD936x, 70 MHz to 6 GHz,
+Ethernet). Passive receive only.
 
-- `antsdr_toolkit.device` - the `SampleSource` interface, SigMF file replay and
-  synthetic scenes (OFDM-like bursts, LoRa chirps, FM video, GFSK, FHSS).
-- `antsdr_toolkit.io` - SigMF recording/playback (`cf32_le` written; `ci16_le`
-  and `ci8` from the E200 firmware read and scaled to full scale 1.0).
-- `antsdr_toolkit.dsp` - STFT power, Welch PSD, noise floor, 2-D burst
-  detection and burst-set features.
-- `antsdr_toolkit.bridges` - parser and transports for the E200 DJI DroneID
-  firmware output.
-- `antsdr-tk` - command line (`info` and `replay` for SigMF files).
+| Module | What it does |
+|---|---|
+| `antsdr_toolkit.hardware` | The verified E200 facts as data: RF ports, sample-rate limits, host-link ceilings per firmware personality, capture tiers, the 2r2t and clock-calibration procedures |
+| `antsdr_toolkit.device` | `SampleSource` interface, the E200 itself over pyadi-iio, SigMF replay, and synthetic scenes (OFDM bursts, LoRa chirps, FM video, GFSK, hopping) |
+| `antsdr_toolkit.io` | SigMF recording and playback (`cf32_le` written; `ci16_le` and `ci8` from the E200 read and scaled) |
+| `antsdr_toolkit.dsp` | STFT power, Welch PSD, noise floor, 2-D burst detection, burst-set features, cyclostationary numerology tests |
+| `antsdr_toolkit.scan` | Band plans, dwell planner, sweeper, and the provisional RF detection event schema |
+| `antsdr_toolkit.classify` | The signature table (26 link families with their sources) and the heuristic scorer |
+| `antsdr_toolkit.droneid` | DJI DroneID: constants, Zadoff-Chu pilots, coding, a burst synthesiser and a receiver that decodes |
+| `antsdr_toolkit.bridges` | Parser and transports for the E200 DroneID firmware's own output |
+
+### Commands
+
+```sh
+antsdr-tk info capture.sigmf-meta        # what is in a recording
+antsdr-tk replay capture --chunk 65536   # stream it in chunks
+antsdr-tk capture --freq 2.4295e9 --rate 15.36e6 --seconds 2 --dry-run out
+antsdr-tk sweep --band ism-2g4 --file capture --runs 2
+antsdr-tk classify capture --band ism-2g4
+antsdr-tk droneid capture --json result.json
+```
+
+### The hardware facts that shape everything
+
+- **RX1 is the SMA connector, RX2 the internal u.FL.** Both come from one
+  AD936x and share its receive oscillator, so they are phase-coherent, but the
+  second one needs a pigtail and the firmware's `2r2t` mode
+  (`antsdr-tk capture --help` prints the `fw_setenv` sequence).
+- **Continuous streaming is about 11 to 13 MSPS on the factory IIO firmware**
+  (CPU-bound in `iiod`), about 20 MSPS on the UHD personality, with 29.6 MSPS
+  the hard wire limit of 1 GbE. Snapshot capture reaches 61.44 MSPS on both.
+  The toolkit calls these the `continuous` and `snapshot` capture tiers and
+  records which one a capture used.
+- **DroneID needs 15.36, 30.72 or 61.44 MSPS**, never 20 MSPS: the rate must
+  be a multiple of the 15 kHz subcarrier spacing.
+
+Licence policy for reused work is `../docs/decisions/ADR-0003`; the research
+behind these numbers is in `../research/`.
 
 Conventions: IQ is `np.complex64`, shape `(n,)` or `(channels, n)`; rates and
 frequencies are floats in Hz; frequency axes are absolute Hz; powers are dB
