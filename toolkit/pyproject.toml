@@ -1,0 +1,40 @@
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "antsdr-toolkit"
+version = "0.1.0"
+description = "RF drone detection with an ANTSDR E200 (AD9361): SigMF I/O, synthetic scenes, burst DSP and DroneID bridges"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "numpy>=1.24",
+    "scipy>=1.10",
+    "sigmf>=1.2",
+]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Topic :: Scientific/Engineering",
+    "Topic :: Communications :: Ham Radio",
+]
+
+[project.optional-dependencies]
+e200 = ["pyadi-iio>=0.0.17", "pylibiio"]
+zmq = ["pyzmq"]
+viz = ["matplotlib"]
+dev = ["pytest", "ruff"]
+
+[project.scripts]
+antsdr-tk = "antsdr_toolkit.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["antsdr_toolkit*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
