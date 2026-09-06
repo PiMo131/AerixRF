@@ -505,3 +505,125 @@ def test_cli_sweep_with_fake_e200_driver(monkeypatch, capsys):
     rows = [ln for ln in out.splitlines() if ln.strip() and not ln.startswith(("#", " " * 4 + "c"))]
     assert any("ofdm-burst:0.75" in ln for ln in rows)
     assert out.index(f"{busy_fc / 1e6:12.3f}") < out.index(f"{quiet_fc / 1e6:12.3f}")
+
+
+# ------------------------------------------- classifier integration (H6)
+
+
+def test_the_sweep_names_emitters_without_monkey_patching_anything():
+    """The hook has to work through the real import path, not a test fixture.
+
+    The version this replaces looked up ``classify_dwell`` on
+    ``antsdr_toolkit.classify``, which that module has never exported, so the
+    families column was always empty and no test noticed because every test
+    supplied its own ``classifier``.
+    """
+    import numpy as np
+
+    from antsdr_toolkit import cli_sweep
+    from antsdr_toolkit.device import synthetic as syn
+    from antsdr_toolkit.scan.sweep import analyse_dwell
+
+    assert cli_sweep.classifier is None, "this test must not use the override"
+
+    fs, fc = 15.36e6, 2429.5e6
+    rng = np.random.default_rng(7)
+    scene = syn.Scene(fs, fc, 0.12, rng, noise_power_db=-60.0)
+    t = 0.002
+    while t < 0.11:
+        scene.add(syn.lora_chirps(fs, 812.5e3, 7, 21, rng), t_start_s=t,
+                  freq_offset_hz=5e6, snr_db=22.0, label="elrs", bandwidth_hz=812.5e3)
+        t += 4e-3
+    samples = syn.SyntheticSource.from_scene(scene).read(int(fs * 0.12))
+
+    result = analyse_dwell(samples, fs, fc)
+    families = cli_sweep._families(result)
+    assert families, "the classifier hook produced nothing on a scene with emitters"
+    for name, score in families:
+        assert isinstance(name, str) and name
+        assert 0.0 <= score <= 1.0
+
+
+def test_classification_is_per_emitter_not_per_dwell():
+    """A dwell holds several transmitters, and each gets its own verdict.
+
+    Two emitters far apart in frequency must not be averaged into one family
+    claim. This is the design question behind H6, and the flat
+    ``classify_dwell(result) -> [(family, confidence)]`` interface could not
+    express the answer.
+    """
+    import numpy as np
+
+    from antsdr_toolkit import cli_sweep
+    from antsdr_toolkit.device import synthetic as syn
+    from antsdr_toolkit.scan.sweep import analyse_dwell
+
+    fs, fc = 15.36e6, 2429.5e6
+    rng = np.random.default_rng(11)
+    scene = syn.Scene(fs, fc, 0.12, rng, noise_power_db=-60.0)
+    t = 0.002
+    while t < 0.11:
+        scene.add(syn.lora_chirps(fs, 812.5e3, 7, 21, rng), t_start_s=t,
+                  freq_offset_hz=5.5e6, snr_db=22.0, label="a", bandwidth_hz=812.5e3)
+        t += 4e-3
+    t = 0.003
+    while t < 0.11:
+        scene.add(syn.gfsk_burst(fs, 64e3, 300, rng), t_start_s=t,
+                  freq_offset_hz=-6.0e6, snr_db=20.0, label="b", bandwidth_hz=200e3)
+        t += 10e-3
+    samples = syn.SyntheticSource.from_scene(scene).read(int(fs * 0.12))
+
+    from antsdr_toolkit.classify.heuristic import classify_clusters
+
+    result = analyse_dwell(samples, fs, fc)
+    groups = classify_clusters(result.bursts, window_s=result.duration_s,
+                               band_hint="ism-2g4", top_k=1)
+    assert len(groups) >= 2, f"two emitters clustered into {len(groups)} group(s)"
+
+    # And every name that comes back belongs to exactly one of those groups:
+    # the dwell is never collapsed into a single averaged claim.
+    families = cli_sweep._families(result)
+    assert len(families) <= len(groups)
+    # The narrowband link here is not in the signature table, so it is
+    # correctly left unnamed rather than given the other emitter's label.
+    assert len(families) >= 1
+
+
+def test_an_empty_dwell_names_nothing():
+    """No bursts, no claims."""
+    import numpy as np
+
+    from antsdr_toolkit import cli_sweep
+    from antsdr_toolkit.scan.sweep import analyse_dwell
+
+    rng = np.random.default_rng(0)
+    noise = ((rng.standard_normal(200_000) + 1j * rng.standard_normal(200_000))
+             / np.sqrt(2)).astype(np.complex64)
+    assert cli_sweep._families(analyse_dwell(noise, 15.36e6, 2429.5e6)) == []
+
+
+def test_an_explicit_classifier_still_overrides_the_built_in_one():
+    """The extension point a trained model would use (ADR-0007)."""
+    import numpy as np
+
+    from antsdr_toolkit import cli_sweep
+    from antsdr_toolkit.scan.sweep import analyse_dwell
+
+    rng = np.random.default_rng(0)
+    noise = ((rng.standard_normal(50_000) + 1j * rng.standard_normal(50_000))
+             / np.sqrt(2)).astype(np.complex64)
+    result = analyse_dwell(noise, 15.36e6, 2429.5e6)
+    original = cli_sweep.classifier
+    try:
+        cli_sweep.classifier = lambda _r: [("pretend", 0.9)]
+        assert cli_sweep._families(result) == [("pretend", 0.9)]
+    finally:
+        cli_sweep.classifier = original
+
+
+def test_the_band_hint_matches_the_dwell_centre():
+    from antsdr_toolkit import cli_sweep
+    assert cli_sweep._band_hint(2429.5e6) == "ism-2g4"
+    assert cli_sweep._band_hint(5800e6) == "ism-5g8"
+    assert cli_sweep._band_hint(868e6) == "ism-868"
+    assert cli_sweep._band_hint(1200e6) is None

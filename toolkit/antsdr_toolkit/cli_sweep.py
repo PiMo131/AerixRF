@@ -13,10 +13,17 @@ dwell at its own centre (retuning is impossible, so ``--band``/``--freqs``
 only select which targets are reported).  ``--rate`` defaults to 20 MSPS,
 the realistic single-channel host rate of the E200 over 1 GbE.
 
-Family classification is a placeholder: :data:`classifier` (or a module
-``antsdr_toolkit.classify`` exposing ``classify_dwell(result) ->
-[(family, confidence), ...]``) is called per dwell when present, otherwise
-the column shows ``-``.
+Family classification runs at **emitter** level, not dwell level. A dwell in
+the 2.4 GHz band routinely holds Wi-Fi, a control link and a video downlink at
+once, so the bursts are clustered by centre frequency and bandwidth and each
+cluster is scored on its own timing and shape. The families column lists the
+best candidate for each emitter found, so more than one entry means more than
+one transmitter, not more than one guess about the same signal.
+
+An earlier version looked up ``classify_dwell`` on ``antsdr_toolkit.classify``,
+which that module has never exported, so the column was always ``-``. Setting
+:data:`classifier` still overrides the built-in scorer, which is how a trained
+model gets dropped in later (``ADR-0007``).
 
 Sources: https://github.com/lukeswitz/fpv-sdr (scanner defaults: settle
 0.08 s, dwell 0.06 s, usable 0.8, 4096-bin PSD),
@@ -42,7 +49,7 @@ if TYPE_CHECKING:  # pragma: no cover - typing only
 __all__ = ["classifier", "register", "run_sweep"]
 
 classifier: Callable[[DwellResult], Sequence[tuple[str, float]]] | None = None
-"""Optional hook: ``classifier(result) -> [(family, confidence), ...]`` best first."""
+"""Override the built-in scorer: ``classifier(result) -> [(family, confidence), ...]``."""
 
 _E200_MODULE = "antsdr_toolkit.device.e200"
 _E200_CLASS_NAMES = ("E200Source", "AntsdrE200Source", "AntsdrSource", "IioSource")
@@ -144,16 +151,51 @@ def _open_e200(uri: str, sample_rate_hz: float, center_freq_hz: float,
         raise ValueError(unavailable.format(exc=exc)) from exc
 
 
+def _band_hint(center_freq_hz: float) -> str | None:
+    """Which signature band a dwell centre falls in, for the classifier."""
+    if 2.4e9 <= center_freq_hz <= 2.5e9:
+        return "ism-2g4"
+    if 5.1e9 <= center_freq_hz <= 6.0e9:
+        return "ism-5g8"
+    if 8.5e8 <= center_freq_hz <= 9.3e8:
+        return "ism-868"
+    return None
+
+
 def _families(result: DwellResult) -> list[tuple[str, float]]:
-    fn = classifier
-    if fn is None:
-        try:
-            fn = getattr(importlib.import_module("antsdr_toolkit.classify"), "classify_dwell", None)
-        except ImportError:
-            fn = None
-    if fn is None:
+    """Name the emitters in one dwell, best candidate per emitter.
+
+    A dwell is not one signal. In the 2.4 GHz band it routinely holds Wi-Fi, a
+    control link and a video downlink at once, so the classifier runs at
+    *emitter* level: bursts are clustered by centre frequency and bandwidth
+    first, and each cluster is scored on its own timing and shape. Returning a
+    single flat list of families for a whole dwell, which the placeholder this
+    replaces did, mixes the statistics of unrelated transmitters and produces
+    a confident average of nothing.
+
+    ``classifier`` still overrides this when a caller sets it, which is how a
+    trained model would be dropped in later (``ADR-0007``).
+    """
+    if classifier is not None:
+        return [(str(name), float(conf)) for name, conf in classifier(result)]
+    if not result.bursts:
         return []
-    return [(str(name), float(conf)) for name, conf in fn(result)]
+    from .classify.heuristic import classify_clusters
+
+    groups = classify_clusters(
+        result.bursts, window_s=result.duration_s,
+        band_hint=_band_hint(result.center_freq_hz), top_k=1)
+    out: list[tuple[str, float]] = []
+    for _features, candidates in groups:
+        # The scorer returns an "unknown" pseudo-family when nothing clears
+        # its threshold. That is the honest answer, and it must not travel as
+        # a family *name*: `scan.events` documents `family` as None when
+        # unclassified, and a consumer reading the string "unknown" would
+        # take it for a claim about the waveform. The burst is still emitted;
+        # only the label is withheld.
+        if candidates and candidates[0].family != "unknown":
+            out.append((candidates[0].display, float(candidates[0].score)))
+    return out
 
 
 def _format_row(result: DwellResult, families: Sequence[tuple[str, float]]) -> str:

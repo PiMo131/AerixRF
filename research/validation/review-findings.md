@@ -13,7 +13,7 @@ Verdicts: **CONFIRMED**, **PARTLY**, **REJECTED**, **UNRESOLVED**.
 | H3 | Snapshot capture and SigMF time semantics | in progress | |
 | H4 | Retune settling and double discard | in progress | |
 | H5 | Live sweep default rate versus firmware | in progress | |
-| H6 | Classifier integration from the sweep CLI | in progress | |
+| H6 | Classifier integration from the sweep CLI | **CONFIRMED**, and the design question answered against the placeholder | sweep now classifies per emitter; "unknown" no longer travels as a family name |
 | H7 | DroneID FEC and turbo capability claims | in progress | |
 | H8 | Synthetic tests versus real compatibility | in progress | |
 | H9 | AERIX observation and event contract | in progress | |
@@ -181,3 +181,73 @@ subcarriers and PAL chroma are inside Nyquist at all.
 `README.md` (both items), `research/README.md`, `research/sources.md`, and the
 scope wording in `analog/video_decode.py` and `cli_video.py`. `landscape.md`
 was left alone: it was right.
+
+---
+
+## H6 — Classifier integration from the sweep CLI
+
+**Reviewer claim.** `cli_sweep` may look up a function that
+`antsdr_toolkit.classify` does not export.
+
+**Verdict: CONFIRMED.** `cli_sweep.py` called
+
+```python
+getattr(importlib.import_module("antsdr_toolkit.classify"), "classify_dwell", None)
+```
+
+and `classify/__init__.py` exports `classify`, `classify_clusters`, `margin`,
+`membership`, `SIGNATURES`, `Signature`, `by_family`, `families` and
+`signatures_for_band`. It has never exported `classify_dwell`. The lookup
+returned `None` on every run and the families column was always `-`.
+
+No test caught it because every sweep test supplied its own `classifier`
+override, so the real import path was never exercised. That is the shape of
+the problem rather than an accident: a hook that only tests reach is a hook
+that is not integrated.
+
+### The design question, which matters more than the missing symbol
+
+The plan asked whether classification belongs at dwell level or emitter level,
+and told this audit not to preserve the flat interface merely to keep a
+placeholder working. The answer is emitter level, and the evidence is in the
+toolkit's own end-to-end demo: a single 15.36 MHz dwell there contains three
+distinct emitters, and the earlier analog and DroneID work showed the same
+thing in every realistic scene. In the 2.4 GHz band a dwell routinely holds
+Wi-Fi, a control link and a video downlink at once.
+
+`classify_dwell(result) -> [(family, confidence), ...]` cannot express that. A
+flat list per dwell mixes the burst statistics of unrelated transmitters, and
+the result is a confident average of nothing. So the interface was replaced
+rather than repaired: `_families` now clusters bursts by centre frequency and
+bandwidth and scores each cluster on its own timing and shape, returning the
+best candidate **per emitter**. More than one entry now means more than one
+transmitter, not more than one guess about the same signal.
+
+`classifier` survives as the override, which is how a trained model gets
+dropped in later (`ADR-0007`).
+
+### A second defect, found by turning the hook on
+
+With the hook finally firing, an existing test failed because it asserted
+`family is None` in every emitted event. That assertion had been encoding the
+bug. Fixing the test would have been the wrong move: the new value was the
+string `"unknown"`, which is the scorer's pseudo-family for "nothing cleared
+the threshold", and `scan/events.py` documents `family` as `None` when
+unclassified. Letting the string travel would have contradicted the event
+schema's own contract, and a downstream consumer reading `"unknown"` would
+take it for a claim about the waveform.
+
+`_families` now drops the `unknown` candidate. The burst is still emitted; only
+the label is withheld, which is the difference between "we saw something we
+cannot name" and "we saw an unknown".
+
+### Tests added
+
+Five, none using the override: the hook produces names through the real import
+path; two separated emitters produce two clusters and are never collapsed into
+one averaged claim; noise produces nothing; an explicit `classifier` still
+overrides; and the band hint matches the dwell centre.
+
+### Question raised
+
+None.
