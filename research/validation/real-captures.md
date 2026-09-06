@@ -170,6 +170,58 @@ matched: the reference's number is a rounding of the toolkit's, not the other
 way round. If a future capture ever shows the encoding is not radians × 10⁷,
 this is the paragraph to revisit.
 
+## A fifth defect, in the analysis rather than the code
+
+After the four above were fixed, the same captures were used to ask a different
+question: what is the *second* emission in `mini2_sm`, the one the toolkit
+detects and cannot decode? Two claims came out of that, and one of them was
+wrong in exactly the way this document is about.
+
+**The wrong one.** Burst start times in `mini2_sm` are spaced 14 837 to 14 980
+samples apart at 15.36 MSPS, and every larger gap is a whole multiple of that
+to within 1.3 %: 1, 1, 3, 4, 1, 1, 1, 1, 1 slots. That is a clean, regular
+grid of 970 us, and it looked like a real and useful finding - a detector that
+knows the grid can predict where the next burst will be.
+
+It is the recorder's chunk size. `mini2_sm` is 727 500 samples, exactly 15 x
+48 500, and 48 500 samples at 50 MSPS is 970.0 us. Every burst starts between
+8002 and 8333 samples into its own chunk, a spread of 6.6 us in a 970 us
+window. The file is triggered extractions concatenated, and the "grid" is the
+trigger, not the drone.
+
+What caught it was an inconsistency that had nothing to do with timing: the ten
+frames carry four distinct `gps_time` values spanning 19 990 ms, in a file
+14.55 ms long. Twenty seconds of aircraft time cannot fit in fifteen
+milliseconds of samples. The reference implementation parses that field the
+same way and gets the same values, so it was not a decode error, and once the
+file could not be contiguous the grid had an obvious other owner.
+
+This is the same error as the frequency offset, one level up: a periodicity was
+measured correctly and attributed to the wrong system. There it was timing read
+as frequency; here it was the capture apparatus read as the transmitter.
+
+**The one that survived, on better evidence.** The second emission is a
+genuinely separate transmission rather than the DroneID burst's spectral
+splatter. The first argument for that was a time-overlap test - only 7.1 % of
+its activity coincided with a DroneID burst - which, given the above, was
+measuring the extractor's trigger and was worthless. The chunk structure
+settles it properly: chunks 0, 1, 2, 5 and 9-14 hold the DroneID band at +27 dB
+with the second band at -1.5 dB; chunks 3, 4, 6, 7 and 8 hold the second band
+at +18.5 dB with the DroneID band at -3.6 dB. Perfect anti-correlation. The
+recorder triggered on two different signals and gave each its own chunks.
+
+Its numerology is **not** established, and the negative control is why. A
+cyclic-prefix lag sweep says 15 kHz subcarrier spacing - but the same sweep
+says 15 kHz for a band of the same capture that is empty, at 4.66x lift against
+the emission's 5.09x. A method that gives nearly the same answer for a real
+signal and for nothing has not measured anything. The positive control (the
+DroneID band, truth 15 kHz) scores 7.50x, so the method works; it simply has no
+resolving power on a signal this weak over a record this short.
+
+Recorded here rather than quietly dropped, because the near-miss is the useful
+part: the grid was measured, believed, and written up before the timestamps
+contradicted it.
+
 ## The blind spot, stated plainly
 
 Every one of the four defects above survived a 554-test suite, and they
