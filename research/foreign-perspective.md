@@ -25,7 +25,7 @@ The foreign-language material is the weakest part of the evidence base, for mech
 
 | Limit | Detail |
 | --- | --- |
-| Reachable hosts | Only `github.com` and `pypi.org` could be fetched by the research agents. For every other host the evidence is a search-engine snippet, which [sources.md](sources.md) marks as **snippet** ("only a search-engine snippet was available because the development sandbox cannot reach that host"). |
+| Reachable hosts | In practice only GitHub-hosted material could be fetched or cloned; for every other host the evidence is a search-engine snippet, which [sources.md](sources.md) marks as **snippet** ("only a search-engine snippet was available because the development sandbox cannot reach that host"). Every **verified** foreign entry below is a `github.com` URL. |
 | Search budget | Three foreign lenses ran: `web-zh-community` (26 searches, 26 sources), `academic-zh` (26 searches, 25 sources), `web-ru-community` (26 searches, 25 sources) - `finders_all.json`. |
 | Verified vs snippet | Chinese community lens: 8 verified / 18 snippet. Chinese academic lens: 8 verified / 17 snippet. Russian lens: 14 verified / 11 snippet. The Russian lens scores better only because one contributor mirrored Telegram channels into a Git repository, which the sandbox could clone. |
 | Bibliography share | [sources.md](sources.md) records 296 unique sources: 208 English, **50 Chinese, 24 Russian, 8 Ukrainian**, 6 Dutch. |
@@ -42,11 +42,15 @@ channel set (`o4-firmware-channels`) and the OcuSync generation PHY summary (`oc
 
 ### 1.1 The one group that matters: Zhejiang University
 
-Almost all usable Chinese academic contribution comes from one laboratory: the Key Laboratory of
-Collaborative Sensing and Autonomous Unmanned Systems / State Key Laboratory of Industrial Control
-Technology at Zhejiang University (俞宁宁, 毛盛健, 周成伟, 孙国威, 史治国, 陈积明, and 任俊宇 on the
-second dataset), publishing through 电子与信息学报 (*Journal of Electronics and Information
-Technology*, JEIT). Their contribution is **data, not algorithms**.
+Almost all usable Chinese academic contribution comes from one group at Zhejiang University,
+publishing through 电子与信息学报 (*Journal of Electronics and Information Technology*, JEIT).
+DroneRFa is by 俞宁宁, 毛盛健, 周成伟, 孙国威, 史治国 and 陈积明 of the Key Laboratory of
+Collaborative Sensing and Autonomous Unmanned Systems, with Chengde police
+(<https://jeit.ac.cn/cn/article/doi/10.11999/JEIT230570>); DroneRFb-DIR is by 任俊宇, 俞宁宁,
+周成伟, 史治国 and 陈积明 across the ZJU State Key Laboratory of Industrial Control, Hangzhou Dianzi
+University and the ZJU Jinhua Institute
+(<https://www.scidb.cn/en/detail?dataSetId=84cf9101e739402784b1396783881202>). Their contribution is
+**data, not algorithms**.
 
 **DroneRFa: 用于侦测低空无人机的大规模无人机射频信号数据集** ("DroneRFa: a large-scale drone RF
 signal dataset for detecting low-altitude drones"), JEIT 2024, 46(4):1147-1156,
@@ -183,22 +187,23 @@ The earliest public Chinese analysis of the DJI broadcast is **独角兽暑期�
 small-packet broadcasts distinct from the wide video downlink and the uplink control channel and
 hypothesised they carried drone identification and location - predating the RUB-SysSec work.
 
-The current thread is a long 2025 CSDN series by **leegang12**, "通信算法之NNN" ("Communication
-algorithms no. NNN"), of which the most relevant entries are:
+The current thread is a long 2025 CSDN series by **leegang12** under the running heading
+"通信算法之NNN" ("Communication algorithms no. NNN"). Only post #292's full title was captured; the
+rest are indexed here by the subject the search snippets attribute to them, not by a verbatim title:
 
-| Post | Original title (gloss) | URL |
+| Post | Subject attributed to it | URL |
 | --- | --- | --- |
-| #254 | 大疆O2图传物理层 (O2 video-link PHY) | <https://blog.csdn.net/leegang12/article/details/146934408> |
+| #254 | O2 video-link PHY | <https://blog.csdn.net/leegang12/article/details/146934408> |
 | #256 | Remote ID | <https://blog.csdn.net/leegang12/article/details/146936478> |
-| #258 | 大疆 RID 帧格式 (DJI RID frame format) | <https://blog.csdn.net/leegang12/article/details/146977731> |
-| #264 | O2 逆向 (O2 reverse engineering) | <https://blog.csdn.net/leegang12/article/details/147245156> |
-| #267 | DroneID 640 ms 周期 (640 ms period) | <https://blog.csdn.net/leegang12/article/details/147321812> |
-| #281 | 开源 DroneID 项目问题 (open-source DroneID project issues) | <https://blog.csdn.net/leegang12/article/details/148402169> |
-| #283 | 速率解匹配与 Turbo 译码 (rate de-matching, Turbo decoding) | <https://blog.csdn.net/leegang12/article/details/148471288> |
-| #292 | 大疆DJI云哨系统-DroneID物理层协议解析-O1/O2/O3/O4机型都可以CRC正确 ("DJI Yunshao/Aeroscope system - DroneID PHY analysis, CRC correct on O1/O2/O3/O4") | <https://blog.csdn.net/leegang12/article/details/149397403> |
-| #296 | 物理层协议破译 (PHY protocol from mass captures) | <https://blog.csdn.net/leegang12/article/details/149822783> |
-| #305 | 解调门限 (demodulation threshold) | <https://blog.csdn.net/leegang12/article/details/149977416> |
-| #320 | 数据包类型 (packet types) | <https://blog.csdn.net/leegang12/article/details/150761143> |
+| #258 | DJI RID frame format | <https://blog.csdn.net/leegang12/article/details/146977731> |
+| #264 | O2 reverse engineering | <https://blog.csdn.net/leegang12/article/details/147245156> |
+| #267 | DroneID 640 ms period | <https://blog.csdn.net/leegang12/article/details/147321812> |
+| #281 | Open-source DroneID project issues | <https://blog.csdn.net/leegang12/article/details/148402169> |
+| #283 | Rate de-matching and Turbo decoding | <https://blog.csdn.net/leegang12/article/details/148471288> |
+| #292 | 大疆DJI云哨系统-DroneID物理层协议解析-O1/O2/O3/O4机型都可以CRC正确 ("DJI Yunshao/Aeroscope system - DroneID PHY analysis, CRC correct on O1/O2/O3/O4 models") | <https://blog.csdn.net/leegang12/article/details/149397403> |
+| #296 | PHY protocol derived from mass captures | <https://blog.csdn.net/leegang12/article/details/149822783> |
+| #305 | Demodulation threshold | <https://blog.csdn.net/leegang12/article/details/149977416> |
+| #320 | DroneID packet types | <https://blog.csdn.net/leegang12/article/details/150761143> |
 
 What the snippets contain: DroneID at 30.72 MS/s, 601 occupied subcarriers, 15 kHz spacing, a
 Zadoff-Chu sequence in the 4th OFDM symbol, about 10 MHz occupied (15.56 MHz with guards), bursts
@@ -423,9 +428,11 @@ Two consequences for the toolkit. First, **GB 42590 additionally permits Wi-Fi b
 open Chinese receivers monitors because they are all 2.4 GHz Wi-Fi chips - but which an E200 covers
 natively. Second, **the two open GB 46750 implementations disagree on the timestamp encoding**:
 XC-RemoteID's README says 6-byte Unix milliseconds, while the esp32-crid-sim encoder writes a 4-byte
-count of seconds since 2019-01-01. The official text
-(<https://www.caac.gov.cn/XXGK/XXGK/BZGF/BZGF_GJBZ/202601/t20260120_229783.html>, published
-2025-10-31, effective 2026-05-01) must settle it before anyone writes a decoder.
+count of seconds since 2019-01-01. The standard was published 2025-10-31 and takes effect
+2026-05-01, with a 12-month retrofit window and a 36-month transition, network reporting mandatory
+and ADS-B explicitly forbidden (<https://github.com/luolitao/XC-RemoteID>); its official text at
+<https://www.caac.gov.cn/XXGK/XXGK/BZGF/BZGF_GJBZ/202601/t20260120_229783.html> must settle the
+timestamp question before anyone writes a decoder.
 
 ### 2.6 Accessories and sourcing
 
@@ -486,11 +493,14 @@ There is no open RU/UA IQ-level classifier. The methods actually used are:
   and what the 2025 Мілітарний buyer's guide describes, adding that "FPV most often works in 1.2, 2.4,
   3.3 and 5.8 GHz" and listing "Xenon-L" covering 0.9, 1.2, 2.4 and 4.9-6.0 GHz
   (<https://militarnyi.com/uk/special-projects/yak-vybraty-detektor-droniv-oglyad-modelej-i-klyuchovi-kryteriyi-vyboru/>).
-  SKYNOVA's "Перець" covers 915 MHz, 2.4 GHz and 5.8 GHz (same source).
-* **Manual spectrum reading.** The Kyiv 2024 field instruction "Інструкція для розрахунку
-  протиповітряної оборони: детектор дронів на базі аналізатора спектра tinySA Ultra" uses a tinySA
-  Ultra on firmware v3.2.0 with multi-band view, highlighting of drone-like signals and an alarm
-  (<https://rtotech.org/wp-content/uploads/2025/01/Tiny_SA_drone.pdf>). The Russian comparison
+  SKYNOVA's "Перець" covers 915 MHz, 2.4 GHz and 5.8 GHz
+  (<https://www.martial.com.ua/shop/portatyvni-detektory-droniv/detektor-droniv-sense-3-trydiapazonnyj-videoskaner-fpv-droniv-1-2-3-3-5-8-hhts/>,
+  <https://militarnyi.com/uk/special-projects/yak-vybraty-detektor-droniv-oglyad-modelej-i-klyuchovi-kryteriyi-vyboru/>).
+* **Manual spectrum reading.** A Ukrainian field instruction from Kyiv, 2024 ("Instructions for
+  anti-UAV crew: drone detector based on tinySA Ultra spectrum analyzer") uses a tinySA Ultra on
+  firmware v3.2.0 with multi-band view, highlighting of drone-like signals and an alarm
+  (<https://rtotech.org/wp-content/uploads/2025/01/Tiny_SA_drone.pdf>; tinySA firmware source at
+  <https://github.com/erikkaashoek/tinySA>). The Russian comparison
   "Анализатор спектра или детектор дронов: что выбрать" concludes that SDR analysers such as HackRF
   show digital signal structure better while sweep analysers (tinySA ZS407) measure the level and
   frequency of analog carriers more accurately, and that signature detectors passively look for
@@ -514,7 +524,7 @@ There is no open RU/UA IQ-level classifier. The methods actually used are:
 | unnamed multi-band (UA) | 433/450/750/868/915/921 MHz plus SDR 2.4 GHz with ELRS (LoRa) scanning | 500-2000 m | same |
 | Булат v3 / v4 (RU) | handheld omnidirectional | up to 1.5 km, up to 15 h autonomy; in a field test against 5.8 GHz video + 915 MHz ELRS **the 5.8 GHz response was delayed** | <https://4vision.ru/blog/portativnyj-vsenapravlennyj-detektor-dronov-bulat-v3-obzor-modeli>, <https://uralsistems.ru/blog/bulat-v4-obzor-tehnicheskih-harakteristik-i-vozmozhnostej>, <https://static.insales-cdn.com/files/1/2222/36325550/original/detektor-bpla-bulat-v4_quickguide_main.pdf> |
 | Сокол-10 / Skydroid S-10 (RU) | 300 MHz - 6 GHz | - | <https://4vision.ru/blog/portativnyj-vsenapravlennyj-detektor-dronov-bulat-v3-obzor-modeli> |
-| Мастерок-4 (ОКБ «Чистое небо», RU) | 300 MHz - 7.2 GHz | spectrum analyser with DF, networking, laptop mode | [techuav mirror](https://github.com/techuav/techuav.github.io/blob/main/docs/ТЭЧ_БпЛА_FPV/Чат/РЭР_и_подразделениям_про_борьбе_с_дронами_-_изделие_спектроанализатор_радиодиапазона_Мастерок-4_от_О.html) |
+| Мастерок-4 (OKB «Чистое небо», RU) | 300 MHz - 7.2 GHz | spectrum analyser with DF, networking, laptop mode | [techuav mirror](https://github.com/techuav/techuav.github.io/blob/main/docs/ТЭЧ_БпЛА_FPV/Чат/РЭР_и_подразделениям_про_борьбе_с_дронами_-_изделие_спектроанализатор_радиодиапазона_Мастерок-4_от_О.html) |
 | «Тень» (RU) | 100 MHz - 10 GHz | promises DF, networked operation, laptop front-end | same |
 | Дроноскоп 4.7 (RU) | to 7.3 GHz | one of only two things named as able to see FPV video above 6.2 GHz (the other is an Arinst SSA R3) | [techuav mirror](https://github.com/techuav/techuav.github.io) |
 | Alissum / Алиссум (КВАДРО КОД, RU) | 4800-6200 MHz | full sweep with signal analysis in 3-5 s; vendor claims neural-network recognition of UAV signal types that rejects Wi-Fi; Alissum-6 19,000 RUB, about 1 km line of sight, under 90 g; Alissum-8 62,000 RUB; **over 130 FPV channels in the 5.8 GHz band as of early 2025** | <https://4code.ru/publications/band5800> |
