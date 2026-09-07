@@ -627,3 +627,16 @@ def test_the_band_hint_matches_the_dwell_centre():
     assert cli_sweep._band_hint(5800e6) == "ism-5g8"
     assert cli_sweep._band_hint(868e6) == "ism-868"
     assert cli_sweep._band_hint(1200e6) is None
+
+
+
+def test_live_sweep_defaults_fit_iio_and_high_rates_fail_before_driver(monkeypatch):
+    parser = argparse.ArgumentParser()
+    cli_sweep.register(parser.add_subparsers())
+    args = parser.parse_args(['sweep', '--uri', 'ip:example', '--band', 'ism-2g4'])
+    assert args.rate == 10e6
+    monkeypatch.setattr(cli_sweep, '_open_e200',
+                        lambda *a: pytest.fail('driver must not open for an unsupported rate'))
+    args.rate = 20e6
+    with pytest.raises(ValueError, match='UHD is not implemented'):
+        cli_sweep.run_sweep(args)

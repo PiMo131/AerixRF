@@ -77,8 +77,8 @@ def register(subparsers: argparse._SubParsersAction) -> None:
     how = p.add_argument_group("receiver and timing")
     how.add_argument("--uri", metavar="URI", help="E200 IIO uri, e.g. ip:192.168.1.10")
     how.add_argument("--file", metavar="PATH", help="SigMF recording to replay instead of hardware")
-    how.add_argument("--rate", type=float, default=20e6, metavar="HZ",
-                     help="sample rate in Hz (default 20e6, the E200 1 GbE host ceiling)")
+    how.add_argument("--rate", type=float, default=10e6, metavar="HZ",
+                     help="sample rate in Hz (default 10e6, conservative stock IIO rate)")
     how.add_argument("--gain", type=float, default=None, metavar="DB", help="E200 RX gain in dB")
     how.add_argument("--usable", type=float, default=0.8, metavar="FRAC",
                      help="usable fraction of the sample rate per dwell (default 0.8)")
@@ -261,6 +261,14 @@ def run_sweep(args: argparse.Namespace) -> int:
 
         source: SampleSource = SigmfFileSource(args.file)
     else:
+        from .hardware import E200
+
+        ceiling = E200.host_ceiling(1)
+        if args.rate > ceiling:
+            raise ValueError(
+                f"live sweep uses stock IIO: {args.rate / 1e6:g} MSPS exceeds its "
+                f"{ceiling / 1e6:g} MSPS host budget; use --rate 10e6 or replay "
+                "a recording with --file. UHD is not implemented by this driver")
         source = _open_e200(args.uri, args.rate, plan[0].center_freq_hz, args.gain)
 
     rng = np.random.default_rng(args.seed) if args.seed is not None else None
@@ -320,3 +328,4 @@ def run_sweep(args: argparse.Namespace) -> int:
             writer.close()
         source.close()
     return 0
+

@@ -141,6 +141,8 @@ class BurstDetection:
             "cfo_hz": round(float(self.cfo_hz), 1),
             "snr_db": round(float(self.snr_db), 1),
             "legacy": bool(self.legacy),
+            "zc_root": self.zc_root,
+            "root_agnostic": bool(self.root_agnostic),
         }
 
 
@@ -1155,3 +1157,4 @@ def process(
                 found.append(detection)
     found.sort(key=lambda d: d.sample_start)
     return [(d, decode_burst(x, fs, d)) for d in found]
+

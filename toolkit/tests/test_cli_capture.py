@@ -40,7 +40,7 @@ def test_dry_run_prints_configuration_without_hardware(monkeypatch, tmp_path, ca
     assert row("channels", "0 (SMA RX1)") in out
     assert row("gain mode", "manual") in out and row("gain", "40.0 dB") in out
     assert row("buffer", "262144 samples") in out and row("discard", "2 buffers") in out
-    assert row("duration", "1.000000 s (15360000 samples per channel)") in out
+    assert row("duration", "0.010000 s (153600 samples per channel)") in out
     assert row("tier", "snapshot") in out
     assert row("data file", f"{stem}.sigmf-data") in out
     assert row("meta file", f"{stem}.sigmf-meta") in out
@@ -201,3 +201,30 @@ def test_resolve_config_and_parse_channels():
     assert cfg["data_path"] == "cap.sigmf-data" and cfg["warnings"] == []
     text = cli_capture.format_config(cfg)
     assert "10.000000 MHz" in text and "5000000 samples" in text
+
+
+
+@pytest.mark.parametrize('tier,seconds', [('continuous', '0.001'), ('snapshot', '1')])
+def test_high_rate_multibuffer_or_continuous_capture_is_rejected_before_hardware(
+        tier, seconds, monkeypatch, tmp_path, capsys):
+    fake = make_fake_adi()
+    monkeypatch.setitem(sys.modules, 'adi', fake)
+    stem = tmp_path / 'unsafe-timeline'
+    assert cli_capture.main(['capture', '--freq', '2437e6', '--rate', '15.36e6',
+                             '--tier', tier, '--seconds', seconds, str(stem)]) == 1
+    assert 'Multi-buffer gap timing is not implemented' in capsys.readouterr().err
+    assert not fake.instances
+    assert not stem.with_suffix('.sigmf-data').exists()
+
+
+def test_one_buffer_snapshot_records_capture_limits(monkeypatch, tmp_path):
+    fake = make_fake_adi()
+    monkeypatch.setitem(sys.modules, 'adi', fake)
+    stem = tmp_path / 'snapshot'
+    assert cli_capture.main(['capture', '--freq', '2437e6', '--rate', '15.36e6',
+                             '--seconds', '0.001', '--buffer', '16384', str(stem)]) == 0
+    samples, _, meta = read_sigmf(stem)
+    assert samples.shape == (15360,)
+    assert meta['global']['antsdr:capture_tier'] == 'snapshot'
+    assert meta['global']['antsdr:sample_continuity'] == 'unverified'
+    assert meta['global']['antsdr:timestamp_source'] == 'host_wall_clock_not_hardware'

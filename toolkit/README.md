@@ -30,7 +30,7 @@ report, and is worth re-checking before you rely on it.
 ```sh
 antsdr-tk info capture.sigmf-meta        # what is in a recording
 antsdr-tk replay capture --chunk 65536   # stream it in chunks
-antsdr-tk capture --freq 2.4295e9 --rate 15.36e6 --seconds 2 --dry-run out
+antsdr-tk capture --freq 2.4295e9 --rate 15.36e6 --seconds 0.01 --dry-run out
 antsdr-tk sweep --band ism-2g4 --file capture --runs 2
 antsdr-tk classify capture --band ism-2g4
 antsdr-tk droneid capture --json result.json
@@ -103,3 +103,49 @@ python -m pytest -q
 ```
 
 Tests are deterministic (seeded `numpy.random.Generator`) and need no hardware.
+
+
+
+## Reproducible proprietary DJI decoding
+
+ODID reception belongs to AERIX's ESP32 C5/S3 receivers and is outside this
+ANTSDR development pass. The following validates proprietary DJI DroneID RF.
+
+From `antsdr/toolkit`, after `pip install -e ".[dev]"`:
+
+```sh
+git clone https://github.com/RUB-SysSec/DroneSecurity.git /tmp/DroneSecurity
+git -C /tmp/DroneSecurity checkout 9ff819843bee48fb140a0704ec78aff757896dea
+python examples/validate_real_droneid.py --samples /tmp/DroneSecurity/samples --output validation.json
+```
+
+The runner checks input sizes and SHA-256 hashes, exercises the actual CLI,
+and checks CRC-valid counts and published drone/operator fields. Exit 0 means
+all checks passed. Add `--methods zc cp both` to exercise each detector.
+These are extracted bursts, not continuous recordings: do not infer hop
+intervals, duty cycle or range from the sample-index spacing.
+
+## Current acquisition limits
+
+Live `sweep` uses IIO and defaults to 10 MSPS; requests above the driver's
+12 MSPS single-channel budget fail before opening the board. `--file` replay
+is unaffected. A `--fw` label does not select a UHD backend.
+
+`capture` defaults to a **10 ms snapshot** at 15.36 MSPS. Above the IIO host
+budget, the requested samples must fit one RX buffer; concatenating high-rate
+buffers into an apparently continuous recording is refused. Example for an
+analog FPV bench capture (hardware buffer capacity still needs validation):
+
+```sh
+antsdr-tk capture --freq 5.8e9 --rate 20e6 --seconds 0.05 --buffer 1048576 --tier snapshot fpv
+antsdr-tk video fpv -o frames --frames
+```
+
+Metadata explicitly says continuity is unverified and timestamps come from
+the host. Neither a one-buffer capture nor a rate under the budget proves
+hardware continuity. Ten milliseconds is a probe, not a reliable drone search.
+`firstrun` also rejects its existing long high-rate steps until a segmented
+capture path exists; `--seconds 0.01` is available for a brief board probe.
+
+See [the Codex handoff](../CODEX_HANDOFF.md) for the remaining hardware and
+independent analog-video checks.

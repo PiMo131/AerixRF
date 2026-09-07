@@ -141,9 +141,9 @@ def _print_plan(steps: list[BandStep], out_dir: pathlib.Path, uri: str) -> None:
     over = [s for s in steps if s.sample_rate_hz > ceiling]
     if over:
         print(f"# {len(over)} step(s) run above the {ceiling / 1e6:g} MSPS the stock IIO\n"
-              f"# firmware sustains, so those are snapshot captures: the radio is on for a\n"
-              f"# fraction of the wall-clock time. That is expected and is why each one is\n"
-              f"# short. See ADR-0004.")
+              f"# firmware sustains. High-rate snapshot captures must fit one RX buffer;\n"
+              f"# longer steps are rejected because gap timing is not implemented.\n"
+              f"# Use --seconds 0.01 for a short probe; absence is inconclusive.")
 
 
 def run(args: argparse.Namespace) -> int:
@@ -193,22 +193,15 @@ def run(args: argparse.Namespace) -> int:
         json.dump(report, handle, indent=1, default=str)
     _summarise(report, out_dir)
     print(f"\n# full report: {path}")
-    return 0
+    return 1 if any("error" in step for step in report["steps"].values()) else 0
 
 
 def _identify(uri: str) -> dict[str, Any]:
     """Everything the IIO context will tell us, without opening the case."""
     try:
-        from .device.e200 import E200Source
-    except ImportError as exc:  # pragma: no cover - needs pyadi-iio
-        return {"error": f"pyadi-iio is not installed: {exc}"}
-    try:
-        with E200Source(uri=uri) as source:
-            info = source.info
-            return {"uri": uri, "reported": str(info),
-                    "sample_rate_hz": info.sample_rate_hz,
-                    "center_freq_hz": info.center_freq_hz}
-    except Exception as exc:  # noqa: BLE001 - any driver error is the same answer here
+        from .device.e200 import probe
+        return probe(uri=uri)
+    except Exception as exc:  # noqa: BLE001 - retain diagnostic from hardware backend
         return {"error": f"{type(exc).__name__}: {exc}"}
 
 
@@ -216,6 +209,7 @@ def _capture_and_analyse(step: BandStep, stem: pathlib.Path, uri: str,
                          gain_db: float) -> dict[str, Any]:
     import numpy as np
 
+    from . import hardware as hw
     from .analog import video_decode as vd
     from .classify.heuristic import classify_clusters
     from .dsp import cyclo
@@ -226,11 +220,18 @@ def _capture_and_analyse(step: BandStep, stem: pathlib.Path, uri: str,
                            "sample_rate_hz": step.sample_rate_hz, "why": step.why}
     try:
         from .device.e200 import E200Source
+        n = int(step.sample_rate_hz * step.seconds)
+        buffer_size = 1 << 18
+        if step.sample_rate_hz > hw.E200.host_ceiling(1) and n > buffer_size:
+            raise ValueError(
+                "first-run high-rate acquisition exceeds one RX buffer; "
+                "use --seconds 0.01 for a short probe, or capture a longer single "
+                "buffer explicitly with antsdr-tk capture --tier snapshot --buffer N. "
+                "Multi-buffer gap timing is not implemented")
         started = time.time()
         with E200Source(uri=uri, sample_rate_hz=step.sample_rate_hz,
                         center_freq_hz=step.center_freq_hz, gain_db=gain_db,
                         gain_mode="manual") as source:
-            n = int(step.sample_rate_hz * step.seconds)
             samples = source.read(n)
             info = source.info
         out["wall_clock_s"] = round(time.time() - started, 2)
@@ -241,7 +242,9 @@ def _capture_and_analyse(step: BandStep, stem: pathlib.Path, uri: str,
     if samples.ndim > 1:
         samples = samples[0]
     data_path, _meta = write_sigmf(stem, samples, info,
-                                   description=f"antsdr-tk firstrun: {step.name}")
+                                   description=f"antsdr-tk firstrun: {step.name}",
+                                   extra_global={"antsdr:sample_continuity": "unverified",
+                                                 "antsdr:timestamp_source": "host_wall_clock_not_hardware"})
     out["recording"] = str(data_path)
     fs = step.sample_rate_hz
     print(f"  captured {samples.size} samples "
@@ -292,7 +295,7 @@ def _capture_and_analyse(step: BandStep, stem: pathlib.Path, uri: str,
         print(f"    DroneID: {len(results)} burst(s), {len(decoded)} decoded")
         for frame in decoded:
             print(f"      {frame.product_name} serial {frame.serial!r} "
-                  f"at {frame.drone_lat:.5f}, {frame.drone_lon:.5f}")
+                  f"at {frame.drone_lat}, {frame.drone_lon}")
 
     if "video" in step.analyses:
         fields, standard = vd.decode_from_iq(samples, fs, width=320, max_fields=4)
@@ -346,3 +349,4 @@ def main(argv: list[str] | None = None) -> int:
 
 if __name__ == "__main__":  # pragma: no cover
     sys.exit(main())
+

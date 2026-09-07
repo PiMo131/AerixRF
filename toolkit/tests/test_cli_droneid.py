@@ -79,3 +79,28 @@ def test_quiet_prints_only_decoded_bursts(recording, capsys):
 def test_registered_in_the_top_level_cli(recording, capsys):
     assert cli.main(["droneid", str(recording)]) == 0
     assert "decoded" in capsys.readouterr().out
+
+
+
+def test_crc_failed_candidate_never_exports_plausible_positions(recording, tmp_path, monkeypatch, capsys):
+    from dataclasses import replace
+    from antsdr_toolkit.droneid import receiver as rx
+
+    payload = synth.make_payload_bytes(synth.DroneIdTx())
+    frame = rx.parse_frame(payload)
+    assert frame is not None
+    invalid = replace(frame, crc16_ok=False, crc24_ok=False)
+    detection = rx.BurstDetection(0, 0.8, 0.9, 0.0, 20.0, 0.0,
+                                  zc_root=None, root_agnostic=True)
+    monkeypatch.setattr(rx, 'process', lambda *a, **kw: [(detection, invalid)])
+    output = tmp_path / 'invalid.json'
+    assert cli_droneid.main([str(recording), '--json', str(output)]) == 0
+    result = json.loads(output.read_text())
+    candidate = result['bursts'][0]
+    assert candidate['frame'] is None
+    assert candidate['decode_status'] == 'unidentified'
+    assert candidate['crc_checks'] == {'crc16_ok': False, 'crc24_ok': False}
+    assert candidate['detection']['root_agnostic'] is True
+    assert candidate['detection']['zc_root'] is None
+    assert result['processing_sample_rate_hz'] == FS
+    assert 'encrypted OcuSync 4 payload' not in capsys.readouterr().out

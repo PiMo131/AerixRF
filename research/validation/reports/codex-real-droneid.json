@@ -1,0 +1,42 @@
+{
+  "upstream_commit": "9ff819843bee48fb140a0704ec78aff757896dea",
+  "python": "3.12.13",
+  "numpy": "2.5.3",
+  "scipy": "1.17.0",
+  "scope": "extracted OcuSync 2 bursts; no timing, range, O3/O4 or hardware claims",
+  "runs": [
+    {
+      "sample": "mini2_sm",
+      "sha256": "5a17913cb11cde2919347054700345c9e5595eaff7818980d332b8ac8910bc55",
+      "method": "both",
+      "decoded": 10,
+      "sequences": [
+        786,
+        787,
+        788,
+        788,
+        789,
+        800,
+        804,
+        804,
+        805,
+        806
+      ],
+      "errors": [],
+      "passed": true
+    },
+    {
+      "sample": "mavic_air_2",
+      "sha256": "623fa40f190d3fd859ec2fd62b379ad9a01a0485db3179ae29ac2e3c7a070450",
+      "method": "both",
+      "decoded": 2,
+      "sequences": [
+        591,
+        589
+      ],
+      "errors": [],
+      "passed": true
+    }
+  ],
+  "passed": true
+}

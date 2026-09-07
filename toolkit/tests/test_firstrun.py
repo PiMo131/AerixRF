@@ -118,3 +118,19 @@ def test_the_report_is_json_serialisable(tmp_path):
 @pytest.mark.parametrize("name", [s.name for s in fr.DEFAULT_PLAN])
 def test_step_names_are_usable_as_filenames(name):
     assert name and "/" not in name and " " not in name
+
+
+
+def test_identify_uses_read_only_device_probe(monkeypatch):
+    from antsdr_toolkit.device import e200
+    monkeypatch.setattr(e200, 'probe', lambda *, uri: {'uri': uri, 'devices': ['ad9361-phy']})
+    assert fr._identify('ip:test')['devices'] == ['ad9361-phy']
+
+
+def test_firstrun_cannot_bypass_high_rate_recording_guard(tmp_path, monkeypatch):
+    from antsdr_toolkit.device import e200
+    monkeypatch.setattr(e200, 'E200Source', lambda **kw: pytest.fail('must fail before opening radio'))
+    step = next(s for s in fr.DEFAULT_PLAN if s.sample_rate_hz == 20e6)
+    result = fr._capture_and_analyse(step, tmp_path / 'bad', 'ip:test', 40.0)
+    assert 'Multi-buffer gap timing is not implemented' in result['error']
+    assert not (tmp_path / 'bad.sigmf-data').exists()

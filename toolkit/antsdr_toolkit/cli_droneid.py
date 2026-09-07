@@ -18,12 +18,12 @@ receiver directly, fine once retuned.
 What a result means
 -------------------
 ``crc24`` is the payload check and ``crc16`` the frame check; both must pass
-before the serial number and positions are worth anything.  A burst that is
-found but does not decode is still a real observation: it is either too weak
-for a receiver without error correction (below roughly 15 dB in-band
-signal-to-noise here), or it belongs to an OcuSync 4 drone, whose payload is
-encrypted.  Either way the frequency, the time and the signal-to-noise ratio
-are usable, which is what the presence tier of ``ADR-0006`` is about.
+before serial numbers and positions are accepted. A failed decode is an
+unidentified RF candidate: noise, interference, synchronization errors,
+unsupported formats and encryption can all cause failure. CRC failure alone
+identifies neither a drone nor its link generation. Turbo error correction
+is enabled by default.
+
 """
 
 from __future__ import annotations
@@ -149,6 +149,8 @@ def run(args: argparse.Namespace) -> int:
         "recording": str(args.recording),
         "sample_rate_hz": fs,
         "center_freq_hz": info.center_freq_hz,
+        "processing_sample_rate_hz": band_rate,
+        "sample_index_domain": "processed_band",
         "tuned": bool(tuning),
         "band_offsets_hz": [centre for centre, _ in bands],
         "n_bursts": len(results),
@@ -175,12 +177,15 @@ def run(args: argparse.Namespace) -> int:
                       f"{frame.v_up_m_s:.1f} m/s vertical, yaw {frame.yaw_deg:.1f} deg")
             else:
                 print(f"  CRC failed (crc24 {frame.crc24_ok}, crc16 {frame.crc16_ok}): "
-                      "too weak for a receiver without error correction, or an "
-                      "encrypted OcuSync 4 payload")
+                      "unidentified candidate; CRC failure does not establish "
+                      "encryption or a drone model")
         payload["bursts"].append({
             "band_offset_hz": centre,
             "detection": detection.to_dict(),
-            "frame": frame.to_dict() if frame else None,
+            "decode_status": "decoded" if ok else "unidentified",
+            "frame": frame.to_dict() if ok else None,
+            "crc_checks": {"crc16_ok": bool(frame and frame.crc16_ok),
+                           "crc24_ok": bool(frame and frame.crc24_ok)},
         })
 
     if args.json_path:
@@ -209,3 +214,4 @@ def main(argv: list[str] | None = None) -> int:
 
 if __name__ == "__main__":  # pragma: no cover
     sys.exit(main())
+

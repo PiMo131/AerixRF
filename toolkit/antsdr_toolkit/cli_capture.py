@@ -51,7 +51,7 @@ DEFAULT_TIER = "snapshot"
 DEFAULT_GAIN_DB = 40.0
 DEFAULT_BUFFER = 1 << 18
 DEFAULT_DISCARD = 2
-DEFAULT_SECONDS = 1.0
+DEFAULT_SECONDS = 0.01
 _POWER_FLOOR = 1e-24  # -240 dBFS keeps log10 finite for an all-zero capture
 
 HELP = "record IQ from the ANTSDR E200 (pyadi-iio over Ethernet) into a SigMF pair"
@@ -68,8 +68,8 @@ IIO firmware (CPU-bound in iiod), about {hw.E200.host_ceiling(1, "uhd_sc16") / 1
 the UHD firmware; {hw.E200.host_ceiling(1, "uhd_wire_limit_sc16") / 1e6:.1f} MSPS is the sc16 \
 wire limit of 1 GbE
   capture tier '--tier continuous' keeps the link inside those ceilings; '--tier snapshot' \
-allows any rate up to {hw.E200.sample_rate_max_1ch / 1e6:.2f} MSPS and accepts the resulting \
-duty cycle (gaps between buffers) - this is how DroneID gets its 15.36 MSPS
+allows rates up to {hw.E200.sample_rate_max_1ch / 1e6:.2f} MSPS in a single RX buffer. \
+Above the IIO host budget, multi-buffer captures are rejected: gaps are not timed.
   LO           {hw.E200.lo_min / 1e6:.0f} MHz .. {hw.E200.lo_max / 1e9:.0f} GHz as configured \
 by the firmware (AD9363 datasheet: 325 MHz .. 3.8 GHz, 20 MHz)
   clean rates  {", ".join(f"{r / 1e6:g}" for r in hw.CLEAN_RATES)} MSPS \
@@ -127,7 +127,7 @@ def configure(parser: argparse.ArgumentParser) -> None:
                         help=f"buffers dropped after tuning (default {DEFAULT_DISCARD})")
     parser.add_argument("--tier", choices=tuple(hw.CAPTURE_TIERS), default=DEFAULT_TIER,
                         help=f"capture tier judged against the host link (default {DEFAULT_TIER}); "
-                             "continuous = unbroken stream, snapshot = bursts with gaps")
+                             "continuous = within IIO budget, snapshot = one high-rate RX buffer")
     parser.add_argument("--fw", default="pluto-iio", metavar="TAG",
                         help="firmware personality written into core:hw (default pluto-iio)")
     parser.add_argument("--description", default="", metavar="TEXT",
@@ -233,6 +233,16 @@ def run(args: argparse.Namespace) -> int:
         print(format_config(cfg))
         return 0
 
+    # No hardware timestamps/overflow reports are available in this driver.
+    # Do not join potentially discontinuous high-rate buffers into one timeline.
+    ceiling = hw.E200.host_ceiling(len(cfg["channels"]))
+    if cfg["sample_rate_hz"] > ceiling:
+        if cfg["tier"] != "snapshot" or cfg["n_samples"] > cfg["buffer_size"]:
+            raise ValueError(
+                "above the IIO host budget, capture requires --tier snapshot and "
+                "one RX buffer: reduce --seconds or increase --buffer to at least "
+                f"{cfg['n_samples']}. Multi-buffer gap timing is not implemented")
+
     import numpy as np
 
     from .device.e200 import E200Source
@@ -267,7 +277,13 @@ def run(args: argparse.Namespace) -> int:
         peak_power = 0.0
         written = 0
         t0 = time.perf_counter()
-        with SigmfRecorder(args.out_stem, info, extra_global=src.sigmf_extra_global()) as rec:
+        extra = dict(src.sigmf_extra_global())
+        extra.update({
+            "antsdr:capture_tier": cfg["tier"],
+            "antsdr:sample_continuity": "unverified",
+            "antsdr:timestamp_source": "host_wall_clock_not_hardware",
+        })
+        with SigmfRecorder(args.out_stem, info, extra_global=extra) as rec:
             try:
                 while written < n_total:
                     chunk = src.read(min(chunk_size, n_total - written))
@@ -322,3 +338,4 @@ def main(argv: Sequence[str] | None = None) -> int:
 
 if __name__ == "__main__":  # pragma: no cover
     sys.exit(main())
+
