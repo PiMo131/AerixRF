@@ -1,0 +1,663 @@
+diff --git a/contracts/openapi.yaml b/contracts/openapi.yaml
+index d669f20..60c1d52 100644
+--- a/contracts/openapi.yaml
++++ b/contracts/openapi.yaml
+@@ -316,7 +316,7 @@ components:
+       type: object
+       properties:
+         sensor_id: { type: string }
+-        class: { type: string, enum: [phone, node, aerix_two, portable_v1, portable_v2, professional, future] }
++        class: { type: string, enum: [phone, node, aerix_two, hackrf, portable_v1, portable_v2, professional, future] }
+         display_name: { type: string }
+         regulatory_domain: { type: string }
+         firmware_version: { type: string }
+diff --git a/contracts/rf-detection.v1.schema.json b/contracts/rf-detection.v1.schema.json
+new file mode 100644
+index 0000000..d0d1519
+--- /dev/null
++++ b/contracts/rf-detection.v1.schema.json
+@@ -0,0 +1,116 @@
++{
++  "$schema": "https://json-schema.org/draft/2020-12/schema",
++  "$id": "https://aerix.example/contracts/rf-detection.v1.schema.json",
++  "title": "Aerix RfDetection v1",
++  "description": "One second of RF observation from an SDR sensor (e.g. a HackRF box). Deliberately NOT an ODID reception: an RF detection is an energy/spectral measurement that may carry no decodable Remote ID at all, so it rides its own path (/v1/rf-detections:batch) and never touches the ODID observations pipeline. A detection may be verified=true when an ODID cue (from an ESP, via server poll or a local cue) coincided, making it a ground-truth-labelled sample.",
++  "type": "object",
++  "required": [
++    "schema_version",
++    "detection_id",
++    "sensor_id",
++    "captured_at",
++    "source",
++    "detection_probability",
++    "band"
++  ],
++  "additionalProperties": false,
++  "properties": {
++    "schema_version": { "type": "string", "pattern": "^1\\.[0-9]+\\.[0-9]+$" },
++    "detection_id": {
++      "description": "Sensor-generated unique id; idempotency key for re-upload.",
++      "type": "string",
++      "format": "uuid"
++    },
++    "sensor_id": {
++      "type": "string",
++      "minLength": 1,
++      "maxLength": 128,
++      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$"
++    },
++    "captured_at": {
++      "description": "UTC time of the one-second window, RFC 3339 with millisecond precision.",
++      "type": "string",
++      "format": "date-time"
++    },
++    "source": {
++      "description": "Receiver family that produced this. 'hackrf' today; other SDRs later.",
++      "type": "string",
++      "enum": ["hackrf", "antsdr", "sdr"]
++    },
++    "receiver_position": {
++      "description": "Where the SDR sensor was. Used for Path-1 correlation and later triangulation.",
++      "type": "object",
++      "additionalProperties": false,
++      "required": ["lat", "lon"],
++      "properties": {
++        "lat": { "type": "number", "minimum": -90, "maximum": 90 },
++        "lon": { "type": "number", "minimum": -180, "maximum": 180 },
++        "alt_m_wgs84": { "type": "number" },
++        "accuracy_m": { "type": "number", "minimum": 0 }
++      }
++    },
++    "detection_probability": {
++      "description": "Stage-1/2 confidence that a drone signal is present, 0..1.",
++      "type": "number",
++      "minimum": 0,
++      "maximum": 1
++    },
++    "rssi_dbm": {
++      "description": "Approximate received strength. HackRF power is uncalibrated (dBFS + gain offset).",
++      "type": "number"
++    },
++    "snr_db": { "type": "number" },
++    "band": { "type": "string", "enum": ["2.4GHz", "5.8GHz", "5GHz", "900MHz"] },
++    "center_freq_mhz": { "type": "number", "exclusiveMinimum": 0 },
++    "bandwidth_mhz": { "type": "number", "minimum": 0 },
++    "cadence_ms": {
++      "description": "Detected inter-burst period (a ~600 ms cadence is DroneID-like).",
++      "type": "number",
++      "minimum": 0
++    },
++    "signature_class": {
++      "type": "string",
++      "enum": ["dji_ocusync", "wifi_drone", "fpv_analog", "noise", "unknown"]
++    },
++    "verified": {
++      "description": "True when an ODID cue coincided -> this is a ground-truth-labelled drone sample.",
++      "type": "boolean",
++      "default": false
++    },
++    "spectrogram": {
++      "description": "The 'RF image' of this second. Inline PNG for the light path, or a reference when externalised.",
++      "type": "object",
++      "additionalProperties": false,
++      "properties": {
++        "png_base64": { "type": "string", "contentEncoding": "base64", "maxLength": 4000000 },
++        "ref": { "type": "string", "maxLength": 512 },
++        "width": { "type": "integer", "minimum": 1 },
++        "height": { "type": "integer", "minimum": 1 }
++      }
++    },
++    "odid_cue": {
++      "description": "The ODID detection that triggered a Path-1 verified snapshot.",
++      "type": "object",
++      "additionalProperties": false,
++      "properties": {
++        "track_id": { "type": "string", "maxLength": 64 },
++        "serial": { "type": "string", "maxLength": 64 },
++        "source": { "type": "string", "enum": ["server", "local"] },
++        "transport": { "type": "string", "maxLength": 32 }
++      }
++    },
++    "decoded": {
++      "description": "Best-effort DJI DroneID decode (OcuSync<=2.0). Operator location is personal data; retention-gated server-side.",
++      "type": "object",
++      "additionalProperties": false,
++      "properties": {
++        "serial": { "type": "string", "maxLength": 64 },
++        "protocol": { "type": "string", "maxLength": 32 },
++        "drone_lat": { "type": "number", "minimum": -90, "maximum": 90 },
++        "drone_lon": { "type": "number", "minimum": -180, "maximum": 180 },
++        "operator_lat": { "type": "number", "minimum": -90, "maximum": 90 },
++        "operator_lon": { "type": "number", "minimum": -180, "maximum": 180 }
++      }
++    }
++  }
++}
+diff --git a/db/migrations/038_sensor_class_hackrf.sql b/db/migrations/038_sensor_class_hackrf.sql
+new file mode 100644
+index 0000000..5533de5
+--- /dev/null
++++ b/db/migrations/038_sensor_class_hackrf.sql
+@@ -0,0 +1,11 @@
++-- 038: sensor class 'hackrf' -- the AERIX RF/SDR box (HackRF Pro on a small
++-- Linux box / Pi that runs the DSP the SDR cannot do onboard). Same anonymous
++-- provisioning path as the other sensors; the class exists so the fleet view
++-- can present RF sensors as their own population. Sensor ids are prefixed
++-- 'sdr-'. RF detections do NOT ride the ODID observations pipeline -- they use
++-- /v1/rf-detections:batch and the rf_detections table (039).
++--
++-- No BEGIN/COMMIT: ALTER TYPE ... ADD VALUE must not share a transaction
++-- with statements that use the new value.
++
++ALTER TYPE sensor_class ADD VALUE 'hackrf';
+diff --git a/db/migrations/039_rf_detections.sql b/db/migrations/039_rf_detections.sql
+new file mode 100644
+index 0000000..2dc116e
+--- /dev/null
++++ b/db/migrations/039_rf_detections.sql
+@@ -0,0 +1,106 @@
++-- Aerix v2 -- 039: RF/SDR detections (the HackRF box; plan "AERIX RF").
++--
++-- Separate from observations by design: an observation is one reception of an
++-- Open Drone ID transmission (odid_raw mandatory); an RF detection is an
++-- energy/spectral measurement of a *second* of spectrum that may carry no
++-- decodable Remote ID at all. Keeping them apart preserves the append-only,
++-- ODID-only invariant of the observation layer.
++--
++-- Two producers write here (both Path-tagged on the row):
++--   Path 2  the box's own detector fired (detection_probability, rssi, image).
++--   Path 1  an ODID cue (from an ESP, via server poll or a local cue) coincided
++--           -> verified=true + odid_serial: a ground-truth-labelled sample.
++--
++-- Retention (section 9 / GDPR): every row is born with an expires_at and is
++-- swept by the worker exactly like observations. Decoded operator location is
++-- personal data, so the ingest path stamps the TIGHTEST expiry when `decoded`
++-- is present. Nothing here is retained indefinitely without an explicit
++-- evidence promotion.
++
++BEGIN;
++
++CREATE TABLE rf_detections (
++    detection_id          uuid PRIMARY KEY,
++    sensor_id             text NOT NULL REFERENCES sensors (sensor_id),
++    captured_at           timestamptz NOT NULL,
++    source                text NOT NULL,                 -- hackrf | antsdr | sdr
++
++    receiver_position     geography(Point, 4326),
++    receiver_accuracy_m   double precision,
++
++    detection_probability double precision NOT NULL
++                          CHECK (detection_probability >= 0 AND detection_probability <= 1),
++    rssi_dbm              double precision,
++    snr_db                double precision,
++    band                  text NOT NULL,
++    center_freq_mhz       double precision,
++    bandwidth_mhz         double precision,
++    cadence_ms            double precision,
++    signature_class       text,
++    verified              boolean NOT NULL DEFAULT false,
++
++    -- Path-1 ODID cue linkage: which certain-drone triggered the verified snapshot.
++    odid_track_id         uuid,
++    odid_serial           text,
++    odid_cue_source       text,                          -- server | local
++
++    -- Best-effort DJI DroneID decode (OcuSync<=2.0). operator_lat/lon is
++    -- personal data -> drives the tightest expires_at (see ingest writer).
++    decoded               jsonb,
++
++    -- The 'RF image' / samples. Inline bytea follows the evidence convention
++    -- (024); object_ref is the externalisation hook for large IQ/PNG.
++    -- content_sha256 covers whichever holds the bytes.
++    spectrogram_png       bytea,
++    content_sha256        text,
++    object_ref            text,
++
++    -- Retention bookkeeping, identical model to observations (014).
++    retention_class       retention_class NOT NULL DEFAULT 'STANDARD',
++    expires_at            timestamptz,
++    retain_until          timestamptz,
++
++    created_at            timestamptz NOT NULL DEFAULT now()
++);
++
++CREATE INDEX rf_detections_sensor_time_idx ON rf_detections (sensor_id, captured_at DESC);
++CREATE INDEX rf_detections_expiry_idx      ON rf_detections (expires_at)
++    WHERE retention_class = 'STANDARD';
++CREATE INDEX rf_detections_verified_idx    ON rf_detections (captured_at DESC)
++    WHERE verified;
++CREATE INDEX rf_detections_position_idx    ON rf_detections USING gist (receiver_position);
++
++-- Append-only outside the retention sweep, and even then only expired STANDARD
++-- rows -- same guard the observation layer uses (014).
++CREATE OR REPLACE FUNCTION rf_detections_guarded_delete()
++RETURNS trigger LANGUAGE plpgsql AS $$
++BEGIN
++    IF current_setting('aerix.retention_sweep', true) IS DISTINCT FROM 'on' THEN
++        RAISE EXCEPTION 'rf_detections is append-only outside the retention sweep'
++            USING ERRCODE = 'raise_exception';
++    END IF;
++    IF OLD.retention_class <> 'STANDARD' THEN
++        RAISE EXCEPTION 'refusing to delete % row %', OLD.retention_class, OLD.detection_id
++            USING ERRCODE = 'raise_exception';
++    END IF;
++    IF OLD.expires_at IS NULL OR OLD.expires_at > now() THEN
++        RAISE EXCEPTION 'refusing to delete unexpired rf_detection %', OLD.detection_id
++            USING ERRCODE = 'raise_exception';
++    END IF;
++    RETURN OLD;
++END;
++$$;
++
++CREATE TRIGGER rf_detections_guarded_delete
++    BEFORE DELETE ON rf_detections
++    FOR EACH ROW EXECUTE FUNCTION rf_detections_guarded_delete();
++
++COMMENT ON TABLE rf_detections IS
++    'RF/SDR drone detections (HackRF box). Not ODID observations: an RF '
++    'detection is an energy/spectral measurement of one second of spectrum. '
++    'verified=true rows coincided with an ODID cue and are ground-truth labels.';
++COMMENT ON COLUMN rf_detections.decoded IS
++    'Best-effort DJI DroneID decode; operator_lat/lon is personal data and '
++    'drives the tightest expires_at at ingest.';
++
++COMMIT;
+diff --git a/services/auth/aerix_auth/store.py b/services/auth/aerix_auth/store.py
+index 014675c..2580bd2 100644
+--- a/services/auth/aerix_auth/store.py
++++ b/services/auth/aerix_auth/store.py
+@@ -88,8 +88,8 @@ _TOKEN_SEPARATOR = "~"
+ 
+ # Classes a device may declare when it provisions itself, and the sensor_id
+ # prefix each gets so the population is recognisable at a glance.
+-PROVISIONABLE_CLASSES = ("phone", "node", "aerix_two")
+-_SENSOR_ID_PREFIX = {"phone": "app-", "node": "app-", "aerix_two": "aerix2-"}
++PROVISIONABLE_CLASSES = ("phone", "node", "aerix_two", "hackrf")
++_SENSOR_ID_PREFIX = {"phone": "app-", "node": "app-", "aerix_two": "aerix2-", "hackrf": "sdr-"}
+ 
+ 
+ def provision_anonymous_sensor(conn: Any, client_info: dict | None = None,
+diff --git a/services/ingest/aerix_ingest/api/app.py b/services/ingest/aerix_ingest/api/app.py
+index 1baac46..57221f2 100644
+--- a/services/ingest/aerix_ingest/api/app.py
++++ b/services/ingest/aerix_ingest/api/app.py
+@@ -17,13 +17,18 @@ from fastapi import Depends, FastAPI, Header, HTTPException, Request
+ from fastapi.responses import JSONResponse
+ 
+ from ..auth import resolve_token, touch_last_seen
+-from ..contracts import EnvelopeRejected, validate_envelope
++from ..contracts import EnvelopeRejected, validate_envelope, validate_rf_detection
+ from ..storage.writer import ObservationWriter
++from ..storage.rf_writer import RfDetectionWriter
+ 
+ log = logging.getLogger("aerix.ingest")
+ 
+ MAX_BATCH_ITEMS = 500
+ 
++# Active ODID cues (Path 1a): a serial seen on any receiver in this window is a
++# "certain drone" the RF box should snapshot. TODO: scope to the sensor's site.
++ODID_CUE_WINDOW_S = 15
++
+ 
+ @asynccontextmanager
+ async def _lifespan(application: FastAPI) -> AsyncIterator[None]:
+@@ -163,6 +168,82 @@ async def ingest_batch(
+     )
+ 
+ 
++def get_rf_writer(request: Request) -> RfDetectionWriter:
++    return RfDetectionWriter(request.app.state.db)
++
++
++@app.post("/v1/rf-detections:batch")
++async def ingest_rf_detections(
++    payload: dict[str, Any],
++    sensor: AuthenticatedSensor = Depends(authenticate),
++    writer: RfDetectionWriter = Depends(get_rf_writer),
++) -> JSONResponse:
++    """RF/SDR detections (Path 2 + Path 1). Separate from /v1/observations:batch:
++    these are energy/spectral measurements, not ODID receptions."""
++    items = payload.get("rf_detections")
++    if not isinstance(items, list) or not items:
++        raise HTTPException(status_code=400, detail="rf_detections must be a non-empty array")
++    if len(items) > MAX_BATCH_ITEMS:
++        raise HTTPException(status_code=413, detail=f"batch of {len(items)} exceeds {MAX_BATCH_ITEMS}")
++
++    valid: list[dict[str, Any]] = []
++    rejected: list[dict[str, Any]] = []
++    for index, det in enumerate(items):
++        if not isinstance(det, dict):
++            rejected.append({"detection_id": None, "reason": f"item {index} is not an object",
++                             "retryable": False})
++            continue
++        if det.get("sensor_id") != sensor.sensor_id:
++            rejected.append({"detection_id": det.get("detection_id"),
++                             "reason": "sensor_id does not match authenticated credential",
++                             "retryable": False})
++            continue
++        try:
++            validate_rf_detection(det)
++        except EnvelopeRejected as exc:
++            rejected.append({"detection_id": det.get("detection_id"), "reason": exc.reason,
++                             "retryable": exc.retryable})
++            continue
++        valid.append(det)
++
++    stored, duplicates, db_rejected = writer.write_many(valid)
++    for did, reason in db_rejected:
++        rejected.append({"detection_id": did, "reason": reason, "retryable": False})
++
++    if rejected:
++        log.warning("rf sensor=%s batch=%d rejected=%d", sensor.sensor_id, len(items), len(rejected))
++
++    return JSONResponse(status_code=200,
++                        content={"accepted": stored, "duplicate": duplicates, "rejected": rejected})
++
++
++@app.get("/v1/rf/odid-cues")
++async def odid_cues(
++    request: Request,
++    sensor: AuthenticatedSensor = Depends(authenticate),
++) -> dict[str, Any]:
++    """Path 1a: recent ODID detections a HackRF box should snapshot as verified.
++
++    v1 returns every distinct serial seen across receivers in the last window;
++    site-scoping to the sensor's own site is a TODO (single-site deployments are
++    correct as-is)."""
++    cues: list[dict[str, Any]] = []
++    with request.app.state.db.cursor() as cur:
++        cur.execute(
++            """
++            SELECT DISTINCT ON (uas_id) uas_id, received_at_utc
++              FROM observations
++             WHERE uas_id IS NOT NULL
++               AND received_at_utc > now() - make_interval(secs => %s)
++             ORDER BY uas_id, received_at_utc DESC
++            """,
++            (ODID_CUE_WINDOW_S,),
++        )
++        for uas_id, seen in cur.fetchall():
++            cues.append({"serial": uas_id, "source": "server", "ts": seen.isoformat()})
++    return {"cues": cues}
++
++
+ @app.get("/healthz")
+ async def healthz() -> dict[str, str]:
+     return {"status": "ok"}
+diff --git a/services/ingest/aerix_ingest/contracts.py b/services/ingest/aerix_ingest/contracts.py
+index be8e621..a81bac3 100644
+--- a/services/ingest/aerix_ingest/contracts.py
++++ b/services/ingest/aerix_ingest/contracts.py
+@@ -41,6 +41,7 @@ CONTRACTS_DIR = _find_contracts_dir()
+ 
+ ENVELOPE_SCHEMA_PATH = CONTRACTS_DIR / "observation-envelope.v1.schema.json"
+ SCAN_PROFILE_SCHEMA_PATH = CONTRACTS_DIR / "scan-profile.v1.schema.json"
++RF_DETECTION_SCHEMA_PATH = CONTRACTS_DIR / "rf-detection.v1.schema.json"
+ 
+ SUPPORTED_SCHEMA_MAJOR = 1
+ 
+@@ -65,6 +66,13 @@ def scan_profile_validator() -> Draft202012Validator:
+     return Draft202012Validator(schema)
+ 
+ 
++@functools.lru_cache(maxsize=None)
++def rf_detection_validator() -> Draft202012Validator:
++    schema = _load(RF_DETECTION_SCHEMA_PATH)
++    Draft202012Validator.check_schema(schema)
++    return Draft202012Validator(schema)
++
++
+ class EnvelopeRejected(Exception):
+     """An envelope that will never become valid by retrying.
+ 
+@@ -108,3 +116,29 @@ def validate_envelope(envelope: dict[str, Any]) -> None:
+             f"{location}: {first.message}"
+             + (f" (+{len(errors) - 1} more)" if len(errors) > 1 else "")
+         )
++
++
++def validate_rf_detection(detection: dict[str, Any]) -> None:
++    """Raise :class:`EnvelopeRejected` if an RF detection violates the contract."""
++    version = detection.get("schema_version")
++    if not isinstance(version, str):
++        raise EnvelopeRejected("schema_version missing or not a string")
++    try:
++        major = int(version.split(".", 1)[0])
++    except (ValueError, IndexError):
++        raise EnvelopeRejected(f"schema_version {version!r} is not semver") from None
++    if major != SUPPORTED_SCHEMA_MAJOR:
++        raise EnvelopeRejected(
++            f"schema_version {version} unsupported; server implements major "
++            f"{SUPPORTED_SCHEMA_MAJOR}",
++            retryable=True,
++        )
++
++    errors = sorted(rf_detection_validator().iter_errors(detection), key=lambda e: e.path)
++    if errors:
++        first = errors[0]
++        location = "/".join(str(p) for p in first.absolute_path) or "<root>"
++        raise EnvelopeRejected(
++            f"{location}: {first.message}"
++            + (f" (+{len(errors) - 1} more)" if len(errors) > 1 else "")
++        )
+diff --git a/services/ingest/aerix_ingest/storage/rf_writer.py b/services/ingest/aerix_ingest/storage/rf_writer.py
+new file mode 100644
+index 0000000..221ef43
+--- /dev/null
++++ b/services/ingest/aerix_ingest/storage/rf_writer.py
+@@ -0,0 +1,136 @@
++"""Persistence for RF/SDR detections (rf_detections, migration 039).
++
++Mirrors ObservationWriter: one savepoint per row so a poison item is a per-item
++rejection, not a batch abort. Retention is stamped at ingest (section 9 / GDPR):
++tiered expiry, TIGHTEST when a decoded operator location is present.
++"""
++
++from __future__ import annotations
++
++import base64
++import hashlib
++import json
++import os
++from datetime import datetime, timedelta, timezone
++from typing import Any, Iterable
++
++# Retention windows (days), env-overridable. Bounded; nothing indefinite here.
++RF_RETENTION_DAYS = int(os.environ.get("AERIX_RF_RETENTION_DAYS", "30"))
++RF_VERIFIED_RETENTION_DAYS = int(os.environ.get("AERIX_RF_VERIFIED_RETENTION_DAYS", "180"))
++RF_DECODED_RETENTION_DAYS = int(os.environ.get("AERIX_RF_DECODED_RETENTION_DAYS", "7"))
++
++_COLUMNS: tuple[str, ...] = (
++    "detection_id", "sensor_id", "captured_at", "source",
++    "receiver_position", "receiver_accuracy_m",
++    "detection_probability", "rssi_dbm", "snr_db",
++    "band", "center_freq_mhz", "bandwidth_mhz", "cadence_ms",
++    "signature_class", "verified",
++    "odid_track_id", "odid_serial", "odid_cue_source",
++    "decoded", "spectrogram_png", "content_sha256", "object_ref",
++    "expires_at",
++)
++_JSONB = frozenset({"decoded"})
++
++_INSERT_SQL = f"""
++INSERT INTO rf_detections ({", ".join(_COLUMNS)})
++VALUES ({", ".join(f"%({c})s" for c in _COLUMNS)})
++ON CONFLICT (detection_id) DO NOTHING
++RETURNING detection_id
++"""
++
++
++def _parse_utc(value: str) -> datetime:
++    return datetime.fromisoformat(value.replace("Z", "+00:00"))
++
++
++def _point_wkt(pos: dict | None) -> str | None:
++    if not pos or pos.get("lat") is None or pos.get("lon") is None:
++        return None
++    return f"SRID=4326;POINT({pos['lon']} {pos['lat']})"
++
++
++def _expiry(captured_at: datetime, verified: bool, has_decoded: bool) -> datetime:
++    days = RF_VERIFIED_RETENTION_DAYS if verified else RF_RETENTION_DAYS
++    exp = captured_at + timedelta(days=days)
++    if has_decoded:
++        # Personal data (operator location) gets the tightest window.
++        exp = min(exp, captured_at + timedelta(days=RF_DECODED_RETENTION_DAYS))
++    # Never born already-expired (guards late store-and-forward flushes).
++    return max(exp, datetime.now(timezone.utc) + timedelta(hours=1))
++
++
++def _to_row(env: dict[str, Any]) -> dict[str, Any]:
++    captured_at = _parse_utc(env["captured_at"])
++    verified = bool(env.get("verified", False))
++    decoded = env.get("decoded")
++    cue = env.get("odid_cue") or {}
++    spec = env.get("spectrogram") or {}
++
++    png = None
++    sha = None
++    if spec.get("png_base64"):
++        png = base64.b64decode(spec["png_base64"])
++        sha = hashlib.sha256(png).hexdigest()
++
++    return {
++        "detection_id": env["detection_id"],
++        "sensor_id": env["sensor_id"],
++        "captured_at": captured_at,
++        "source": env["source"],
++        "receiver_position": _point_wkt(env.get("receiver_position")),
++        "receiver_accuracy_m": (env.get("receiver_position") or {}).get("accuracy_m"),
++        "detection_probability": env["detection_probability"],
++        "rssi_dbm": env.get("rssi_dbm"),
++        "snr_db": env.get("snr_db"),
++        "band": env["band"],
++        "center_freq_mhz": env.get("center_freq_mhz"),
++        "bandwidth_mhz": env.get("bandwidth_mhz"),
++        "cadence_ms": env.get("cadence_ms"),
++        "signature_class": env.get("signature_class"),
++        "verified": verified,
++        "odid_track_id": cue.get("track_id"),
++        "odid_serial": cue.get("serial"),
++        "odid_cue_source": cue.get("source"),
++        "decoded": decoded,
++        "spectrogram_png": png,
++        "content_sha256": sha,
++        "object_ref": spec.get("ref"),
++        "expires_at": _expiry(captured_at, verified, decoded is not None),
++    }
++
++
++def _prepare(row: dict[str, Any]) -> dict[str, Any]:
++    return {
++        c: json.dumps(row[c]) if c in _JSONB and row[c] is not None else row[c]
++        for c in _COLUMNS
++    }
++
++
++class RfDetectionWriter:
++    def __init__(self, conn: Any) -> None:
++        self._conn = conn
++
++    def write_many(
++        self, envelopes: Iterable[dict[str, Any]]
++    ) -> tuple[list[str], list[str], list[tuple[str, str]]]:
++        import psycopg
++
++        stored: list[str] = []
++        duplicates: list[str] = []
++        rejected: list[tuple[str, str]] = []
++
++        for env in envelopes:
++            did = str(env.get("detection_id"))
++            try:
++                row = _to_row(env)
++                with self._conn.transaction():
++                    with self._conn.cursor() as cur:
++                        cur.execute(_INSERT_SQL, _prepare(row))
++                        inserted = cur.fetchone() is not None
++                (stored if inserted else duplicates).append(did)
++            except psycopg.errors.IntegrityError as exc:
++                rejected.append((did, f"database refused row: {str(exc).splitlines()[0]}"))
++            except (KeyError, ValueError, TypeError) as exc:
++                rejected.append((did, f"unmappable rf detection: {exc}"))
++
++        return stored, duplicates, rejected
+diff --git a/services/worker/aerix_worker/retention.py b/services/worker/aerix_worker/retention.py
+index a35b0a1..b4f614d 100644
+--- a/services/worker/aerix_worker/retention.py
++++ b/services/worker/aerix_worker/retention.py
+@@ -35,6 +35,8 @@ class SweepResult:
+     deleted_observations: int = 0
+     lapsed_tracks: int = 0
+     deleted_tracks: int = 0
++    lapsed_rf_detections: int = 0
++    deleted_rf_detections: int = 0
+ 
+ 
+ def sweep(conn: Any) -> SweepResult:
+@@ -64,6 +66,17 @@ def sweep(conn: Any) -> SweepResult:
+         )
+         result.lapsed_tracks = cur.rowcount
+ 
++        cur.execute(
++            """
++            UPDATE rf_detections
++               SET retention_class = 'STANDARD', expires_at = now()
++             WHERE retention_class = 'RULE_RETAINED'
++               AND retain_until IS NOT NULL
++               AND retain_until < now()
++            """
++        )
++        result.lapsed_rf_detections = cur.rowcount
++
+     # 2. Expired STANDARD observations, batched so a large backlog never holds
+     # one giant transaction. SET LOCAL keeps the sweep permission scoped to
+     # each batch transaction and nothing else on this connection.
+@@ -90,6 +103,30 @@ def sweep(conn: Any) -> SweepResult:
+         if deleted < BATCH:
+             break
+ 
++    # 2b. Expired STANDARD RF detections (HackRF box; 039). Same guard as
++    # observations: the row trigger re-checks class + expiry under the GUC, so
++    # verified/evidence-promoted rows and unexpired rows cannot be swept.
++    while True:
++        with conn.transaction():
++            with conn.cursor() as cur:
++                cur.execute("SET LOCAL aerix.retention_sweep = 'on'")
++                cur.execute(
++                    """
++                    DELETE FROM rf_detections
++                     WHERE detection_id IN (
++                        SELECT detection_id
++                          FROM rf_detections
++                         WHERE retention_class = 'STANDARD'
++                           AND expires_at < now()
++                         LIMIT %s)
++                    """,
++                    (BATCH,),
++                )
++                deleted = cur.rowcount
++        result.deleted_rf_detections += deleted
++        if deleted < BATCH:
++            break
++
+     # 3. Expired STANDARD tracks (derived layer).
+     with conn.cursor() as cur:
+         cur.execute(
+@@ -105,11 +142,14 @@ def sweep(conn: Any) -> SweepResult:
+ 
+     if any(
+         (result.lapsed_observations, result.deleted_observations,
+-         result.lapsed_tracks, result.deleted_tracks)
++         result.lapsed_tracks, result.deleted_tracks,
++         result.lapsed_rf_detections, result.deleted_rf_detections)
+     ):
+         log.info(
+-            "sweep: lapsed_obs=%d deleted_obs=%d lapsed_tracks=%d deleted_tracks=%d",
++            "sweep: lapsed_obs=%d deleted_obs=%d lapsed_tracks=%d deleted_tracks=%d "
++            "lapsed_rf=%d deleted_rf=%d",
+             result.lapsed_observations, result.deleted_observations,
+             result.lapsed_tracks, result.deleted_tracks,
++            result.lapsed_rf_detections, result.deleted_rf_detections,
+         )
+     return result
