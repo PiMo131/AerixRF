@@ -1,52 +1,68 @@
-# AERIX RF — HackRF-first implementation and test plan
+# AERIX RF — ANTSDR-primary implementation and test plan
 
 > **Working document for Claude Code**  
-> Branch: `aerix-rf`  
-> Current hardware: **HackRF / HackRF Pro**  
-> Phase 3 target hardware: **ANTSDR E200 AD9361**  
+> Branch: `main`  
+> **Primary receiver: ANTSDR E200 (AD9361, Zynq-7020, GbE)** — since 2026-09-18  
+> Secondary / reference receiver: **HackRF / HackRF Pro** (first field-tested platform; stays supported)  
 > Future optional hardware: **bladeRF 2.0** and other SoapySDR-capable receivers  
-> Scope status: 2026-09-04
+> Scope status: 2026-09-18 (roadmap revision 2; sections 4–7 describe the completed HackRF Phase 1 and are retained as history and as the HackRF regression baseline)
 
 ---
 
-# 0. Project order — do not skip ahead
 
-This project is deliberately split into three main phases.
+# 0. Project order — revision 2 (2026-09-18)
+
+**What changed.** The ANTSDR E200 is now the primary receiver platform. HackRF remains a
+supported secondary/reference backend and the regression baseline (its 2026-09-04 Mini 3
+CRC-valid DroneID session is the golden HackRF capture). The original "do not start ANTSDR
+until Phase 1 exit" rule is retired: Phase 1 delivered its core evidence (real-capture
+CRC-valid decode, deterministic replay, differential scan) and the receiver abstraction is
+stable enough to carry a second backend.
 
 ```text
-PHASE 1
-HackRF RF engine
-      ↓
-local field-test ready
-      ↓
-real captures from two DJI drones
-      ↓
-prove detection / classification / decode / replay
+PHASE 1  (done, HackRF)          RF engine, sessions/replay, Stage-1/2/3 separation,
+                                 first CRC-valid DJI DroneID decode from real IQ (2026-09-04)
 
-PHASE 2
-AERIX server integration
-      ↓
-RF events + evidence + correlation + retention + fleet status
+PHASE A  (active, ANTSDR)        A1 hardware discovery ......... done (research/briefs/antsdr-e200.md)
+                                 A2 IQSource backend ........... docs/design/antsdr-backend.md, tasks T1–T6
+                                 A3 canonical representation ... docs/design/canonical-representation.md
+                                 A4 acceptance: ANTSDR -> capture -> session -> replay
+                                                -> existing DroneID decoder -> CRC-valid frame
 
-PHASE 3
-ANTSDR E200
-      ↓
-DJI protocol-event backend + generic IQ backend
-      ↓
-O2/O3 decode + O4 detection + future synchronized localization
+PHASE B/C (active, data)         all accessible RF/UAV datasets to $AERIX_RF_DATASET_ROOT
+                                 (default ~/rf-datasets), master manifest, dataset brief
+                                 research/briefs/rf-datasets.md
 
-LATER
-bladeRF / USRP / other SDRs
-through the same receiver abstraction
+PHASE D  (after A3)              dataset normalisation to the canonical representation,
+                                 leakage-safe splits, benchmark "does it generalise to our ANTSDR?"
+
+PHASE E  (done, corpus)          local research corpus indexed: research/index.md + briefs
+
+PHASE 2  (unchanged scope)       AERIX server integration: RF events, evidence, correlation,
+                                 retention, fleet status — proceeds when the ANTSDR path is proven
+
+LATER                            2R2T / timestamps / UHD-style firmware, protocol-event firmware,
+                                 multi-receiver TDOA; bladeRF / USRP through the same abstraction
 ```
 
-**Do not start ANTSDR or bladeRF implementation until the Phase 1 HackRF exit criteria are met.**
+**Hard constraints carried forward**
+- Passive/receive-only. No transmit, spoofing, jamming, takeover, interference, deauthentication,
+  active interrogation.
+- Application/DSP/classification/decode stay hardware-neutral; device behaviour lives behind
+  `IQSource` + `ReceiverCapabilities`. HackRF must keep working after every ANTSDR change.
+- Evidence levels stay separate: RF candidate → probabilistic class → protocol evidence →
+  CRC-valid decode → operator ground truth.
+- Firmware changes and persistent device settings on the E200 (image swap, U-Boot env, 2R2T
+  unlock) are user-approval gates, never a builder decision.
+- Do not commit datasets, IQ, PDFs, secrets. Manifests/loaders/scripts/small fixtures only.
 
-The immediate objective is not a finished product. The immediate objective is a **trustworthy RF test instrument** that can be used with the two DJI drones physically available for testing.
-
-Phase 1 must work without the AERIX server being available.
-
-This project is passive/receive-only. Do not implement transmit, spoofing, jamming, takeover, interference, or active interrogation features.
+**Measured E200 facts that shape the design** (details and evidence grades in
+`research/briefs/antsdr-e200.md`): stock PlutoSDR-compatible IIO image, one RX exposed,
+12-bit-in-int16 samples (`iq_full_scale` 2048), **sustained RX ceiling ≈ 59 MB/s ≈ 14.8 MS/s
+on the iiod/Ethernet path** (5–10 MS/s clean, 15.36 marginal with silent loss, ≥20 unusable),
+no overflow counter, no device timestamps. Hence: canonical representation 15.36 MS/s;
+ANTSDR-IIO live profile 11.52 MS/s until the streaming path changes; legacy HackRF 20 MS/s
+sessions are never rewritten.
 
 ---
 
@@ -1113,6 +1129,15 @@ Training-data promotion must be explicit and auditable.
 ---
 
 # 9. PHASE 3 — ANTSDR E200 integration
+
+> **Revision 2 note (2026-09-18):** this phase is now ACTIVE as "Phase A" (see §0). The
+> sentence below about waiting for the server event model is retired. Authoritative,
+> up-to-date material: `research/briefs/antsdr-e200.md` (device facts, firmware options),
+> `docs/design/antsdr-backend.md` (backend design, builder tasks T1–T6),
+> `docs/design/canonical-representation.md` (rates, formats, STFT, normalisation).
+> Mode A (DJI protocol-event backend) stays a LATER track; Mode B (raw-IQ backend) is what
+> Phase A implements first.
+
 
 Only begin this after the HackRF pipeline is understood and the server event model is stable.
 

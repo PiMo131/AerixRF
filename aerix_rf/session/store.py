@@ -35,7 +35,14 @@ from typing import Any, Iterator
 
 from .. import __version__
 from ..config import Config
-from ..sdr.capture import FileIQSource, IQWindow, cs8_sample_count, to_cs8
+from ..sdr.capture import (
+    CS16_DEFAULT_FULL_SCALE,
+    FileIQSource,
+    IQWindow,
+    iq_sample_count,
+    to_cs8,
+    to_cs16,
+)
 
 SESSION_FILE = "session.json"
 DETECTIONS_FILE = "detections.jsonl"
@@ -184,7 +191,7 @@ class Session:
             gain_db = float(lna + vga) if lna is not None and vga is not None else cfg.gain_db
 
         meta: dict[str, Any] = {
-            "schema_version": 1,
+            "schema_version": 2,
             "session_id": str(uuid.uuid4()),
             "label": label,
             "started_at": _utc_iso(now.timestamp()),
@@ -195,6 +202,16 @@ class Session:
             "receiver_type": rcv.get("receiver_type", "sim" if cfg.sim else "hackrf"),
             "receiver_serial": rcv.get("receiver_serial"),
             "receiver_backend": rcv.get("backend"),
+            # New in schema 2, all optional / defaulted -- see docs/design/antsdr-backend.md
+            # section 4. A schema-1 reader (or an old session.json with none of these
+            # keys) is unaffected: every consumer treats them as optional with the
+            # documented default (cs8 / 128.0 / None / None).
+            "receiver_firmware": rcv.get("receiver_firmware"),
+            "receiver_driver": rcv.get("receiver_driver"),
+            "iq_format": rcv.get("iq_format", "cs8"),
+            "iq_full_scale": float(rcv.get("iq_full_scale", 128.0)),
+            "bandwidth_hz": rcv.get("bandwidth_hz"),
+            "gain_mode": rcv.get("gain_mode"),
             "sample_rate": float(rcv.get("sample_rate", cfg.sample_rate)),
             "center_freq_hz": (None if rcv.get("center_freq_hz", cfg.center_freq_mhz * 1e6) is None
                                else float(rcv.get("center_freq_hz", cfg.center_freq_mhz * 1e6))),
@@ -256,16 +273,39 @@ class Session:
 
     # --- writers -----------------------------------------------------------
 
-    def write_iq(self, window: IQWindow, name: str | None = None) -> Path:
-        """Store ``window.iq`` as ``iq/capture_NNNN.cs8`` and record it in session.json."""
+    def write_iq(self, window: IQWindow, name: str | None = None, *,
+                 iq_format: str = "cs8", iq_full_scale: float | None = None) -> Path:
+        """Store ``window.iq`` as ``iq/capture_NNNN.<ext>`` and record it in session.json.
+
+        ``iq_format``: ``"cs8"`` (default, unchanged legacy behaviour -- fixed 128.0
+        full scale, matches ``to_cs8``) or ``"cs16"`` for wider dynamic range (e.g.
+        research captures / ANTSDR 12-bit data). ``iq_full_scale`` is ignored for
+        cs8 (always 128.0, to_cs8's own fixed scale); for cs16 it is REQUIRED --
+        there is no safe default (32767.0 generic vs 2048.0 ANTSDR/AD9361
+        12-bit-in-int16 differ by ~24 dB) -- pass 2048.0 for measured ANTSDR data.
+        """
+        if iq_format not in ("cs8", "cs16"):
+            raise ValueError(f"unknown iq_format {iq_format!r}")
+        if iq_format == "cs16" and iq_full_scale is None:
+            raise ValueError(
+                "write_iq(iq_format='cs16') requires an explicit iq_full_scale "
+                "(e.g. 2048.0 for ANTSDR/AD9361 12-bit-in-int16 data, 32767.0 for "
+                "a generic 16-bit recording) -- there is no safe default."
+            )
         iq_dir = self.path / IQ_DIR
         iq_dir.mkdir(exist_ok=True)
+        ext = ".cs8" if iq_format == "cs8" else ".cs16"
         if name is None:
-            name = f"capture_{len(self.files) + 1:04d}.cs8"
-        elif not name.endswith(".cs8"):
-            name += ".cs8"
+            name = f"capture_{len(self.files) + 1:04d}{ext}"
+        elif not name.endswith(ext):
+            name += ext
         out = iq_dir / name
-        data = to_cs8(window.iq)
+        if iq_format == "cs8":
+            iq_full_scale = 128.0
+            data = to_cs8(window.iq)
+        else:
+            # iq_full_scale is guaranteed non-None here (checked above).
+            data = to_cs16(window.iq, full_scale=iq_full_scale)
         with open(out, "wb") as f:
             f.write(data)
             f.flush()
@@ -288,6 +328,15 @@ class Session:
             "receiver_serial": window.receiver_serial,
             "gain_db": window.gain_db,
             "capture_health": window.health(),
+            # New in schema 2, all optional / defaulted on read (see FileIQSource /
+            # Session.iq_windows()): iq_format absent -> "cs8", iq_full_scale
+            # absent -> 128.0, bandwidth_hz/timing absent -> None/{}, channel_id
+            # absent -> 0.
+            "iq_format": iq_format,
+            "iq_full_scale": float(iq_full_scale),
+            "bandwidth_hz": window.bandwidth_hz,
+            "channel_id": int(window.channel_id),
+            "timing": dict(window.timing) if window.timing else {},
         }
         self.files.append(entry)
         self.meta.setdefault("counts", {})["iq_windows"] = len(self.files)
@@ -390,17 +439,27 @@ class Session:
                     f"session.json says {entry.get('sha256')}, file is {got} "
                     "(file modified, truncated or corrupted since capture)")
             sr = float(entry.get("sample_rate") or cfg.sample_rate)
-            n = int(entry.get("sample_count") or cs8_sample_count(str(p)))
+            # iq_format/iq_full_scale absent (schema-1 session, written before this
+            # field existed) -> None here, and FileIQSource itself applies the
+            # cs8/128.0 default -- this is the load-bearing backward-compat path.
+            iq_fmt = entry.get("iq_format")
+            n = int(entry.get("sample_count") or iq_sample_count(str(p), iq_fmt or "cs8"))
             # +0.5 sample so int(sr * window_s) in FileIQSource lands on n exactly
             # (n / sr alone can round to n-1 in float64).
             file_cfg = replace(cfg, sample_rate=sr, window_s=(n + 0.5) / sr if sr else cfg.window_s)
             meta = {k: entry.get(k) for k in ("sample_rate", "center_freq_hz", "captured_at",
-                                              "receiver_type", "receiver_serial", "gain_db")}
+                                              "receiver_type", "receiver_serial", "gain_db",
+                                              "iq_format", "iq_full_scale")}
             src = FileIQSource(file_cfg, path=str(p), meta=meta)
             for w in src.windows():
                 w.complete = bool(entry.get("complete", True))
                 w.dropped_samples = entry.get("dropped_samples")
                 w.expected_samples = entry.get("expected_samples", w.expected_samples)
+                # New-in-schema-2 fields; absent on a schema-1 entry -> defaults
+                # matching IQWindow's own dataclass defaults (None / 0 / {}).
+                w.bandwidth_hz = entry.get("bandwidth_hz")
+                w.channel_id = int(entry.get("channel_id") or 0)
+                w.timing = dict(entry.get("timing") or {})
                 w.metadata.update({"session_id": self.session_id, "session_file": entry["file"],
                                    "sha256": got, "replay": True})
                 if isinstance(entry.get("capture_health"), dict):

@@ -43,12 +43,26 @@ DEFAULT_SESSION_ROOT = os.environ.get("AERIX_RF_SESSIONS", "sessions")
 
 # --- helpers -------------------------------------------------------------------
 
+# Backends that take the HackRF-specific --lna/--vga/--amp gain-stage flags;
+# every other backend uses the generic --gain-db/--gain-mode instead.
+_HACKRF_BACKENDS = ("libhackrf", "hackrf_transfer", "soapy")
+
+
 def _cfg_from(args: argparse.Namespace) -> Config:
     cfg = Config.from_env()
     if getattr(args, "sim", False):
         cfg.sim = True
     if getattr(args, "center_mhz", None):
         cfg.center_freq_mhz = float(args.center_mhz)
+
+    backend = (getattr(args, "backend", None) or "").strip().lower() or None
+    hackrf_flags = [name for name in ("lna", "vga", "amp")
+                    if getattr(args, name, None) not in (None, False)]
+    if hackrf_flags and backend is not None and backend not in _HACKRF_BACKENDS and not cfg.sim:
+        raise SystemExit(
+            f"--{hackrf_flags[0]} is a HackRF-only flag; backend {backend!r} does not use it "
+            "(use --gain-db / --gain-mode instead)"
+        )
     if getattr(args, "lna", None) is not None:
         cfg.lna_gain = int(args.lna)
     if getattr(args, "vga", None) is not None:
@@ -57,15 +71,47 @@ def _cfg_from(args: argparse.Namespace) -> Config:
         cfg.amp = True
     if getattr(args, "sample_rate", None):
         cfg.sample_rate = float(args.sample_rate)
+        cfg.sample_rate_requested = True
+    if getattr(args, "gain_db", None) is not None:
+        cfg.gain_db = float(args.gain_db)
+    if getattr(args, "gain_mode", None):
+        cfg.gain_mode = str(args.gain_mode)
+    if getattr(args, "antsdr_uri", None):
+        cfg.antsdr_uri = str(args.antsdr_uri)
+    if getattr(args, "antsdr_profile", None):
+        cfg.antsdr_profile = str(args.antsdr_profile)
     return cfg
 
 
 def _receiver_meta(source, cfg: Config) -> dict:
+    """Session receiver metadata, read from the actual constructed ``source``
+    (capabilities + the attributes a backend sets from its own applied
+    config), never from ``cfg``'s own dataclass defaults -- a fixed-rate-
+    profile backend (antsdr_iio) can end up running at a different rate than
+    ``cfg.sample_rate`` (see ``registry._make_antsdr_iio``)."""
     caps = source.capabilities
+    is_hackrf = caps.receiver_type == "hackrf"
+    sample_rate = getattr(source, "sample_rate", None)
+    if sample_rate is None:
+        sample_rate = cfg.sample_rate
+    center_freq_hz = getattr(source, "center_freq_hz", None)
+    if center_freq_hz is None:
+        center_freq_hz = cfg.center_freq_mhz * 1e6
+    gain_db = getattr(source, "gain_db", None)
+    if gain_db is None:
+        gain_db = cfg.gain_db
     meta = {"receiver_type": caps.receiver_type, "receiver_serial": getattr(source, "serial", None),
-            "backend": type(source).__name__, "sample_rate": cfg.sample_rate,
-            "center_freq_hz": cfg.center_freq_mhz * 1e6,
-            "lna_gain": cfg.lna_gain, "vga_gain": cfg.vga_gain, "amp": cfg.amp, "gain_db": cfg.gain_db}
+            "backend": caps.backend, "sample_rate": sample_rate,
+            "center_freq_hz": center_freq_hz,
+            "lna_gain": cfg.lna_gain if is_hackrf else None,
+            "vga_gain": cfg.vga_gain if is_hackrf else None,
+            "amp": cfg.amp if is_hackrf else None, "gain_db": gain_db,
+            # Source-of-truth capabilities, not the hardcoded cs8/128.0 Session.create()
+            # default -- a cs16 backend (ANTSDR) must not be silently recorded as cs8.
+            "iq_format": caps.native_iq_format, "iq_full_scale": caps.native_full_scale,
+            "receiver_firmware": caps.firmware,
+            "bandwidth_hz": getattr(source, "rf_bandwidth", None),
+            "gain_mode": getattr(source, "gain_mode", None)}
     stream = getattr(source, "stream", None)
     if stream is not None and hasattr(stream, "info"):
         meta.update({k: v for k, v in stream.info().items() if k in ("board_id", "firmware")})
@@ -102,14 +148,34 @@ def _add_test_flags(p: argparse.ArgumentParser) -> None:
     g.add_argument("--session-root", default=DEFAULT_SESSION_ROOT)
 
 
+def _backend_help() -> str:
+    """``--backend`` help text, generated from the registry so a new backend
+    entry doesn't need a second place updated (registry import is safe here:
+    it never touches optional hardware libs at import time)."""
+    from .sdr.registry import REGISTRY
+    return " | ".join(sorted(REGISTRY))
+
+
 def _add_radio_flags(p: argparse.ArgumentParser) -> None:
     g = p.add_argument_group("radio")
     g.add_argument("--center-mhz", type=float, default=None)
-    g.add_argument("--sample-rate", type=float, default=None)
-    g.add_argument("--lna", type=int, default=None, help="HackRF LNA gain 0-40 step 8")
-    g.add_argument("--vga", type=int, default=None, help="HackRF VGA gain 0-62 step 2")
-    g.add_argument("--amp", action="store_true", help="enable the +14 dB front-end amp")
-    g.add_argument("--backend", default=None, help="libhackrf | hackrf_transfer | soapy")
+    g.add_argument("--sample-rate", type=float, default=None,
+                   help="Hz; default: the selected backend's own profile default "
+                        "(HackRF backends: 20e6)")
+    g.add_argument("--lna", type=int, default=None, help="HackRF-only: LNA gain 0-40 step 8")
+    g.add_argument("--vga", type=int, default=None, help="HackRF-only: VGA gain 0-62 step 2")
+    g.add_argument("--amp", action="store_true", help="HackRF-only: enable the +14 dB front-end amp")
+    g.add_argument("--gain-db", type=float, default=None,
+                   help="generic RX gain in dB (soapy / antsdr_iio manual gain)")
+    g.add_argument("--gain-mode", default=None, choices=["manual", "agc_slow", "agc_fast"],
+                   help="antsdr_iio only: RX gain control mode")
+    g.add_argument("--antsdr-uri", default=None,
+                   help="antsdr_iio only: libiio network URI, e.g. ip:192.168.1.10 "
+                        "(default: $AERIX_RF_ANTSDR_URI or ip:192.168.1.10)")
+    g.add_argument("--antsdr-profile", default=None,
+                   choices=["default", "antsdr_13p44", "antsdr_11p52"],
+                   help="antsdr_iio only: named sample-rate/bandwidth profile")
+    g.add_argument("--backend", default=None, help=_backend_help())
     g.add_argument("--sim", action="store_true", help="synthetic IQ, no hardware")
 
 
@@ -123,17 +189,58 @@ def _print_frame(fr: FrameResult, as_json: bool) -> None:
 # --- commands ------------------------------------------------------------------
 
 def cmd_info(args) -> int:
-    from .sdr.capture import hackrf_serial_from_info
-    try:
-        from .sdr.libhackrf import HackRFStream
-        s = HackRFStream(20e6, 2440e6)
-        info = s.info()
-        s.lib.hackrf_close(s.dev); s.lib.hackrf_exit()
-        info["backend"] = "libhackrf (continuous)"
-    except Exception as exc:  # noqa: BLE001
-        info = {"error": str(exc), "serial_via_hackrf_info": hackrf_serial_from_info()}
+    """Report every known backend's availability (never raises just because no
+    hardware is attached) plus the capabilities of whichever one would actually
+    be selected -- either the explicit ``--backend`` / ``$AERIX_RF_BACKEND``, or
+    the first available entry in the documented auto order.
+
+    Always prints one JSON object (the ``--json`` flag exists for CLI-flag
+    symmetry with the other commands; the shape doesn't change)."""
+    from dataclasses import asdict
+    from .sdr.registry import REGISTRY, AUTO_ORDER
+
+    cfg = _cfg_from(args)
+    prefer = (getattr(args, "backend", None)
+              or os.environ.get("AERIX_RF_BACKEND", "").strip().lower() or None)
+    if cfg.sim and not prefer:
+        prefer = "sim"
+
+    backends = []
+    for name, entry in REGISTRY.items():
+        available, reason = entry.probe()
+        backends.append({"name": name, "available": available, "reason": reason})
+
+    try_order = [prefer] if prefer else list(AUTO_ORDER)
+    selected_backend = None
+    selected_reason = None
+    for name in try_order:
+        entry = REGISTRY.get(name)
+        if entry is None:
+            selected_reason = f"unknown backend {name!r}; known backends: {', '.join(sorted(REGISTRY))}"
+            continue
+        available, reason = entry.probe()
+        if available:
+            selected_backend = name
+            break
+        selected_reason = reason
+
+    capabilities = None
+    if selected_backend is not None:
+        caps = REGISTRY[selected_backend].capabilities
+        if caps is not None:
+            capabilities = asdict(caps)
+
     from .classify.model import model_available, _model_path
-    info["model"] = str(_model_path()) if model_available() else None
+    info = {
+        "backends": backends,
+        "auto_order": list(AUTO_ORDER),
+        "requested_backend": prefer,
+        "selected_backend": selected_backend,
+        "selected_backend_reason": None if selected_backend else selected_reason,
+        "capabilities": capabilities,
+        "sim_capabilities": asdict(REGISTRY["sim"].capabilities),
+        "model": str(_model_path()) if model_available() else None,
+    }
     print(json.dumps(info, indent=2))
     return 0
 
@@ -221,7 +328,15 @@ def _run_locked(args, *, record_all: bool) -> int:
 
     def _persist(win, fr: FrameResult, rec: dict, keep_iq: bool, want_png: bool) -> None:
         if keep_iq:
-            rec["iq_file"] = session.write_iq(win).name
+            # The window carries its own native format (cs16/2048 for ANTSDR); only
+            # fall back to the legacy cs8/128.0 default when a source doesn't stamp
+            # it (HackRF, sim) -- never silently downcast a cs16 window to cs8.
+            iq_format = win.metadata.get("iq_format") or "cs8"
+            iq_full_scale = win.metadata.get("iq_full_scale")
+            if iq_full_scale is None:
+                iq_full_scale = 128.0
+            rec["iq_file"] = session.write_iq(win, iq_format=iq_format,
+                                              iq_full_scale=iq_full_scale).name
         if want_png:
             rec["spectrogram"] = session.write_spectrogram(
                 spectrogram.to_png(fr.spec), win.captured_at, tag=getattr(fr.det, "morphology", "")).name
@@ -362,7 +477,10 @@ def build_parser() -> argparse.ArgumentParser:
     ap.add_argument("-v", "--verbose", action="store_true")
     sub = ap.add_subparsers(dest="cmd")
 
-    p = sub.add_parser("info", help="show the attached receiver and model status")
+    p = sub.add_parser("info", help="show every known backend's availability and capabilities")
+    p.add_argument("--backend", default=None, help=_backend_help())
+    p.add_argument("--sim", action="store_true", help="report the sim backend instead of probing hardware")
+    p.add_argument("--json", action="store_true", help="present for flag symmetry; output is always JSON")
     p.set_defaults(fn=cmd_info)
 
     p = sub.add_parser("baseline", help="record an ambient sweep baseline (drones OFF)")

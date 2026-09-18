@@ -1,0 +1,149 @@
+{
+  "mavic_air_2": [
+    {
+      "drone_altitude": 42.0,
+      "drone_height": 141.0,
+      "drone_lat": 51.446356038552615,
+      "drone_lon": 7.267219064826881,
+      "home_lat": 51.44628155403916,
+      "home_lon": 7.267356574697869,
+      "operator_lat": 51.44622998783754,
+      "operator_lon": 7.2671044732677235,
+      "protocol": "ocusync2",
+      "sequence": 591,
+      "serial": "1WNBH3900201N1"
+    }
+  ],
+  "mini2_sm": [
+    {
+      "drone_altitude": 0.0,
+      "drone_height": 0.0,
+      "drone_lat": 0.0,
+      "drone_lon": 0.0,
+      "home_lat": 0.0,
+      "home_lon": 0.0,
+      "operator_lat": 51.44719828651242,
+      "operator_lon": 7.266531515471938,
+      "protocol": "ocusync2",
+      "sequence": 786,
+      "serial": "SysSecWasHere "
+    },
+    {
+      "drone_altitude": 0.0,
+      "drone_height": 0.0,
+      "drone_lat": 0.0,
+      "drone_lon": 0.0,
+      "home_lat": 0.0,
+      "home_lon": 0.0,
+      "operator_lat": 51.44719828651242,
+      "operator_lon": 7.266531515471938,
+      "protocol": "ocusync2",
+      "sequence": 787,
+      "serial": "SysSecWasHere "
+    },
+    {
+      "drone_altitude": 0.0,
+      "drone_height": 0.0,
+      "drone_lat": 0.0,
+      "drone_lon": 0.0,
+      "home_lat": 0.0,
+      "home_lon": 0.0,
+      "operator_lat": 51.44719828651242,
+      "operator_lon": 7.266531515471938,
+      "protocol": "ocusync2",
+      "sequence": 788,
+      "serial": "SysSecWasHere "
+    },
+    {
+      "drone_altitude": 0.0,
+      "drone_height": 0.0,
+      "drone_lat": 0.0,
+      "drone_lon": 0.0,
+      "home_lat": 0.0,
+      "home_lon": 0.0,
+      "operator_lat": 51.44719828651242,
+      "operator_lon": 7.266531515471938,
+      "protocol": "ocusync2",
+      "sequence": 788,
+      "serial": "SysSecWasHere "
+    },
+    {
+      "drone_altitude": 0.0,
+      "drone_height": 0.0,
+      "drone_lat": 0.0,
+      "drone_lon": 0.0,
+      "home_lat": 0.0,
+      "home_lon": 0.0,
+      "operator_lat": 51.44719828651242,
+      "operator_lon": 7.266531515471938,
+      "protocol": "ocusync2",
+      "sequence": 789,
+      "serial": "SysSecWasHere "
+    },
+    {
+      "drone_altitude": 0.0,
+      "drone_height": 0.0,
+      "drone_lat": 0.0,
+      "drone_lon": 0.0,
+      "home_lat": 0.0,
+      "home_lon": 0.0,
+      "operator_lat": 51.44719828651242,
+      "operator_lon": 7.266531515471938,
+      "protocol": "ocusync2",
+      "sequence": 800,
+      "serial": "SysSecWasHere "
+    },
+    {
+      "drone_altitude": 0.0,
+      "drone_height": 0.0,
+      "drone_lat": 0.0,
+      "drone_lon": 0.0,
+      "home_lat": 0.0,
+      "home_lon": 0.0,
+      "operator_lat": 51.44719828651242,
+      "operator_lon": 7.266531515471938,
+      "protocol": "ocusync2",
+      "sequence": 804,
+      "serial": "SysSecWasHere "
+    },
+    {
+      "drone_altitude": 0.0,
+      "drone_height": 0.0,
+      "drone_lat": 0.0,
+      "drone_lon": 0.0,
+      "home_lat": 0.0,
+      "home_lon": 0.0,
+      "operator_lat": 51.44719828651242,
+      "operator_lon": 7.266531515471938,
+      "protocol": "ocusync2",
+      "sequence": 804,
+      "serial": "SysSecWasHere "
+    },
+    {
+      "drone_altitude": 0.0,
+      "drone_height": 0.0,
+      "drone_lat": 0.0,
+      "drone_lon": 0.0,
+      "home_lat": 0.0,
+      "home_lon": 0.0,
+      "operator_lat": 51.44719828651242,
+      "operator_lon": 7.266531515471938,
+      "protocol": "ocusync2",
+      "sequence": 805,
+      "serial": "SysSecWasHere "
+    },
+    {
+      "drone_altitude": 0.0,
+      "drone_height": 0.0,
+      "drone_lat": 0.0,
+      "drone_lon": 0.0,
+      "home_lat": 0.0,
+      "home_lon": 0.0,
+      "operator_lat": 51.44719828651242,
+      "operator_lon": 7.266531515471938,
+      "protocol": "ocusync2",
+      "sequence": 806,
+      "serial": "SysSecWasHere "
+    }
+  ]
+}

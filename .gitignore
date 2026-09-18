@@ -10,3 +10,7 @@ sessions/
 *.npz
 research/library/
 *.zip
+
+# user-space SDR tooling (micromamba env) installed by agents
+.antsdr-tools/
+bench/out/

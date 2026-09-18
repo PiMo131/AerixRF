@@ -29,6 +29,7 @@ from dataclasses import dataclass, field
 from functools import lru_cache
 
 import numpy as np
+from scipy.signal import filtfilt, firwin
 
 from . import ofdm
 from .zc import find_zc_symbol_start_int_cfo
@@ -78,8 +79,45 @@ BURST_SPECTRUM_SMOOTH_BINS = 3
 BURST_SPECTRUM_FLOOR_DB = -10.0       # occupied band = contiguous bins within this of the peak
 BURST_SPECTRUM_EDGE_BINS = 2          # band reaching this close to the window edge = clipped
 DRONEID_MIN_OCCUPIED_HZ = 4.0e6
-DRONEID_MAX_OCCUPIED_HZ = 14.0e6
+# Tightened from 14.0e6 (2026-09-18, decoder-blocker-robustness.md): the old
+# _grow_band could grow *through* a stronger adjacent blocker's edge and land
+# on a ~12 MHz band that was never DroneID; 11 MHz still comfortably covers
+# the ~9 MHz nominal occupied width plus edge-clip slop.
+DRONEID_MAX_OCCUPIED_HZ = 11.0e6
 CANDIDATE_POOL_FACTOR = 32            # envelope candidates spectrally screened per attempted burst
+
+# Channel-select filter applied (after mixing a hypothesis centre to DC, before
+# _demodulate/ZC correlation) so a strong out-of-band emitter sharing the slice
+# cannot dominate the ZC correlator's normalisation (root cause in
+# docs/design/decoder-blocker-robustness.md). Zero-phase (filtfilt) so it adds
+# no group delay that would shift the burst's timing/CFO estimate. The cutoff
+# is deliberately just outside the ~9.0 MHz nominal DroneID occupied width
+# (+/-4.5 MHz): a brick wall at 4.60 MHz starves the outer carriers to 0/8 CRC
+# on the wideband-blocker bench arm, while 4.51 MHz recovers full sensitivity.
+CHANNEL_FILTER_CUTOFF_HZ = 4.51e6
+CHANNEL_FILTER_TAPS = 129
+CHANNEL_FILTER_BETA = 10.0            # Kaiser window beta
+
+# Band-peel centre-hypothesis search (per candidate slice): repeatedly take the
+# PSD's remaining argmax, grow its occupied band (_grow_band), zero those bins,
+# and repeat -- a stronger blocker is peeled away first, exposing the real
+# DroneID band underneath on a later round. Bounds and caps per
+# docs/design/decoder-blocker-robustness.md.
+PEEL_ROUNDS = 8
+PEEL_BW_MIN_HZ = DRONEID_MIN_OCCUPIED_HZ
+PEEL_BW_MAX_HZ = DRONEID_MAX_OCCUPIED_HZ
+PEEL_DEDUP_HZ = 0.5e6
+MAX_CENTRE_HYPOTHESES = 4
+
+# A continuous stronger emitter elsewhere in the window (CW spur or a
+# band-limited noise-like blocker) can dominate a single burst slice's PSD and
+# pull the old single-argmax band search onto the wrong signal. burst_spectrum
+# now scores several candidate bands per slice instead of just the global
+# peak; these bound that search (field lesson, 2026-09-18 bench sweep).
+BURST_SPECTRUM_MAX_PEAKS = 4          # local maxima considered per slice
+BURST_SPECTRUM_PEAK_SEP_HZ = 2.0e6    # minimum spacing enforced between them
+BURST_SPECTRUM_SPUR_DB = 20.0         # narrowband spur excised before a retry
+BURST_SPECTRUM_SPUR_MAX_HZ = 0.5e6    # ... if narrower than this
 
 
 @dataclass
@@ -147,6 +185,9 @@ class DecodeAttempt:
     center_offset_hz: float = 0.0    # burst centre relative to the window centre (PSD centroid)
     occupied_bw_hz: float = 0.0      # contiguous band within BURST_SPECTRUM_FLOOR_DB of the peak
     droneid_shaped: bool = False     # occupied_bw within the DroneID range -> tried first
+    alt_centers_hz: tuple[float, ...] = ()  # other DroneID-shaped bands in this slice (reporting only)
+    hypotheses_tried: int = 0        # centre hypotheses (band-peel) actually mixed+filtered+demodulated
+    chosen_center_offset_mhz: float = 0.0  # centre hypothesis (MHz) that produced the reported level
 
 
 def generate_scrambler_seq(num_bits: int, x2_init: np.ndarray = _X2_INIT) -> np.ndarray:
@@ -447,24 +488,13 @@ def _segment_envelope(env: np.ndarray, block: int, sample_rate: float, *,
     return cands[:max_bursts]
 
 
-def burst_spectrum(iq: np.ndarray, sample_rate: float) -> tuple[float, float]:
-    """Coarse ``(center_offset_hz, occupied_bw_hz)`` of one burst slice.
-
-    Averaged Hann-windowed |FFT|^2 over the slice, smoothed over a few bins; the
-    occupied band is the contiguous run of bins within BURST_SPECTRUM_FLOOR_DB of
-    the peak (2-bin gaps bridged so the DroneID DC null does not split it) and
-    the centre is the midpoint of its edges -- an OFDM spectrum's edges are sharp,
-    so this holds to ~20 kHz at 5 dB SNR where a power centroid wanders by
-    +/-70 kHz with the data. A band that reaches the window edge is clipped, so
-    its centre is placed half the nominal DroneID occupied width in from the
-    visible edge (a 2429.5 MHz channel in a 2437 MHz window: visible -10..-3 MHz,
-    centre -7.5 MHz). A HackRF DC spike is clipped to its neighbours first.
-    """
+def _burst_psd(iq: np.ndarray, sample_rate: float) -> np.ndarray | None:
+    """Averaged Hann-windowed |FFT|^2 of a burst slice, smoothed and DC-clipped."""
     n = BURST_SPECTRUM_FFT
     x = np.asarray(iq)
     frames = x.size // n
     if frames == 0:
-        return 0.0, 0.0
+        return None
     x = np.asarray(x[:frames * n], dtype=np.complex64).reshape(frames, n)
     x = x * np.hanning(n).astype(np.float32)
     psd = np.fft.fftshift(np.mean(np.abs(np.fft.fft(x, axis=1)) ** 2, axis=0))
@@ -473,18 +503,38 @@ def burst_spectrum(iq: np.ndarray, sample_rate: float) -> tuple[float, float]:
     k = BURST_SPECTRUM_SMOOTH_BINS
     if k > 1:
         psd = np.convolve(psd, np.ones(k) / k, mode="same")
-    peak = float(psd.max())
-    if peak <= 0.0:
-        return 0.0, 0.0
+    return psd
+
+
+def _grow_band_bins(psd: np.ndarray, imax: int) -> tuple[int, int]:
+    """Inclusive bin span ``(lo, hi)`` of the occupied band grown from ``imax``.
+
+    Shared by :func:`_grow_band` (public behaviour unchanged) and
+    :func:`_centre_hypotheses`, which needs the raw span to zero those bins
+    before peeling the next round.
+    """
+    n = psd.size
+    peak = float(psd[imax])
     above = psd > peak * 10.0 ** (BURST_SPECTRUM_FLOOR_DB / 10.0)
     gap = 2
-    imax = int(np.argmax(psd))
     lo = imax
     while lo > 0 and above[max(0, lo - gap):lo].any():
         lo -= 1
     hi = imax
     while hi < n - 1 and above[hi + 1:hi + 1 + gap].any():
         hi += 1
+    return lo, hi
+
+
+def _grow_band(psd: np.ndarray, sample_rate: float, imax: int) -> tuple[float, float]:
+    """Grow the occupied band outward from bin ``imax`` (existing FLOOR_DB rule).
+
+    Returns ``(center_hz, bw_hz)``; the edge-clip centring rule from the
+    original :func:`burst_spectrum` is preserved.
+    """
+    n = psd.size
+    mid = n // 2
+    lo, hi = _grow_band_bins(psd, imax)
     df = sample_rate / n
     f_lo = (lo - mid) * df
     f_hi = (hi + 1 - mid) * df
@@ -502,19 +552,243 @@ def burst_spectrum(iq: np.ndarray, sample_rate: float) -> tuple[float, float]:
     return float(center), float(bw)
 
 
+@lru_cache(maxsize=8)
+def _channel_filter_taps(sample_rate: float) -> np.ndarray:
+    """Kaiser-windowed lowpass FIR taps for :func:`_channel_filter`, cached per fs."""
+    return firwin(CHANNEL_FILTER_TAPS, CHANNEL_FILTER_CUTOFF_HZ, fs=sample_rate,
+                 window=("kaiser", CHANNEL_FILTER_BETA))
+
+
+def _channel_filter(iq: np.ndarray, sample_rate: float) -> np.ndarray:
+    """Zero-phase channel-select FIR, applied after mixing a hypothesis centre to
+    DC and before :func:`_demodulate`/ZC correlation.
+
+    Without this, a strong out-of-band continuous emitter (CW spur or
+    band-limited blocker) dominates the ZC correlator's own-energy
+    normalisation and collapses its score below threshold even with a
+    perfectly correct centre (see docs/design/decoder-blocker-robustness.md).
+    ``filtfilt`` (zero group delay) so burst timing/CFO estimates downstream
+    are unaffected. Skipped for slices shorter than ``3 * CHANNEL_FILTER_TAPS``
+    (filtfilt's default edge padding would fail or badly distort a short
+    slice); such slices are left unfiltered rather than raising.
+    """
+    iq = np.asarray(iq)
+    taps = _channel_filter_taps(float(sample_rate))
+    if iq.size < 3 * taps.size:
+        return iq
+    return filtfilt(taps, [1.0], iq)
+
+
+def _centre_hypotheses(iq: np.ndarray, sample_rate: float) -> list[float]:
+    """Ordered centre-frequency (Hz) hypotheses for one candidate slice.
+
+    Band-peel: repeatedly take the slice PSD's remaining argmax, grow its
+    occupied band (:func:`_grow_band`), zero those bins, and repeat up to
+    ``PEEL_ROUNDS`` times. A stronger blocker's band is peeled away first
+    (zeroed), so the real DroneID band's edges are clean on a later round --
+    this is what makes the wideband-blocker bench arm resolve to the true
+    centre instead of the blocker's. Only bands shaped like DroneID
+    (``PEEL_BW_MIN_HZ..PEEL_BW_MAX_HZ`` occupied, ``|centre| < fs/2 - 1 MHz``)
+    are kept, in peel (power) order, deduped within ``PEEL_DEDUP_HZ`` of an
+    already-kept centre. Centre 0.0 (no mix) is always appended as a final
+    fallback -- a mis-shaped or fully-excised peel must never leave the caller
+    with zero hypotheses -- unless a kept centre is already that close to DC.
+    Capped at ``MAX_CENTRE_HYPOTHESES`` entries total.
+    """
+    psd = _burst_psd(iq, sample_rate)
+    if psd is None:
+        return [0.0]
+    n = psd.size
+    mid = n // 2
+    df = sample_rate / n
+    limit_hz = sample_rate / 2.0 - 1.0e6
+    work = psd.astype(np.float64).copy()
+    out: list[float] = []
+    for _ in range(PEEL_ROUNDS):
+        if work.max() <= 0.0:
+            break
+        imax = int(np.argmax(work))
+        centre, bw = _grow_band(work, sample_rate, imax)
+        lo, hi = _grow_band_bins(work, imax)
+        work[lo:hi + 1] = 0.0
+        if abs(centre) < limit_hz and PEEL_BW_MIN_HZ <= bw <= PEEL_BW_MAX_HZ:
+            if not any(abs(centre - c) < PEEL_DEDUP_HZ for c in out):
+                out.append(centre)
+    out = out[:max(0, MAX_CENTRE_HYPOTHESES - 1)]
+    if not any(abs(c) < PEEL_DEDUP_HZ for c in out):
+        out.append(0.0)
+    return out[:MAX_CENTRE_HYPOTHESES]
+
+
+BURST_SPECTRUM_ALT_MIN_DB = -30.0     # local maxima below this (rel. to the slice peak) are noise, not candidates
+
+
+def _local_peak_bins(psd: np.ndarray, sample_rate: float, *, k: int, min_sep_hz: float,
+                     min_rel_db: float = BURST_SPECTRUM_ALT_MIN_DB) -> list[int]:
+    """Up to ``k`` local maxima of ``psd``, tallest first, >= ``min_sep_hz`` apart.
+
+    Iteratively takes the remaining argmax and masks its neighbourhood; the
+    first bin returned is always the single global argmax bin (bit-identical
+    to the pre-fix :func:`burst_spectrum` candidate). Peaks more than
+    ``min_rel_db`` below the slice's own peak are dropped -- residual
+    floating-point noise in an otherwise-empty band (e.g. a synthetic
+    band-limited signal's zeroed-out FFT bins) must not masquerade as a
+    plausible second band.
+    """
+    n = psd.size
+    df = sample_rate / n
+    sep_bins = max(1, int(round(min_sep_hz / df)))
+    work = psd.astype(np.float64).copy()
+    top = float(work.max())
+    floor = top * 10.0 ** (min_rel_db / 10.0) if top > 0.0 else 0.0
+    peaks: list[int] = []
+    for _ in range(max(1, k)):
+        i = int(np.argmax(work))
+        if work[i] <= 0.0 or (peaks and work[i] < floor):
+            break
+        peaks.append(i)
+        work[max(0, i - sep_bins):min(n, i + sep_bins + 1)] = -1.0
+    return peaks
+
+
+def _burst_spectrum_candidates(iq: np.ndarray, sample_rate: float,
+                               ) -> list[tuple[float, float, bool]]:
+    """``[(center_offset_hz, occupied_bw_hz, droneid_shaped), ...]`` bands in one slice.
+
+    Entry 0 is always the band grown from the slice's single strongest bin --
+    bit-identical to the pre-fix :func:`burst_spectrum` (a window with only
+    one real band therefore behaves exactly as before). When a second,
+    stronger, continuous emitter (CW spur or band-limited noise) shares the
+    slice, its band dominates entry 0, so up to BURST_SPECTRUM_MAX_PEAKS - 1
+    further local maxima (>= BURST_SPECTRUM_PEAK_SEP_HZ apart, within
+    BURST_SPECTRUM_ALT_MIN_DB of the slice peak) are also scored and appended,
+    DroneID-shaped ones (occupied width in [DRONEID_MIN_OCCUPIED_HZ,
+    DRONEID_MAX_OCCUPIED_HZ]) first, closest to the nominal ~9 MHz occupied
+    width and flattest (lowest in-band dB spread) first among those -- so the
+    real DroneID band is not silently discarded, only demoted to an
+    alternate. A narrowband spur (>= BURST_SPECTRUM_SPUR_DB above the slice
+    median, narrower than BURST_SPECTRUM_SPUR_MAX_HZ -- e.g. a CW blocker) is
+    additionally excised and the alternate search retried on the residual
+    PSD, in case it was masking a real band's edge.
+    """
+    psd = _burst_psd(iq, sample_rate)
+    if psd is None:
+        return []
+    n = psd.size
+    df = sample_rate / n
+    peak = float(psd.max())
+    if peak <= 0.0:
+        return []
+
+    fft_size = ofdm.fft_size_for(ofdm.NOMINAL_SAMPLE_RATE)
+    nominal = ofdm.data_carrier_indices(fft_size).size * ofdm.CARRIER_SPACING_HZ
+
+    def score(imax: int, psd_src: np.ndarray) -> tuple[float, float, bool, float]:
+        center, bw = _grow_band(psd_src, sample_rate, imax)
+        shaped = DRONEID_MIN_OCCUPIED_HZ <= bw <= DRONEID_MAX_OCCUPIED_HZ
+        band = psd_src[max(0, imax - 1):imax + 2]
+        band_db = 10.0 * np.log10(np.maximum(band, 1e-30) / max(float(psd_src[imax]), 1e-30))
+        flatness = float(np.std(band_db))
+        return center, bw, shaped, flatness
+
+    peak_bins = _local_peak_bins(psd, sample_rate, k=BURST_SPECTRUM_MAX_PEAKS,
+                                 min_sep_hz=BURST_SPECTRUM_PEAK_SEP_HZ)
+    if not peak_bins:
+        return []
+    primary = score(peak_bins[0], psd)                   # == old single-argmax burst_spectrum result
+    alt_results: list[tuple[float, float, bool, float]] = [score(i, psd) for i in peak_bins[1:]]
+
+    # Excise a strong narrowband spur (CW blocker) and retry once: replace it
+    # with its immediate neighbours' level (same trick as the DC-spike clip)
+    # so a band edge that was hiding under/behind it can be recovered.
+    med = float(np.median(psd[psd > 0])) if np.any(psd > 0) else 0.0
+    if med > 0.0:
+        spur_bins = max(1, int(round(BURST_SPECTRUM_SPUR_MAX_HZ / df)))
+        is_spur = psd > med * 10.0 ** (BURST_SPECTRUM_SPUR_DB / 10.0)
+        if is_spur.any():
+            # Keep only spur runs narrower than spur_bins.
+            edges = np.diff(np.concatenate(([0], is_spur.astype(np.int8), [0])))
+            starts = np.flatnonzero(edges == 1)
+            ends = np.flatnonzero(edges == -1)
+            excise = np.zeros(n, dtype=bool)
+            for s, e in zip(starts, ends):
+                if e - s <= spur_bins:
+                    excise[s:e] = True
+            if excise.any():
+                psd2 = psd.copy()
+                lo_fill = np.roll(psd2, 1)
+                hi_fill = np.roll(psd2, -1)
+                psd2[excise] = np.minimum(lo_fill[excise], hi_fill[excise])
+                for _ in range(3):                       # a wide spur needs a few passes
+                    lo_fill = np.roll(psd2, 1)
+                    hi_fill = np.roll(psd2, -1)
+                    still = excise & (psd2 >= med * 10.0 ** (BURST_SPECTRUM_SPUR_DB / 10.0))
+                    if not still.any():
+                        break
+                    psd2[still] = np.minimum(lo_fill[still], hi_fill[still])
+                for imax in _local_peak_bins(psd2, sample_rate, k=BURST_SPECTRUM_MAX_PEAKS,
+                                             min_sep_hz=BURST_SPECTRUM_PEAK_SEP_HZ):
+                    alt_results.append(score(imax, psd2))
+
+    # Rank the alternates only: DroneID-shaped first, then closest to the
+    # nominal occupied width, then flattest; dedup near-identical centres
+    # (within one peak spacing) against each other and against the primary.
+    alt_results.sort(key=lambda r: (not r[2], abs(r[1] - nominal), r[3]))
+    ranked: list[tuple[float, float, bool]] = [(primary[0], primary[1], primary[2])]
+    for center, bw, shaped, _flat in alt_results:
+        if any(abs(center - c) < BURST_SPECTRUM_PEAK_SEP_HZ for c, _b, _s in ranked):
+            continue
+        ranked.append((center, bw, shaped))
+    return ranked
+
+
+def burst_spectrum(iq: np.ndarray, sample_rate: float) -> tuple[float, float]:
+    """Coarse ``(center_offset_hz, occupied_bw_hz)`` of one burst slice: top candidate.
+
+    Averaged Hann-windowed |FFT|^2 over the slice, smoothed over a few bins; the
+    occupied band is the contiguous run of bins within BURST_SPECTRUM_FLOOR_DB of
+    a candidate peak (2-bin gaps bridged so the DroneID DC null does not split
+    it) and the centre is the midpoint of its edges -- an OFDM spectrum's edges
+    are sharp, so this holds to ~20 kHz at 5 dB SNR where a power centroid
+    wanders by +/-70 kHz with the data. A band that reaches the window edge is
+    clipped, so its centre is placed half the nominal DroneID occupied width in
+    from the visible edge (a 2429.5 MHz channel in a 2437 MHz window: visible
+    -10..-3 MHz, centre -7.5 MHz). A HackRF DC spike is clipped to its
+    neighbours first.
+
+    With only one strong band in the slice this is identical to before. When a
+    second, stronger, continuous emitter shares the slice, several candidate
+    bands are scored (see :func:`_burst_spectrum_candidates`) and the best one
+    is returned; :func:`_rank_candidates` exposes the rest as alternates.
+    """
+    cands = _burst_spectrum_candidates(iq, sample_rate)
+    if not cands:
+        return 0.0, 0.0
+    center, bw, _shaped = cands[0]
+    return center, bw
+
+
 def _rank_candidates(iq: np.ndarray, sample_rate: float,
                      cands: list[tuple[int, int, float]], max_bursts: int,
-                     ) -> list[tuple[int, int, float, float, float, bool]]:
+                     ) -> list[tuple[int, int, float, float, float, bool, tuple[float, ...]]]:
     """Measure each envelope candidate's spectrum and order DroneID-shaped first.
 
-    Returns ``(start, end, peak, center_offset_hz, occupied_bw_hz, shaped)`` for
-    the `max_bursts` best: shaped candidates by power, then the rest by power.
+    Returns ``(start, end, peak, center_offset_hz, occupied_bw_hz, shaped,
+    alt_centers_hz)`` for the `max_bursts` best: shaped candidates by power,
+    then the rest by power. ``alt_centers_hz`` holds other DroneID-shaped
+    bands found in the same slice (e.g. the real burst when a stronger
+    continuous emitter also occupies a plausible-width band there), ranked,
+    excluding the primary centre.
     """
     measured = []
     for start, end, peak in cands:
-        center, bw = burst_spectrum(iq[start:end], sample_rate)
-        shaped = DRONEID_MIN_OCCUPIED_HZ <= bw <= DRONEID_MAX_OCCUPIED_HZ
-        measured.append((start, end, peak, center, bw, shaped))
+        bands = _burst_spectrum_candidates(iq[start:end], sample_rate)
+        if not bands:
+            measured.append((start, end, peak, 0.0, 0.0, False, ()))
+            continue
+        center, bw, shaped = bands[0]
+        alts = tuple(c for c, _b, s in bands[1:] if s)
+        measured.append((start, end, peak, center, bw, shaped, alts))
     measured.sort(key=lambda c: (not c[5], -c[2]))
     return measured[:max_bursts]
 
@@ -586,7 +860,7 @@ def decode_all(iq: np.ndarray, sample_rate: float, *, max_bursts: int = 8,
     cands = _rank_candidates(iq, sample_rate, pool, max_bursts)
 
     attempts: list[DecodeAttempt] = []
-    for ci, (start, end, peak, center_hz, bw_hz, shaped) in enumerate(cands):
+    for ci, (start, end, peak, center_hz, bw_hz, shaped, alt_centers_hz) in enumerate(cands):
         elapsed = time.perf_counter() - t_start
         if budget_s is not None and ci > 0 and elapsed >= budget_s:
             skipped = len(cands) - ci
@@ -605,21 +879,46 @@ def decode_all(iq: np.ndarray, sample_rate: float, *, max_bursts: int = 8,
             peak_power_db=float(peak_db), level="none", zc_score=0.0, cfo_hz=0.0,
             integer_cfo_bins=0, crc_ok=False, result=None, error=None, snr_db=snr_db,
             center_offset_hz=float(center_hz), occupied_bw_hz=float(bw_hz),
-            droneid_shaped=bool(shaped),
+            droneid_shaped=bool(shaped), alt_centers_hz=tuple(alt_centers_hz),
         )
-        # Offsets the front end's own CFO search can absorb are left to it (it
-        # resolves them to sub-Hz); larger ones are mixed out here.
-        mix_hz = center_hz if abs(center_hz) > max_integer_cfo_bins * ofdm.CARRIER_SPACING_HZ else 0.0
+        # Ordered centre-frequency hypotheses from a band peel of this slice's
+        # own PSD (a stronger blocker's band is peeled away first, exposing the
+        # real one underneath): mix each to DC, apply the channel-select filter,
+        # demodulate, stop at the first that finds ZC sync. budget_s is
+        # rechecked before every hypothesis (not just every candidate) so a
+        # single slice with several plausible bands cannot itself blow the
+        # wall-clock budget; the first hypothesis of a candidate that already
+        # passed the outer gate is always attempted.
         try:
-            slice_iq = _mix(iq[lo:hi], sample_rate, mix_hz)
-            demod, info = _demodulate(slice_iq, sample_rate, correlation_threshold,
-                                      max_integer_cfo_bins, region=(start - lo, end - lo))
-            attempt.zc_score = float(info["zc_score"])
-            attempt.cfo_hz = float(mix_hz + info["cfo_hz"])
-            attempt.integer_cfo_bins = int(info["integer_cfo_bins"])
-            attempt.zc6_score = float(info.get("zc6_score", 0.0))
-            attempt.demod = demod
-            attempt.level = _grade(demod, info, correlation_threshold)
+            hyps = _centre_hypotheses(iq[lo:hi], sample_rate)
+            demod = info = None
+            mix_hz = 0.0
+            budget_note = None
+            for hyp_idx, h_hz in enumerate(hyps):
+                h_elapsed = time.perf_counter() - t_start
+                if (budget_s is not None and h_elapsed >= budget_s
+                        and attempt.hypotheses_tried > 0):
+                    budget_note = (f"budget_s={budget_s:g} exceeded after {h_elapsed:.2f}s; "
+                                   f"{len(hyps) - hyp_idx} weaker centre hypothes(es) not attempted")
+                    break
+                attempt.hypotheses_tried += 1
+                mix_hz = h_hz if abs(h_hz) > max_integer_cfo_bins * ofdm.CARRIER_SPACING_HZ else 0.0
+                h_slice = _mix(iq[lo:hi], sample_rate, mix_hz)
+                h_slice = _channel_filter(h_slice, sample_rate)
+                demod, info = _demodulate(h_slice, sample_rate, correlation_threshold,
+                                          max_integer_cfo_bins, region=(start - lo, end - lo))
+                attempt.level = _grade(demod, info, correlation_threshold)
+                attempt.chosen_center_offset_mhz = float(h_hz) / 1e6
+                if attempt.level != "none":
+                    break
+            if budget_note is not None:
+                attempt.error = budget_note if attempt.error is None else f"{attempt.error}; {budget_note}"
+            if info is not None:
+                attempt.zc_score = float(info["zc_score"])
+                attempt.cfo_hz = float(mix_hz + info["cfo_hz"])
+                attempt.integer_cfo_bins = int(info["integer_cfo_bins"])
+                attempt.zc6_score = float(info.get("zc6_score", 0.0))
+                attempt.demod = demod
             if demod is not None:
                 # Refine the reported span to the synchronized burst (input units).
                 ratio = sample_rate / demod.sample_rate

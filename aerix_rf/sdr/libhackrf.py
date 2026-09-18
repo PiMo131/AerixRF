@@ -6,14 +6,14 @@ already required for ``hackrf_transfer`` / ``hackrf_sweep``. No extra install.
 
 Design:
   * libhackrf calls ``_rx_callback`` from its USB thread with ~256 KiB buffers.
-    The callback only copies the bytes into a bounded queue and returns; all
-    conversion happens in the consumer thread (``read_window``).
-  * If the consumer falls behind and the queue is full, the buffer is DROPPED and
-    counted (``overflow_count``). Every transfer carries a sequence number, so a
-    window is stamped incomplete (with the number of lost samples) exactly when a
-    dropped transfer falls *between* its first and last chunk -- a drop that
-    happens while the consumer is busy between windows is a gap between windows
-    (visible as a rising ``overflow_count``), not a hole inside one.
+    The callback only takes a cheap ``np.frombuffer`` view and hands it to the
+    backend-neutral :class:`~aerix_rf.sdr.stream.StreamAssembler`; all real
+    conversion (int8 -> scaled complex64) happens in the consumer thread
+    (``read_window``), inside the assembler.
+  * If the consumer falls behind and the assembler's queue is full, the oldest
+    buffer is DROPPED and counted (``overflow_count``); the assembler turns
+    that into either a hole inside the affected window (``dropped_samples``)
+    or a gap between windows (``gap_before_samples``), exactly as before.
   * Retuning while streaming is supported by libhackrf; ``tune()`` records the new
     centre and flushes buffered (old-frequency) data so the next window is clean.
 """
@@ -23,17 +23,24 @@ from __future__ import annotations
 import ctypes
 import ctypes.util
 import logging
-import queue
-import threading
 import time
 
 import numpy as np
+
+from .stream import StreamAssembler
 
 log = logging.getLogger("aerix.rf.libhackrf")
 
 HACKRF_SUCCESS = 0
 _TRANSFER_BYTES = 262144          # libhackrf's default RX transfer size
 _QUEUE_MAX_S = 2.0                # seconds of buffered stream before we start dropping
+
+
+def _cs8_to_iq(raw: np.ndarray) -> np.ndarray:
+    """int8 interleaved I,Q (HackRF's native transfer format) -> complex64, +-1."""
+    raw = raw.astype(np.float32)
+    iq = raw[0::2] + 1j * raw[1::2]
+    return (iq / 128.0).astype(np.complex64)
 
 
 class _hackrf_transfer(ctypes.Structure):
@@ -125,20 +132,12 @@ class HackRFStream:
         _check(self.lib, self.lib.hackrf_set_vga_gain(self.dev, self.vga_gain), "set_vga_gain")
         _check(self.lib, self.lib.hackrf_set_amp_enable(self.dev, 1 if self.amp else 0), "set_amp")
 
-        max_chunks = max(8, int(_QUEUE_MAX_S * self.sample_rate * 2 / _TRANSFER_BYTES))
-        self._q: queue.Queue[tuple[bytes, float, float, int]] = queue.Queue(maxsize=max_chunks)
-        self._seq = 0                  # transfer sequence number (counts dropped ones too)
-        self._leftover_seq = -1        # seq of the transfer the leftover bytes came from
-        self._last_window_seq = None   # last seq handed out, to size the gap to the next window
-        self._lock = threading.Lock()
-        self._leftover = b""
-        self._leftover_center = self.center_freq_hz
-        self.overflow_count = 0        # transfers dropped because the consumer lagged
-        self.short_reads = 0           # windows that could not be filled in time
-        self.total_samples = 0         # samples handed to the consumer
-        self.received_bytes = 0        # bytes delivered by the radio (incl. dropped/flushed)
-        self._started_at = 0.0
         self._streaming = False
+        self._asm = StreamAssembler(
+            self.sample_rate, raw_to_iq=_cs8_to_iq, reports_drops=True,
+            queue_max_s=_QUEUE_MAX_S, chunk_samples_hint=_TRANSFER_BYTES // 2,
+            still_active=lambda: self.is_streaming(),
+        )
         self._cb = _RX_CB(self._rx_callback)   # keep a reference: libhackrf holds the pointer
 
     # --- device info ---------------------------------------------------------
@@ -161,39 +160,23 @@ class HackRFStream:
                 "lna_gain": self.lna_gain, "vga_gain": self.vga_gain, "amp": self.amp}
 
     # --- streaming -----------------------------------------------------------
+    # ``StreamAssembler`` owns the bounded queue, drop-oldest policy, and all
+    # loss/health accounting (see stream.py). This callback only takes a cheap
+    # int8 view of the transfer buffer and hands it off -- no scaling/copying
+    # of sample values happens on the USB thread.
     def _rx_callback(self, transfer) -> int:
         t = transfer.contents
         n = int(t.valid_length)
         if n <= 0:
             return 0
-        data = ctypes.string_at(t.buffer, n)      # one memcpy, then hand off
-        self.received_bytes += n
-        seq = self._seq
-        self._seq += 1
-        item = (data, time.time(), self.center_freq_hz, seq)
-        try:
-            self._q.put_nowait(item)
-        except queue.Full:
-            # Drop the OLDEST transfer, not this one: the queue then always
-            # holds the most recent, mutually contiguous stretch of stream, so a
-            # window assembled from it is complete and the loss shows up as a
-            # gap *between* windows (gap_before_samples) instead of a hole.
-            with self._lock:
-                self.overflow_count += 1
-            try:
-                self._q.get_nowait()
-            except queue.Empty:
-                pass
-            try:
-                self._q.put_nowait(item)
-            except queue.Full:
-                pass
+        data = ctypes.string_at(t.buffer, n)      # one memcpy (ctypes requires it)
+        raw = np.frombuffer(data, dtype=np.int8)
+        self._asm.push(raw, time.time(), self.center_freq_hz, dropped_before=0)
         return 0
 
     def start(self) -> None:
         _check(self.lib, self.lib.hackrf_start_rx(self.dev, self._cb, None), "start_rx")
         self._streaming = True
-        self._started_at = time.time()
 
     def tune(self, center_freq_hz: float) -> None:
         center = float(center_freq_hz)
@@ -203,111 +186,32 @@ class HackRFStream:
 
     def flush(self) -> None:
         """Discard buffered data (e.g. after a retune)."""
-        with self._lock:
-            self._leftover = b""
-        while True:
-            try:
-                self._q.get_nowait()
-            except queue.Empty:
-                break
+        self._asm.flush()
 
     def is_streaming(self) -> bool:
         return self._streaming and self.lib.hackrf_is_streaming(self.dev) == 1
+
+    @property
+    def overflow_count(self) -> int:
+        return self._asm.overflow_count
+
+    @property
+    def short_reads(self) -> int:
+        return self._asm.short_reads
+
+    @property
+    def total_samples(self) -> int:
+        return self._asm.total_samples
 
     def read_window(self, n_samples: int, timeout_s: float | None = None):
         """Assemble exactly ``n_samples`` complex64 from the stream.
 
         Returns ``(iq, info)`` or ``None`` if the stream has stopped. ``info``
         carries capture health: completeness, dropped samples, overflow count,
-        and the ratio of achieved to nominal stream rate.
+        and the ratio of achieved to nominal stream rate. See
+        ``StreamAssembler.read_window`` for the full key set.
         """
-        want = n_samples * 2
-        deadline = time.time() + (timeout_s if timeout_s is not None else 3.0 * n_samples / self.sample_rate + 1.0)
-        parts: list[bytes] = []
-        have = 0
-        t_first = None
-        center = self.center_freq_hz
-        first_seq = last_seq = None
-        n_chunks = 0
-
-        with self._lock:
-            if self._leftover:
-                parts.append(self._leftover)
-                have = len(self._leftover)
-                center = self._leftover_center
-                first_seq = last_seq = self._leftover_seq
-                n_chunks = 1
-                self._leftover = b""
-        while have < want:
-            remaining = deadline - time.time()
-            if remaining <= 0:
-                break
-            try:
-                data, ts, c, seq = self._q.get(timeout=min(remaining, 0.5))
-            except queue.Empty:
-                if not self.is_streaming():
-                    return None
-                continue
-            if first_seq is not None and n_chunks == 1 and parts and seq != first_seq + 1:
-                # The leftover bytes predate a drop: start the window fresh here
-                # rather than stitch across the hole.
-                parts, have, n_chunks, first_seq = [], 0, 0, None
-            if t_first is None or have == 0:
-                t_first = ts - len(data) / 2 / self.sample_rate
-            if c != center and have == 0:
-                center = c
-            if first_seq is None:
-                first_seq = seq
-            last_seq = seq
-            n_chunks += 1
-            parts.append(data)
-            have += len(data)
-
-        buf = b"".join(parts)
-        if have > want:
-            with self._lock:
-                self._leftover = buf[want:]
-                self._leftover_center = center
-                self._leftover_seq = last_seq if last_seq is not None else -1
-            buf = buf[:want]
-
-        raw = np.frombuffer(buf, dtype=np.int8)
-        iq = (raw[0::2].astype(np.float32) + 1j * raw[1::2].astype(np.float32)) / 128.0
-        iq = iq.astype(np.complex64)
-
-        # Transfers missing between the first and last chunk of this window.
-        missing = 0
-        if first_seq is not None and last_seq is not None:
-            missing = max(0, (last_seq - first_seq + 1) - n_chunks)
-        dropped = missing * (_TRANSFER_BYTES // 2) + max(0, n_samples - iq.size)
-        complete = missing == 0 and iq.size >= n_samples
-        # Stream lost between the previous window and this one (consumer slower
-        # than real time): not a hole in this window, but the operator should know.
-        gap_before = 0
-        if first_seq is not None and self._last_window_seq is not None:
-            gap_before = max(0, first_seq - self._last_window_seq - 1) * (_TRANSFER_BYTES // 2)
-        if last_seq is not None:
-            self._last_window_seq = last_seq
-        if iq.size < n_samples:
-            with self._lock:
-                self.short_reads += 1
-        self.total_samples += iq.size
-        # Achieved radio->host rate vs nominal: <~0.97 sustained means the USB
-        # link is silently losing samples (libhackrf does not report that).
-        elapsed = time.time() - self._started_at
-        ratio = (self.received_bytes / 2 / (elapsed * self.sample_rate)) if elapsed > 0.5 else 1.0
-
-        info = {
-            "captured_at": t_first if t_first is not None else time.time(),
-            "center_freq_hz": center,
-            "complete": bool(complete),
-            "dropped_samples": int(dropped),
-            "overflow_count": int(self.overflow_count),
-            "gap_before_samples": int(gap_before),
-            "short_reads": int(self.short_reads),
-            "stream_rate_ratio": round(float(ratio), 4),
-        }
-        return iq, info
+        return self._asm.read_window(n_samples, timeout_s=timeout_s)
 
     def close(self) -> None:
         if not self._streaming:

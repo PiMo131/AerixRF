@@ -29,6 +29,15 @@ train-cnn = [
     "torch>=2.2",
 ]
 
+# ANTSDR E200 / AD9361 libiio network backend (aerix_rf.sdr.antsdr_iio). Needs
+# the libiio *runtime* too (not installable via pip) -- on a Debian/Ubuntu host,
+# `apt install libiio-utils` or build libiio from source. The code imports
+# `iio` lazily so nothing else requires this to be installed. Install with:
+#   uv sync --extra antsdr
+antsdr = [
+    "pylibiio>=0.25",
+]
+
 # SoapySDR / python bindings for the HackRF are provided by the OS package
 # (e.g. `apt install soapysdr-tools python3-soapysdr soapysdr-module-hackrf hackrf`),
 # NOT pip. The code imports it lazily so the box runs in --sim mode without it.

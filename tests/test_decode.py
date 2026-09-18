@@ -639,3 +639,195 @@ def test_burst_spectrum_shapes():
     c, bw = droneid.burst_spectrum(rc, _FS_IN)
     assert 1.5e6 < bw < 2.8e6 and abs(c - 3e6) < 0.1e6
     assert droneid.burst_spectrum(np.zeros(0, dtype=np.complex64), _FS_IN) == (0.0, 0.0)
+
+
+# ---------------------------------------------------------------------------
+# Decoder blocker-robustness (docs/design/decoder-blocker-robustness.md,
+# 2026-09-18): channel-select filter + band-peel centre hypotheses + per-
+# hypothesis budget check. Bursts are at the native 15.36 MHz rate (no input
+# resampling) so each candidate slice is short enough to hit decode_all's
+# "<=4 burst lengths -> single candidate" path directly, isolating the
+# centre-hypothesis/channel-filter pipeline from envelope segmentation.
+# ---------------------------------------------------------------------------
+
+_OCC_BW_HZ = 9.015e6   # 601 x 15 kHz carrier grid; matches bench/canonical_rate_sweep.py
+
+
+def _inband_noise(iq: np.ndarray, snr_db: float, fs: float, seed: int) -> np.ndarray:
+    """Add full-band AWGN whose power gives `snr_db` *in-band* SNR against a
+    unit-power burst concentrated in `_OCC_BW_HZ` (bench/canonical_rate_sweep.py
+    method, not a naive per-sample SNR -- see that module's docstring)."""
+    sigma2 = fs / (_OCC_BW_HZ * 10.0 ** (snr_db / 10.0))
+    rng = np.random.default_rng([seed, 999])
+    noise = rng.standard_normal(iq.size) + 1j * rng.standard_normal(iq.size)
+    noise *= np.sqrt(sigma2 / 2.0)
+    return iq.astype(np.complex128) + noise
+
+
+def test_decode_survives_cw_blocker():
+    fs = ofdm.NOMINAL_SAMPLE_RATE
+    b = make_encoded_burst(_FIELDS, snr_db=None, pad_start=2000, pad_end=2000, seed=201)
+    iq = _inband_noise(b.iq, 12.0, fs, seed=201)
+    n = iq.size
+    t = np.arange(n) / fs
+    rng = np.random.default_rng(202)
+    phase0 = rng.uniform(0, 2 * np.pi)
+    amp = 10.0 ** (30.0 / 20.0)                      # +30 dB above the unit-power burst
+    cw = amp * np.exp(1j * (2 * np.pi * 6.0e6 * t + phase0))
+    iq = (iq + cw).astype(np.complex64)
+
+    attempts = decode_all(iq, fs)
+    good = [a for a in attempts if a.crc_ok]
+    assert len(good) >= 1, [(a.level, a.zc_score, a.zc6_score) for a in attempts]
+    assert any(a.result is not None and a.result.serial == _FIELDS["serial"] for a in good)
+
+
+def test_decode_survives_wideband_adjacent_blocker():
+    fs = ofdm.NOMINAL_SAMPLE_RATE
+    b = make_encoded_burst(_FIELDS, snr_db=None, pad_start=2000, pad_end=2000, seed=201)
+    iq = _inband_noise(b.iq, 12.0, fs, seed=201)
+    n = iq.size
+    rng = np.random.default_rng(211)
+    x = rng.standard_normal(n) + 1j * rng.standard_normal(n)
+    f = np.fft.fftfreq(n, d=1.0 / fs)
+    mask = (f >= 4.5e6) & (f <= 8.5e6)
+    x = np.fft.ifft(np.fft.fft(x) * mask)
+    p = float(np.mean(np.abs(x) ** 2))
+    amp = 10.0 ** (20.0 / 20.0)                       # +20 dB above the unit-power burst
+    iq = (iq + x * (amp / np.sqrt(p))).astype(np.complex64)
+
+    attempts = decode_all(iq, fs)
+    good = [a for a in attempts if a.crc_ok]
+    assert len(good) >= 1, [(a.level, a.zc_score, a.zc6_score) for a in attempts]
+    assert any(a.result is not None and a.result.serial == _FIELDS["serial"] for a in good)
+
+
+def _band_noise_burst_at(rng, n: int, fs: float, center_hz: float, bw_hz: float,
+                         power: float) -> np.ndarray:
+    """Like :func:`_band_noise_burst` but at an arbitrary sample rate (that
+    helper hardcodes ``_FS_IN`` = 20 MS/s; these blocker-robustness tests run
+    at the native 15.36 MHz DroneID rate)."""
+    x = (rng.standard_normal(n) + 1j * rng.standard_normal(n)).astype(np.complex64)
+    f = np.fft.fftfreq(n, 1.0 / fs)
+    X = np.fft.fft(x)
+    X[np.abs(f - center_hz) > bw_hz / 2] = 0
+    x = np.fft.ifft(X)
+    return (x / np.sqrt(np.mean(np.abs(x) ** 2)) * np.sqrt(power)).astype(np.complex64)
+
+
+def test_twelve_mhz_band_not_droneid_shaped():
+    fs = ofdm.NOMINAL_SAMPLE_RATE
+    rng = np.random.default_rng(5001)
+    n = 20 * droneid.BURST_SPECTRUM_FFT
+    band = _band_noise_burst_at(rng, n, fs, 0.0, 12.0e6, 1.0)
+    cands = droneid._burst_spectrum_candidates(band, fs)
+    assert cands, "expected at least one scored band"
+    center, bw, shaped = cands[0]
+    # occupied width exceeds the 11 MHz cap; measured over 3000 seeds this band
+    # is always >= 12.015 MHz (>1 MHz of margin), so this is not a marginal check.
+    assert bw > droneid.DRONEID_MAX_OCCUPIED_HZ, f"measured bw={bw!r} Hz, cap={droneid.DRONEID_MAX_OCCUPIED_HZ!r} Hz"
+    assert shaped is False, f"measured bw={bw!r} Hz should exceed the DroneID-shaped range"
+    c, bw2 = droneid.burst_spectrum(band, fs)
+    assert bw2 == bw and abs(c) < 0.5e6, f"center={c!r}, bw2={bw2!r}, bw={bw!r}"
+
+
+def test_centre_hypotheses_band_peel():
+    fs = ofdm.NOMINAL_SAMPLE_RATE
+    rng = np.random.default_rng(301)
+    n = 64 * droneid.BURST_SPECTRUM_FFT
+    real = _band_noise_burst_at(rng, n, fs, -3.0e6, 9.0e6, 1.0)          # DroneID-shaped, weaker
+    blocker = _band_noise_burst_at(rng, n, fs, 5.0e6, 3.0e6, 10.0)       # +10 dB, narrower than shaped range
+    iq = real + blocker
+
+    hyps = droneid._centre_hypotheses(iq, fs)
+    assert any(abs(h - (-3.0e6)) < 0.1e6 for h in hyps), hyps
+    assert hyps[-1] == 0.0, hyps                        # fallback always present, always last
+    for i in range(len(hyps)):
+        for j in range(i + 1, len(hyps)):
+            assert abs(hyps[i] - hyps[j]) >= droneid.PEEL_DEDUP_HZ, hyps
+
+
+def test_budget_checked_per_hypothesis(monkeypatch):
+    fs = ofdm.NOMINAL_SAMPLE_RATE
+    in_burst = ofdm.burst_length(fs)
+    rng = np.random.default_rng(401)
+    iq = (rng.standard_normal(2 * in_burst)
+          + 1j * rng.standard_normal(2 * in_burst)).astype(np.complex64)
+
+    # Force >= 4 centre hypotheses and make each one slow, so the per-hypothesis
+    # budget check (not just the per-candidate one) has to fire mid-candidate.
+    fake_hyps = [1.0e6, 2.0e6, 3.0e6, 4.0e6]
+    monkeypatch.setattr(droneid, "_centre_hypotheses", lambda *a, **k: list(fake_hyps))
+
+    def slow_demod(*args, **kwargs):
+        import time as _time
+        _time.sleep(0.2)
+        return None, {"zc_score": 0.0, "cfo_hz": 0.0, "integer_cfo_bins": 0, "zc6_score": 0.0}
+
+    monkeypatch.setattr(droneid, "_demodulate", slow_demod)
+
+    import time
+    t0 = time.perf_counter()
+    attempts = decode_all(iq, fs, budget_s=0.3)
+    elapsed = time.perf_counter() - t0
+    # Measured ~0.42 s (2 hypotheses x 0.2 s + overhead) on the dev laptop.
+    assert elapsed < 0.6, f"decode_all took {elapsed:.2f}s"
+    assert len(attempts) == 1
+    assert attempts[0].hypotheses_tried <= 2, attempts[0].hypotheses_tried
+
+
+def test_channel_filter_passband_and_stopband():
+    fs = ofdm.NOMINAL_SAMPLE_RATE
+    n = 200_000
+    t = np.arange(n) / fs
+    mid = slice(n // 4, 3 * n // 4)          # steady-state region, clear of filtfilt edge padding
+
+    def atten_db(f0_hz: float) -> float:
+        tone = np.exp(1j * 2 * np.pi * f0_hz * t).astype(np.complex128)
+        filt = droneid._channel_filter(tone, fs)
+        orig_rms = np.sqrt(np.mean(np.abs(tone[mid]) ** 2))
+        filt_rms = np.sqrt(np.mean(np.abs(filt[mid]) ** 2))
+        return 20.0 * np.log10(filt_rms / orig_rms)
+
+    # Passband: a 4.0 MHz tone (inside the +/-4.51 MHz cutoff) is barely touched.
+    # Measured ~0.00015 dB.
+    pass_atten = atten_db(4.0e6)
+    assert abs(pass_atten) < 1.0, pass_atten
+    # Stopband: a 6.0 MHz tone (the CW-blocker test's offset) is deep in the
+    # Kaiser-window rolloff. Measured ~-217 dB; assert comfortably >= 30 dB down.
+    stop_atten = atten_db(6.0e6)
+    assert stop_atten <= -30.0, stop_atten
+
+
+def test_burst_spectrum_survives_continuous_stronger_blocker():
+    """A continuous (not time-disjoint) +20 dB band-limited blocker sharing the
+    burst's own slice must not make the screening lose the real DroneID band:
+    the strongest single bin anchors on the blocker here, so the fix must
+    surface the real burst as one of the other scored candidates."""
+    b = make_burst(snr_db=None, pad_start=200, pad_end=200, seed=21)
+    n = 20_000
+    w = np.zeros(n, dtype=np.complex64)
+    start = 3_000
+    _embed_offset(w, b.iq, b.sample_rate, start, -3e6)
+    nonzero = np.flatnonzero(np.abs(w) > 0)
+    burst_power = float(np.mean(np.abs(w[nonzero]) ** 2))
+
+    rng = np.random.default_rng(99)
+    blocker = _band_noise_burst(rng, n, 6.5e6, 4.0e6, burst_power * 10.0 ** (20.0 / 10.0))
+    w = w + blocker
+
+    # The blocker alone dominates the slice's PSD (confirms this exercises the
+    # multi-candidate fix, not a no-op): the strongest single bin sits away
+    # from the real burst.
+    psd = droneid._burst_psd(w, _FS_IN)
+    mid = psd.size // 2
+    df = _FS_IN / psd.size
+    argmax_freq = (int(np.argmax(psd)) - mid) * df
+    assert abs(argmax_freq - (-3e6)) > 1e6
+
+    # The screening still reports a DroneID-shaped candidate near -3 MHz
+    # (decode_all's alt-centre retry can then reach it even though the
+    # dominant single-band pick landed on the blocker).
+    cands = droneid._burst_spectrum_candidates(w, _FS_IN)
+    shaped = [(c, bw) for c, bw, s in cands if s]
+    assert any(abs(c - (-3e6)) < 0.5e6 for c, bw in shaped), shaped

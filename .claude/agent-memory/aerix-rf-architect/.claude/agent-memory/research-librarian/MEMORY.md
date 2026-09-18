@@ -1,0 +1,1 @@
+- [DroneID channel raster / dwell / serial-mod method](droneid_channel_raster.md) — 2.4/5.8 GHz candidate lists, 640ms burst interval, NDSS'23 fuzzing-based SN spoof mechanism, PDF-fetch workaround

@@ -1,0 +1,4 @@
+- [Device facts: ANTSDR E200](device_facts_e200.md) — single-RX image, throughput ceiling ~15 MS/s, ±2048 full scale, no timestamp/overflow exposed
+- [Bootstrap/access setup](bootstrap_access.md) — network config, micromamba libiio env, no-sudo/UART blocker
+- [Firmware strategy](firmware_strategy.md) — why we keep stock 1R1T image instead of 2R2T/UHD, and when to revisit
+- [Firmware & streaming ceiling](firmware_streaming_ceiling.md) — iiod ~59 MB/s ceiling is firmware-bound; UHD fw unquantified; stay on IIO

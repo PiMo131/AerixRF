@@ -1,0 +1,370 @@
+"""Backend-neutral continuous-stream -> fixed-size ``IQWindow`` assembly.
+
+Lifted out of ``libhackrf.py`` (see docs/design/antsdr-backend.md #2, T2): every
+continuous-RX backend (HackRF, and later ANTSDR via UHD or libiio) shares one
+producer/consumer shape -- a producer thread hands off small chunks as they
+arrive, a consumer thread assembles exactly ``n_samples`` and stamps the result
+with honest capture-health metadata. Keeping that assembly in one place makes
+``overflow_count`` / ``gap_before_samples`` / ``complete`` / ``dropped_samples``
+mean the same thing on every backend by construction, not by review.
+
+Design:
+  * The producer calls :meth:`StreamAssembler.push` once per received chunk. A
+    chunk is either already-converted ``complex64`` IQ, or a *raw* interleaved
+    I,Q array (any dtype: HackRF's int8, AD9361's int16, ...) plus a
+    ``raw_to_iq`` converter given once at construction time. Conversion (and
+    any float scaling) is deferred to the *consumer* thread exactly like the
+    pre-refactor ``HackRFStream`` -- the producer thread (often a USB/network
+    callback with a tight deadline) only stores a cheap view/copy of the chunk.
+  * Thread-safe handoff is a bounded ``queue.Queue`` with a drop-OLDEST policy:
+    on overflow the oldest buffered chunk is evicted (not the new one), so the
+    queue always holds the most recent contiguous stretch of stream and a
+    window built from it is complete; the loss surfaces as a gap *between*
+    windows (``gap_before_samples`` / rising ``overflow_count``) rather than a
+    hole inside one. Identical to the pre-refactor ``HackRFStream`` behaviour.
+  * Loss accounting is honest by construction. Every chunk (and every eviction)
+    carries a ``dropped_before`` value: ``0`` (contiguous), a known positive
+    sample count, or ``None`` (a gap is known to exist but cannot be sized).
+    ``reports_drops=False`` marks a producer that can *never* assert an exact
+    loss count at all (e.g. libiio with no per-buffer sequence number): every
+    window then reports ``dropped_samples=None`` /
+    ``loss_detection="inferred_rate_only"`` unconditionally -- never a
+    fabricated 0 -- and ``complete`` reflects only whether the window was
+    filled in time, per docs/design/antsdr-backend.md #2 Path B.
+"""
+
+from __future__ import annotations
+
+import logging
+import queue
+import threading
+import time
+from collections import deque
+from dataclasses import dataclass
+from typing import Any, Callable, Optional
+
+import numpy as np
+
+log = logging.getLogger("aerix.rf.sdr.stream")
+
+_DEFAULT_QUEUE_MAX_S = 2.0
+_DEFAULT_CHUNK_SAMPLES_HINT = 131072   # only used to size the queue depth
+_RAW_UNITS_PER_SAMPLE = 2              # interleaved I,Q -> 2 raw elements/sample
+_DEFAULT_RATE_WINDOW_S = 5.0           # ``stream_rate_ratio`` trailing-window width
+
+
+@dataclass
+class _Chunk:
+    raw: Any                       # complex64 ndarray, or raw interleaved ndarray
+    ts: float                      # wall-clock at chunk arrival (producer side)
+    center_freq_hz: float
+    dropped_before: Optional[int]  # samples known lost immediately before this
+                                    # chunk; 0 = contiguous, None = unquantifiable
+    device_time_ns: Optional[int] = None
+
+    def sample_count(self, raw_to_iq: Optional[Callable]) -> int:
+        return self.raw.size if raw_to_iq is None else self.raw.size // _RAW_UNITS_PER_SAMPLE
+
+    def start_ts(self, raw_to_iq: Optional[Callable], sample_rate: float) -> float:
+        """Host time of this chunk's FIRST sample.
+
+        ``ts`` is stamped by the producer when the chunk finishes arriving
+        (after ``buf.read()`` / the USB callback fires with the data), i.e. it
+        approximates the *last* sample's arrival time, not the first. Back
+        out the chunk's duration to get the first sample's time.
+        """
+        return self.ts - self.sample_count(raw_to_iq) / sample_rate
+
+
+class StreamAssembler:
+    """Assemble a continuous producer stream into fixed-size ``IQWindow``s.
+
+    One producer thread calls :meth:`push` per received chunk (any size); one
+    consumer thread calls :meth:`read_window` to pull exactly ``n_samples``.
+    """
+
+    def __init__(self, sample_rate: float, *,
+                 raw_to_iq: Optional[Callable[[np.ndarray], np.ndarray]] = None,
+                 reports_drops: bool = True,
+                 queue_max_s: float = _DEFAULT_QUEUE_MAX_S,
+                 chunk_samples_hint: int = _DEFAULT_CHUNK_SAMPLES_HINT,
+                 channel_id: int = 0,
+                 bandwidth_hz: Optional[float] = None,
+                 still_active: Optional[Callable[[], bool]] = None,
+                 rate_window_s: float = _DEFAULT_RATE_WINDOW_S) -> None:
+        self.sample_rate = float(sample_rate)
+        self._raw_to_iq = raw_to_iq
+        self.reports_drops = bool(reports_drops)
+        self.channel_id = int(channel_id)
+        self.bandwidth_hz = bandwidth_hz
+        self._stopped = threading.Event()
+        self._still_active = still_active or (lambda: not self._stopped.is_set())
+
+        max_chunks = max(8, int(queue_max_s * self.sample_rate / max(1, chunk_samples_hint)))
+        self._q: "queue.Queue[_Chunk]" = queue.Queue(maxsize=max_chunks)
+        self._lock = threading.Lock()
+
+        self._leftover: Optional[_Chunk] = None
+
+        self.overflow_count = 0
+        self.short_reads = 0
+        self.tail_discarded_samples = 0  # samples buffered but never handed to a window
+                                          # (discarded by flush(): a retune, or stream end
+                                          # with data still queued/leftover)
+        self.total_samples = 0     # samples handed to the consumer across all windows
+        self._pushed_samples = 0   # samples ever pushed (incl. later-evicted), for rate ratio
+        self._running_sample_index = 0
+        # ``stream_rate_ratio``'s clock starts at the FIRST PUSHED CHUNK, not at
+        # assembler construction: device setup/tuning happens between __init__
+        # and the producer thread's first push, and counting that dead time as
+        # lost stream falsely tanks the ratio (see docs/design/antsdr-backend.md).
+        self._first_push_ts: Optional[float] = None
+        # Trailing-window rate baseline: (ts, cumulative _pushed_samples) snapshots,
+        # pruned to keep roughly the last ``rate_window_s`` seconds. A PURE
+        # lifetime-since-first-push average (the previous implementation) never
+        # recovers from a one-time startup transient (kernel-buffer priming, a
+        # slow first refill, ...): a single early stall permanently drags the
+        # ratio for the rest of an hours-long capture because the deficit is
+        # divided by ever-growing total elapsed time (see
+        # docs/design/antsdr-backend.md "Measured host-path throughput"). Once
+        # enough stream has been seen, the ratio is computed over this trailing
+        # window instead so it reflects *current* health and self-heals after a
+        # transient, while still falling back to the lifetime average during
+        # the first ``rate_window_s`` seconds (too little data for a windowed
+        # estimate to be meaningful).
+        self.rate_window_s = float(rate_window_s)
+        self._rate_hist: "deque[tuple[float, int]]" = deque()
+
+    # --- producer side -------------------------------------------------------
+    def push(self, chunk: np.ndarray, ts: float, center_freq_hz: float, *,
+              dropped_before: Optional[int] = 0, device_time_ns: Optional[int] = None) -> None:
+        """Hand off one chunk. Called from the producer thread; must be cheap.
+
+        ``chunk`` is a ``complex64`` ndarray if this assembler has no
+        ``raw_to_iq``, otherwise the raw interleaved I,Q ndarray (any dtype)
+        the producer received -- conversion happens later, in the consumer.
+        ``dropped_before``: samples known lost immediately before this chunk
+        (``0`` = contiguous with the previous one), or ``None`` if the
+        producer knows a gap occurred but cannot size it.
+        """
+        if chunk.size == 0:
+            return
+        item = _Chunk(raw=chunk, ts=ts, center_freq_hz=float(center_freq_hz),
+                      dropped_before=dropped_before, device_time_ns=device_time_ns)
+        with self._lock:
+            if self._first_push_ts is None:
+                self._first_push_ts = ts
+            self._pushed_samples += item.sample_count(self._raw_to_iq)
+            self._rate_hist.append((ts, self._pushed_samples))
+            # Keep one entry at/just-before the window boundary as the baseline
+            # anchor, plus everything inside the window -- not just everything
+            # inside it -- so the windowed estimate always spans >= rate_window_s.
+            while len(self._rate_hist) > 1 and ts - self._rate_hist[1][0] >= self.rate_window_s:
+                self._rate_hist.popleft()
+        try:
+            self._q.put_nowait(item)
+        except queue.Full:
+            # Drop the OLDEST item, not this one: the queue then always holds
+            # the most recent, mutually contiguous stretch of stream.
+            with self._lock:
+                self.overflow_count += 1
+            try:
+                evicted = self._q.get_nowait()
+            except queue.Empty:
+                evicted = None
+            if evicted is not None:
+                if evicted.dropped_before is None or item.dropped_before is None:
+                    item.dropped_before = None
+                else:
+                    item.dropped_before = (evicted.dropped_before
+                                            + evicted.sample_count(self._raw_to_iq)
+                                            + item.dropped_before)
+            try:
+                self._q.put_nowait(item)
+            except queue.Full:
+                pass
+
+    def mark_stopped(self) -> None:
+        """Producer signals the stream has ended; wakes any blocked reader."""
+        self._stopped.set()
+
+    def flush(self) -> None:
+        """Discard buffered/leftover data (e.g. immediately after a retune).
+
+        Every discarded sample is counted in ``tail_discarded_samples`` -- this
+        is data that will never appear in any window, as distinct from
+        ``dropped_samples`` (loss the assembler detected *while* filling a
+        window) or ``overflow_count`` (queue-full evictions during push()).
+        """
+        with self._lock:
+            if self._leftover is not None:
+                self.tail_discarded_samples += self._leftover.sample_count(self._raw_to_iq)
+            self._leftover = None
+        while True:
+            try:
+                c = self._q.get_nowait()
+            except queue.Empty:
+                break
+            with self._lock:
+                self.tail_discarded_samples += c.sample_count(self._raw_to_iq)
+
+    # --- consumer side ---------------------------------------------------
+    def read_window(self, n_samples: int, timeout_s: Optional[float] = None):
+        """Assemble exactly ``n_samples`` complex64 samples from the stream.
+
+        Returns ``(iq, info)``, or ``None`` if the stream stopped before
+        ``n_samples`` could be assembled. ``info`` carries capture health:
+        completeness, dropped samples (honest ``None`` when unknowable),
+        overflow/gap counters, stream-rate ratio, and the generalized
+        ``channel_id`` / ``bandwidth_hz`` / ``timing`` fields.
+        """
+        deadline = time.time() + (timeout_s if timeout_s is not None
+                                   else 3.0 * n_samples / self.sample_rate + 1.0)
+        want = n_samples if self._raw_to_iq is None else n_samples * _RAW_UNITS_PER_SAMPLE
+        parts: list[np.ndarray] = []
+        have = 0
+        t_first: Optional[float] = None
+        center: Optional[float] = None
+        device_time_ns: Optional[int] = None
+        known_gap = 0           # known-exact dropped samples INSIDE this window
+        unknown_gap = False     # an unquantifiable gap boundary fell inside this window
+        gap_before = 0          # known loss between the previous window and this one
+
+        with self._lock:
+            if self._leftover is not None:
+                left = self._leftover
+                self._leftover = None
+            else:
+                left = None
+        # ``last_piece``/``last_piece_start_ts`` track whichever chunk (the
+        # carried-over leftover, or the most recently popped queue chunk)
+        # currently forms the TAIL of ``parts`` -- only that piece can end up
+        # split across this window and the next window's leftover, so it is
+        # the only one whose start time we need to remember.
+        last_piece: Optional[_Chunk] = None
+        last_piece_start_ts: Optional[float] = None
+
+        if left is not None:
+            parts.append(left.raw)
+            have = left.raw.size
+            # ``left.ts`` already IS the exact first-sample host time of this
+            # leftover (by construction below), not a chunk-arrival time.
+            t_first = left.ts
+            center = left.center_freq_hz
+            device_time_ns = left.device_time_ns
+            last_piece = left
+            last_piece_start_ts = left.ts
+
+        first_pull = have == 0
+        while have < want:
+            remaining = deadline - time.time()
+            if remaining <= 0:
+                break
+            try:
+                c = self._q.get(timeout=min(remaining, 0.5))
+            except queue.Empty:
+                if not self._still_active():
+                    return None
+                continue
+            start_ts = c.start_ts(self._raw_to_iq, self.sample_rate)
+            if first_pull:
+                # Gap between the end of the previous window and the start of
+                # this one: not a hole INSIDE this window, but worth reporting.
+                gap_before = c.dropped_before if c.dropped_before is not None else 0
+                t_first = start_ts
+                center = c.center_freq_hz
+                device_time_ns = c.device_time_ns
+                first_pull = False
+            else:
+                if c.dropped_before is None:
+                    unknown_gap = True
+                else:
+                    known_gap += c.dropped_before
+            parts.append(c.raw)
+            have += c.raw.size
+            last_piece = c
+            last_piece_start_ts = start_ts
+
+        buf = np.concatenate(parts) if parts else np.zeros(0, dtype=(np.complex64 if self._raw_to_iq is None else np.int8))
+        if buf.size > want:
+            overflow = buf.size - want           # raw units spilling into the next window
+            raw_per_sample = 1 if self._raw_to_iq is None else _RAW_UNITS_PER_SAMPLE
+            if last_piece is not None and last_piece_start_ts is not None:
+                consumed = last_piece.raw.size - overflow   # raw units of last_piece kept here
+                leftover_ts = last_piece_start_ts + (consumed / raw_per_sample) / self.sample_rate
+            else:
+                leftover_ts = t_first or time.time()
+            with self._lock:
+                self._leftover = _Chunk(raw=buf[want:].copy(), ts=leftover_ts,
+                                        center_freq_hz=center or 0.0, dropped_before=0,
+                                        device_time_ns=device_time_ns)
+            buf = buf[:want]
+
+        iq = self._raw_to_iq(buf) if self._raw_to_iq is not None else buf
+        if iq.dtype != np.complex64:
+            iq = iq.astype(np.complex64)
+
+        short = iq.size < n_samples
+        if short:
+            with self._lock:
+                self.short_reads += 1
+        with self._lock:
+            self.total_samples += iq.size
+            self._running_sample_index += iq.size
+
+        if not self.reports_drops:
+            dropped_samples: Optional[int] = None
+            loss_detection = "inferred_rate_only"
+            complete = not short
+        elif unknown_gap:
+            dropped_samples = None
+            loss_detection = "unknown_gap"
+            complete = False
+        else:
+            dropped_samples = known_gap + max(0, n_samples - iq.size)
+            loss_detection = "exact"
+            complete = known_gap == 0 and not short
+
+        now = time.time()
+        with self._lock:
+            first_push_ts = self._first_push_ts
+            pushed_samples = self._pushed_samples
+            baseline = self._rate_hist[0] if self._rate_hist else None
+        if first_push_ts is None:
+            elapsed = 0.0
+            pushed_for_ratio = 0
+        elif baseline is not None and (now - first_push_ts) > self.rate_window_s:
+            # Enough stream seen: use the trailing window so a one-time startup
+            # transient does not suppress the ratio for the rest of the capture.
+            baseline_ts, baseline_samples = baseline
+            elapsed = now - baseline_ts
+            pushed_for_ratio = pushed_samples - baseline_samples
+        else:
+            # Warm-up: too little stream for a windowed estimate to mean
+            # anything yet -- fall back to the lifetime-since-first-push average.
+            elapsed = now - first_push_ts
+            pushed_for_ratio = pushed_samples
+        ratio = (pushed_for_ratio / (elapsed * self.sample_rate)) if elapsed > 0.5 else 1.0
+
+        timing: dict[str, Any] = {"clock_source": "host_wallclock",
+                                  "sample_index": self._running_sample_index}
+        if device_time_ns is not None:
+            timing["clock_source"] = "device"
+            timing["device_time_ns"] = int(device_time_ns)
+
+        info = {
+            "captured_at": t_first if t_first is not None else time.time(),
+            "center_freq_hz": center if center is not None else 0.0,
+            "complete": bool(complete),
+            "dropped_samples": dropped_samples,
+            "overflow_count": int(self.overflow_count),
+            "gap_before_samples": int(gap_before),
+            "short_reads": int(self.short_reads),
+            "stream_rate_ratio": round(float(ratio), 4),
+            "stream_rate_elapsed_s": round(float(elapsed), 3),
+            "loss_detection": loss_detection,
+            "channel_id": self.channel_id,
+            "bandwidth_hz": self.bandwidth_hz,
+            "timing": timing,
+        }
+        return iq, info

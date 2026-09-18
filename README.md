@@ -1,9 +1,26 @@
 # aerix-rf — RF/SDR drone detection for AERIX
 
 Adds **RF-based** drone detection to AERIX for the drones the ESP receivers can't see:
-legacy DJI / OcuSync and other brands with no broadcast Remote ID. Runs on a small
-Linux box (Raspberry Pi / mini-PC) driving a **HackRF Pro**. The HackRF only streams
-IQ, so all DSP and detection run on the box, not the radio.
+legacy DJI / OcuSync and other brands with no broadcast Remote ID. Runs on a Linux box
+driving a passive SDR receiver. **Primary receiver (since 2026-09-18): ANTSDR E200**
+(AD9361, Zynq-7020, Gigabit Ethernet). **Secondary/reference receiver: HackRF / HackRF Pro** —
+the first field-tested platform, still fully supported. Both only stream IQ today, so all
+DSP, detection and decoding run on the host behind a hardware-neutral `IQSource`.
+
+## Hardware
+
+| Receiver | Role | Host path | Live rate | Notes |
+|---|---|---|---|---|
+| ANTSDR E200 | primary | libiio over `ip:` (stock PlutoSDR-compatible IIO image) | 11.52 MS/s profile (clean); 15.36 marginal | 1 RX exposed, 12-bit-in-int16 (`iq_full_scale` 2048), **measured iiod ceiling ≈ 14.8 MS/s**, no overflow counter, no device timestamps. Facts, evidence grades and firmware options: `research/briefs/antsdr-e200.md` |
+| HackRF / Pro | secondary, regression baseline | libhackrf / hackrf_transfer / Soapy | 20 MS/s (legacy), 15.36 profile | 8-bit `cs8`; `scan`/`baseline` use `hackrf_sweep` until the backend-neutral sweeper lands |
+
+Design documents: `docs/design/antsdr-backend.md` (backend, capability model, session schema v2,
+builder tasks T1–T6) and `docs/design/canonical-representation.md` (canonical 15.36 MS/s /
+1 s / FFT-1024 representation shared by live detection and ML preprocessing).
+
+Datasets live outside git under `$AERIX_RF_DATASET_ROOT` (default `~/rf-datasets`); see
+`research/datasets/README.md`, the manifest there, `research/datasets/USER_TODO.md` for
+gated sources, and `research/briefs/rf-datasets.md` for what each dataset is good for.
 
 RF detection is a **separate server path** from the ODID `observations` pipeline: an RF
 detection is an energy/spectral measurement of one second of spectrum that may carry no
@@ -143,6 +160,33 @@ AERIX_RF_LAT=52.1 AERIX_RF_LON=5.1 uv run aerix-rf run
 
 Provision a `hackrf` sensor once: `POST /v1/sensors:provision {"class":"hackrf"}`.
 
+**ANTSDR E200 / AD9361 (`antsdr_iio` backend, continuous libiio network RX):**
+```sh
+uv sync --extra antsdr   # pulls python-iio (pylibiio); also needs the libiio runtime on the host
+
+# On this dev host, libiio itself lives in a micromamba env, not the system linker path:
+export LD_LIBRARY_PATH=/home/jarvis/aerix-rf/.antsdr-tools/mamba/envs/antsdr/lib
+# Elsewhere: install the libiio system package instead (e.g. `apt install libiio-dev` /
+# `libiio-utils`) and skip LD_LIBRARY_PATH.
+
+export AERIX_RF_ANTSDR_URI=ip:192.168.1.10   # or --antsdr-uri; default if unset
+
+uv run aerix-rf info --backend antsdr_iio    # confirm it's importable/reachable before a capture
+uv run aerix-rf capture --backend antsdr_iio --center-mhz 2437 --seconds 20 \
+    --antsdr-profile default --label "antsdr smoke test"
+#   --antsdr-profile: default (12.288 MS/s, clean over GbE) | antsdr_13p44 (13.44 MS/s, still
+#   sustained) | antsdr_11p52 (11.52 MS/s). Above ~13.44 MS/s is within the AD9361's own range
+#   but not this link's measured sustained throughput -- --sample-rate above that ceiling is
+#   applied (not rejected) but logs a warning, and the session's `capture_health` will show it.
+#   --gain-mode manual|agc_slow|agc_fast and --gain-db (manual mode) replace HackRF's
+#   --lna/--vga/--amp, which this backend does not accept.
+```
+Every session window's `capture_health` carries `loss_detection: "inferred_rate_only"` and
+`stream_rate_ratio` for this backend (the libiio firmware gives no per-buffer drop counter, so
+`dropped_samples` is always `None`, never a fabricated 0) -- `cap=RATE(x)` in a status/report
+line means the window was recorded at a fraction `x` of the nominal sample rate (measured over
+wall time since the stream started), the only signal this backend has for silent sample loss.
+
 **Local cue (Path 1b):**
 ```sh
 curl -XPOST http://aerix-rf.local:8770/cue -H "X-Local-Token: $TOKEN" \
@@ -208,6 +252,15 @@ prints serial + position), `cap` = capture health (`ok` or `INCOMPLETE(-n)`; the
 
 ## Status
 
+- **2026-09-18 — roadmap revision 2, ANTSDR primary.** E200 reachable and streaming
+  (receive-only) from this host; hardware brief, backend design and canonical-representation
+  memo written; session schema v2 (`iq_format`/`iq_full_scale`, cs16) and new `IQWindow`
+  provenance fields landed backward-compatibly (schema-1 sessions replay unchanged). The DJI
+  DroneID decoder was run on the independent RUB-SysSec DroneSecurity real-IQ captures and
+  reproduces their published telemetry exactly (1 + 10 CRC-valid frames; the 10-vs-7 delta is
+  their receiver lacking a turbo decoder) — frozen as a regression fixture referenced via
+  `AERIX_RF_DATASET_ROOT` (AGPL, not copied). ANTSDR live capture → replay → CRC-valid decode
+  (acceptance test A4) is **not yet done**. Research corpus indexed under `research/`.
 - **Software (Phase 1 of `AERIX_RF_ANTSDR_PROJECT.md`, 2026-09-04):** hardware-neutral
   `IQSource`/`IQWindow`, continuous libhackrf stream with health counters, DC-spike removal,
   Stage-1 morphology / Stage-2 identity / Stage-3 decode separation, live ML path with rule

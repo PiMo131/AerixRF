@@ -1,0 +1,7 @@
+- [ANTSDR primary pivot](project_antsdr_primary.md) — 2026-09-18: E200 is primary receiver, HackRF secondary; workstreams A–E defined
+- [Host environment](project_host_environment.md) — dev box: no passwordless sudo, no dialout, no SDR tools preinstalled, 1.7TB free, datasets in ~/rf-datasets
+- [User directive style](feedback_directive_style.md) — structured "proceed" directives ⇒ skip questionnaire, run parallel agents, numbered status reports
+- [Agent turn limits](feedback_agent_turn_limits.md) — subagents die at ~28–40 turns; write deliverables early, plan continuations
+- [E200 measured facts](project_e200_measured_facts.md) — IIO fw, 1RX, ~14.8 MS/s ceiling, no timestamps; firmware/2R2T change = user gate
+- [Canonical decisions](project_canonical_decisions.md) — 15.36 canonical; ANTSDR live 12.288 cs16/2048 rf_bw 10 MHz; decode knee 8–9 dB; features over common 10 MHz
+- [A4 acceptance progress](project_a4_progress.md) — live E200 session+replay works (2026-09-18); DJI CRC decode on ANTSDR still needs a drone powered nearby

@@ -4,14 +4,23 @@ from __future__ import annotations
 
 import hashlib
 import json
+import uuid
 
 import numpy as np
 import pytest
 
 from aerix_rf.config import Config
-from aerix_rf.sdr.capture import IQWindow, _read_cs8
+from aerix_rf.sdr.capture import (
+    FileIQSource,
+    IQWindow,
+    _read_cs8,
+    _read_cs16,
+    to_cs16,
+    to_cs8,
+)
 from aerix_rf.sdr.sim import synth_iq
 from aerix_rf.session import Session, SessionIntegrityError, build_summary, write_summary
+from aerix_rf.session.store import IQ_DIR, SESSION_FILE
 
 SR = 1e6
 DUR = 0.05
@@ -196,3 +205,205 @@ def test_summary_on_empty_session(tmp_path):
     assert "No detection records." in md and "No decode attempts recorded." in md
     assert "(no IQ recorded)" in md and "0 CRC-valid" in md
     assert list(s.iq_windows(cfg)) == []
+
+
+# --- T1: cs8/cs16 codec, schema-2 metadata, schema-1 back-compat, IQWindow defaults ---
+
+def test_cs8_cs16_roundtrip_and_scaling():
+    rng = np.random.default_rng(7)
+    iq = (rng.uniform(-1, 1, 4000) + 1j * rng.uniform(-1, 1, 4000)).astype(np.complex64)
+    iq = (iq / (np.max(np.abs(iq)) + 1e-9) * 0.95).astype(np.complex64)
+
+    # cs8: exact int8 recovery (within 1/128 quantization), matches to_cs8/_read_cs8.
+    raw8 = to_cs8(iq)
+    assert len(raw8) == iq.size * 2
+    back8 = _read_cs8_bytes(raw8)
+    assert np.max(np.abs(back8.real - iq.real)) <= 0.5 / 128 + 1e-6
+    assert np.max(np.abs(back8.imag - iq.imag)) <= 0.5 / 128 + 1e-6
+
+    # cs16 @ ANTSDR full_scale=2048.0: values stay in [-1, 1) and are exact to
+    # the int16 quantization step (1/2048), i.e. far tighter than cs8's 1/128.
+    raw16 = to_cs16(iq, full_scale=2048.0)
+    assert len(raw16) == iq.size * 4
+    back16 = _read_cs16_bytes(raw16, full_scale=2048.0)
+    assert np.all(back16.real >= -1.0) and np.all(back16.real < 1.0)
+    assert np.all(back16.imag >= -1.0) and np.all(back16.imag < 1.0)
+    assert np.max(np.abs(back16.real - iq.real)) <= 0.5 / 2048 + 1e-6
+    assert np.max(np.abs(back16.imag - iq.imag)) <= 0.5 / 2048 + 1e-6
+    # cs16 is strictly finer-grained than cs8 for the same signal.
+    assert np.max(np.abs(back16.real - iq.real)) < np.max(np.abs(back8.real - iq.real))
+
+    # Exact integer recovery: build I/Q pairs from known int16 values and check
+    # _read_cs16 recovers them exactly (no rounding drift from float encode).
+    known_i = np.array([0, 2047, -2048, 100], dtype=np.int16)
+    known_q = np.array([1, -1, 1999, -1999], dtype=np.int16)
+    interleaved = np.empty(known_i.size * 2, dtype=np.int16)
+    interleaved[0::2] = known_i
+    interleaved[1::2] = known_q
+    decoded = _read_cs16_bytes(interleaved.tobytes(), full_scale=2048.0)
+    assert np.allclose(decoded.real, known_i.astype(np.float32) / 2048.0, atol=1e-7)
+    assert np.allclose(decoded.imag, known_q.astype(np.float32) / 2048.0, atol=1e-7)
+
+
+def _read_cs8_bytes(raw: bytes) -> np.ndarray:
+    arr = np.frombuffer(raw, dtype=np.int8).astype(np.float32)
+    return ((arr[0::2] + 1j * arr[1::2]) / 128.0).astype(np.complex64)
+
+
+def _read_cs16_bytes(raw: bytes, full_scale: float) -> np.ndarray:
+    arr = np.frombuffer(raw, dtype=np.int16).astype(np.float32)
+    return ((arr[0::2] + 1j * arr[1::2]) / float(full_scale)).astype(np.complex64)
+
+
+def test_create_non_hackrf_receiver_keeps_explicit_none_gains(tmp_path):
+    """A non-HackRF backend (e.g. antsdr_iio via cli._receiver_meta) passes
+    lna_gain/vga_gain/amp as explicit None rather than omitting the keys --
+    Session.create() must honor that (rcv.get(k, default) returns the stored
+    None, it does not fall back to cfg's HackRF defaults) instead of silently
+    reporting HackRF gain-stage values for a radio that has none."""
+    cfg = Config(sample_rate=12_288_000.0, sim=False)
+    s = Session.create(tmp_path, "antsdr gains", cfg=cfg,
+                       receiver={"receiver_type": "antsdr", "backend": "antsdr_iio",
+                                "sample_rate": 12_288_000.0, "center_freq_hz": 2437e6,
+                                "lna_gain": None, "vga_gain": None, "amp": None,
+                                "gain_db": 55.0, "gain_mode": "manual"})
+    assert s.meta["receiver_backend"] == "antsdr_iio"
+    assert s.meta["sample_rate"] == 12_288_000.0
+    assert s.meta["gains"] == {"lna_gain": None, "vga_gain": None, "amp": False, "gain_db": 55.0}
+
+
+def test_write_iq_cs16_session_roundtrip(tmp_path):
+    """write_iq(iq_format="cs16") -> session.json metadata -> replay, end to end."""
+    cfg = Config(sample_rate=SR, window_s=DUR, sim=True)
+    s = Session.create(tmp_path, "cs16 test", cfg=cfg,
+                       receiver={"receiver_type": "antsdr", "iq_format": "cs16",
+                                "iq_full_scale": 2048.0})
+    w = _window(3, 1_700_000_100.0, 2440e6)
+    s.write_iq(w, iq_format="cs16", iq_full_scale=2048.0)
+    s.finalize()
+
+    entry = s.meta["files"][0]
+    assert entry["file"].endswith(".cs16")
+    assert entry["iq_format"] == "cs16"
+    assert entry["iq_full_scale"] == 2048.0
+
+    wins = list(s.iq_windows(cfg))
+    assert len(wins) == 1
+    got = wins[0]
+    assert np.max(np.abs(got.iq.real - w.iq.real)) <= 0.5 / 2048 + 1e-6
+    assert np.max(np.abs(got.iq.imag - w.iq.imag)) <= 0.5 / 2048 + 1e-6
+    # cs16 replay is closer to the original than a cs8 replay of the same signal would be.
+    assert np.max(np.abs(got.iq.real - w.iq.real)) < 0.5 / 128
+
+
+def test_schema1_session_replays_identically(tmp_path):
+    """A minimal, hand-built schema-1 session.json (no iq_format/iq_full_scale/
+    bandwidth_hz/channel_id/timing keys, cs8 file) must replay with the same
+    samples/defaults as the equivalent schema-2 session."""
+    cfg = Config(sample_rate=SR, window_s=DUR, sim=True)
+    iq = synth_iq(SR, DUR, drone=True, seed=9)
+    iq = (iq / (np.max(np.abs(iq)) + 1e-9) * 0.95).astype(np.complex64)
+
+    sdir = tmp_path / "2024-01-01_000000_legacy"
+    (sdir / IQ_DIR).mkdir(parents=True)
+    raw = to_cs8(iq)
+    (sdir / IQ_DIR / "capture_0001.cs8").write_bytes(raw)
+    entry = {
+        "file": "iq/capture_0001.cs8",
+        "sha256": hashlib.sha256(raw).hexdigest(),
+        "sample_count": iq.size,
+        "duration_s": DUR,
+        "sample_rate": SR,
+        "center_freq_hz": 2440e6,
+        "captured_at": 1_700_000_200.0,
+        "receiver_type": "hackrf",
+        "receiver_serial": "OLD-1",
+        "gain_db": 40.0,
+        "complete": True,
+        # deliberately NO iq_format / iq_full_scale / bandwidth_hz / channel_id / timing
+    }
+    meta = {
+        "schema_version": 1,
+        "session_id": str(uuid.uuid4()),
+        "label": "legacy",
+        "files": [entry],
+        "counts": {},
+        "test": {},
+    }
+    (sdir / SESSION_FILE).write_text(json.dumps(meta, indent=2))
+
+    s = Session.open(sdir)
+    assert s.meta.get("schema_version") == 1
+    wins = list(s.iq_windows(cfg))
+    assert len(wins) == 1
+    got = wins[0]
+    expect = _read_cs8(str(sdir / "iq" / "capture_0001.cs8"), 0, iq.size)
+    assert np.array_equal(got.iq, expect)
+    assert np.max(np.abs(got.iq.real - iq.real)) <= 0.5 / 128 + 1e-6
+    # cs8/128.0 default applied even though the keys are absent from session.json.
+    assert got.metadata["iq_format"] == "cs8"
+    assert got.metadata["iq_full_scale"] == 128.0
+    # New-in-schema-2 IQWindow fields fall back to the dataclass defaults.
+    assert got.bandwidth_hz is None
+    assert got.channel_id == 0
+    assert got.timing == {}
+
+
+def test_iqwindow_legacy_construction_gets_new_defaults():
+    """IQWindow built with only the pre-T1 positional/keyword args still gets the
+    new generalized fields at their documented defaults."""
+    iq = np.zeros(8, dtype=np.complex64)
+    w = IQWindow(iq=iq, captured_at=123.0, sample_rate=SR, center_freq_hz=2440e6,
+                receiver_type="hackrf", receiver_serial="S1", gain_db=30.0)
+    assert w.bandwidth_hz is None
+    assert w.channel_id == 0
+    assert w.timing == {}
+
+
+def test_to_cs16_clips_to_declared_full_scale():
+    """to_cs16 clips at the DECLARED full_scale, not a fixed int16 range: with
+    full_scale=2048.0, 2.0 (well outside +-1) must land at the max representable
+    code (2047), not wrap or hit +-32767."""
+    iq = np.array([2.0 + 2.0j], dtype=np.complex64)
+    raw = to_cs16(iq, full_scale=2048.0)
+    vals = np.frombuffer(raw, dtype=np.int16)
+    assert vals[0] == 2047  # I
+    assert vals[1] == 2047  # Q
+    # Symmetric negative clip: -round(full_scale) == -2048.
+    raw_neg = to_cs16(np.array([-2.0 - 2.0j], dtype=np.complex64), full_scale=2048.0)
+    vals_neg = np.frombuffer(raw_neg, dtype=np.int16)
+    assert vals_neg[0] == -2048
+    assert vals_neg[1] == -2048
+
+
+def test_read_cs16_requires_explicit_full_scale():
+    with pytest.raises(ValueError):
+        _read_cs16("/nonexistent", 0, 1, full_scale=None)
+
+
+def test_fileiqsource_cs16_without_full_scale_raises(tmp_path):
+    cfg = Config(sample_rate=SR, window_s=DUR, sim=True)
+    raw = to_cs16(np.zeros(N, dtype=np.complex64), full_scale=2048.0)
+    p = tmp_path / "capture_0001.cs16"
+    p.write_bytes(raw)
+    with pytest.raises(ValueError):
+        FileIQSource(cfg, path=str(p), meta={"sample_rate": SR, "iq_format": "cs16"})
+
+
+def test_write_iq_cs16_without_full_scale_raises(tmp_path):
+    cfg = Config(sample_rate=SR, window_s=DUR, sim=True)
+    s = Session.create(tmp_path, "cs16 missing scale", cfg=cfg, receiver={})
+    w = _window(4, 1_700_000_300.0, 2440e6)
+    with pytest.raises(ValueError):
+        s.write_iq(w, iq_format="cs16")
+
+
+def test_write_iq_cs8_keeps_default_full_scale(tmp_path):
+    """cs8 is unaffected by the cs16 required-full-scale rule -- default 128.0 holds."""
+    cfg = Config(sample_rate=SR, window_s=DUR, sim=True)
+    s = Session.create(tmp_path, "cs8 default", cfg=cfg, receiver={})
+    w = _window(5, 1_700_000_400.0, 2440e6)
+    s.write_iq(w)  # no iq_format/iq_full_scale -> cs8 @ 128.0, must not raise
+    entry = s.meta["files"][0]
+    assert entry["iq_format"] == "cs8"
+    assert entry["iq_full_scale"] == 128.0

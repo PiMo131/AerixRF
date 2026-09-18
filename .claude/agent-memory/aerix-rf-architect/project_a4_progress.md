@@ -1,0 +1,12 @@
+---
+name: a4-acceptance-progress
+description: Status of ANTSDR acceptance test A4 as of 2026-09-18 — live E200→AERIX session→replay works; DJI CRC-valid decode on ANTSDR still pending (needs a drone powered near the E200); known defects fixed in T4b-1.
+metadata:
+  type: project
+---
+
+First live ANTSDR session 2026-09-18 11:12 UTC (scratchpad `antsdr_sessions/2026-09-18_111221_antsdr_iio_smoke_2437_ambient`): `aerix-rf capture --backend antsdr_iio --seconds 10 --center-mhz 2437` → 10 windows at 12.288 MS/s, all complete, ambient Wi-Fi morphologies (`fhss_candidate`, SNR 27–34 dB at ~2434 MHz ⇒ an antenna IS connected to the exposed RX port), 0 CRC-valid; replay decode/class identical 10/10. Defects found and sent to T4b-1: IQ written as cs8 instead of native cs16/2048 (score delta 0.032 on replay), constant `captured_at` across windows, `stream_rate_ratio` 0.844 from clock starting before first sample, `rate_warning` not surfaced. Decoder independently validated on RUB-SysSec real IQ (bit-exact vs their receiver). Soak 2026-09-18 11:28–11:38 (600 s, 12.288 MS/s cs16): 560 windows in 590.9 s wall clock ⇒ ~5 % REAL silent sample loss on the AERIX host path (bare libiio loop: 0 %) — suspected GIL starvation of the producer `refill()` overrunning 8×1M device kernel buffers; `stream_rate_ratio` metric simultaneously mis-reported 0.65–0.79 (bookkeeping bug). Diagnosis/fix task launched (kbufs/buffer size/GIL). Capture hit the hardcoded ~6 GB IQ cap at 122 windows (by design, keeps detecting). Still owed for A4: a CRC-valid DJI DroneID decode captured BY THE E200 — requires the user to power a compatible DJI aircraft (Mini 3 = OcuSync 2) near the receiver, tuned to a DroneID centre (2429.5/2414.5/2444.5/2459.5 MHz candidates); also a ≥10 min soak with ratio ≥0.999.
+
+**Why:** A4 is the user-defined first strong acceptance test; the remaining step is physical, not software.
+
+**How to apply:** Do not claim "ANTSDR validated on DJI" until that capture exists and replays identically. Sessions live outside git; the field sessions from 2026-09-04 are not on this machine (user TODO). See [[antsdr-primary-pivot]], [[e200-measured-facts]].

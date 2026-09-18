@@ -1,0 +1,18 @@
+---
+name: firmware-streaming-ceiling
+description: Firmware options (stock IIO vs UHD vs DJI-event) and the measured ~15MS/s iiod throughput ceiling on our E200 unit, with decision table
+metadata:
+  type: project
+---
+
+Measured on our unit (`ip:192.168.1.10`, stock Pluto-compatible `ad9364` QSPI image): sustained RX ceiling is ~59 MB/s ≈ 14.8 MS/s complex int16, identical whether 20 or 30 MS/s is requested, via both Python `iio` bindings and C `iio_readdev` — a device-side (iiod/ARM/network) ceiling, not a client bottleneck. No overflow counter exposed; `samples_pps` = ENODEV. Full detail and citations are in `research/briefs/antsdr-e200.md` §13 ("Firmware options and streaming ceiling").
+
+Key findings from this research pass (2026-09-18):
+- The E200 has a **physical boot-mode switch**: QSPI boots the stock IIO/Pluto image, SD card boots MicroPhase's UHD-compatible firmware (`antsdr_uhd` repo). Community report (RadioReference forum) + vendor docs together indicate swapping is SD-card-in/out and does **not** touch/erase the QSPI image — i.e. dual-boot-by-SD-swap is real and low-risk, though not explicitly vendor-guaranteed in writing as non-destructive (treat as INFERRED-safe, not proven-safe).
+- UHD firmware claims (vendor Hackaday project page + antsdr_uhd repo, not independently bench-verified by us): 2R2T available, has `rx_metadata.time_spec`-style timestamps (explicitly contrasted against Pluto's lack of timestamps), uses a MicroPhase-proprietary "UOE" (UDP Data Offload Engine) FPGA block to raise Ethernet throughput. No sustained MS/s benchmark found anywhere (first-party or community). Requires a **patched/forked UHD build** (not stock pip/apt/conda UHD); one community report describes real app-compatibility friction (worked with SdrGlut, failed with CubicSDR/gqrx) and needing "a hack to the newest version of the library."
+- No credible method found to raise the stock IIO ceiling without changing firmware/image. The rate-independent plateau (20 MS/s and 30 MS/s requests both land at ~59 MB/s) is the signature of a fixed CPU/protocol-framing bottleneck in `iiod` on the Cortex-A9, not a buffer-sizing problem. One untested, low-risk idea worth trying later: on-device sc8 (8-bit I/Q) packing would roughly double achievable sample rate at the same byte ceiling, at reduced dynamic range — not yet tested.
+- `alphafox02/antsdr_dji_droneid`: community (non-vendor) DJI DroneID protocol-event firmware/software for E200. ZMQ output (ports 4221/4224), O2/O3 unencrypted + O4 encrypted-hash detection claimed, receive-only by omission (no transmit described). Whether it coexists with generic IQ streaming is undocumented — likely a separate/exclusive firmware mode, not a background service. No documented derivation from `proto17` or other named prior art. Evidence quality throughout is community-grade — do not treat decode claims as validated (CLAUDE.md evidence-levels rule) without `rf-protocol-analyst` review of actual decode logic.
+
+Recommendation given to the architect: stay on stock IIO 1R1T, design around ≤15 MS/s (10 MS/s comfortable, 15.36 MS/s marginal-only), add client-side cadence/liveness checking as an overflow proxy. Fallback path if ≥20 MS/s clean becomes a hard requirement: bounded, reversible SD-card-swap experiment into UHD firmware with a real bench sustained-rate measurement before committing architecture — not before user/architect approval, since it needs a from-source UHD build. Do not use 2R2T-on-IIO or DJI-event firmware to solve the throughput/timestamp problem; neither addresses it.
+
+See also [[MEMORY]] index and `research/briefs/antsdr-e200.md` §§3, 9, 13 for the full evidence trail.

@@ -24,6 +24,9 @@ dependencies = [
 ]
 
 [package.optional-dependencies]
+antsdr = [
+    { name = "pylibiio" },
+]
 train = [
     { name = "joblib" },
     { name = "scikit-learn" },
@@ -45,13 +48,14 @@ requires-dist = [
     { name = "numpy", specifier = ">=1.26" },
     { name = "pillow", specifier = ">=10.0" },
     { name = "pydantic", specifier = ">=2.6" },
+    { name = "pylibiio", marker = "extra == 'antsdr'", specifier = ">=0.25" },
     { name = "scikit-learn", marker = "extra == 'train'", specifier = ">=1.4" },
     { name = "scipy", specifier = ">=1.11" },
     { name = "torch", marker = "extra == 'train-cnn'", specifier = ">=2.2" },
     { name = "uvicorn", specifier = ">=0.29" },
     { name = "zeroconf", specifier = ">=0.132" },
 ]
-provides-extras = ["train", "train-cnn"]
+provides-extras = ["train", "train-cnn", "antsdr"]
 
 [package.metadata.requires-dev]
 dev = [{ name = "pytest", specifier = ">=8.0" }]
@@ -960,6 +964,15 @@ source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/49/2e/ced460408999b33da6b31b0021b0f37d329e202d4169aeb164493778f25b/pygments-2.21.0.tar.gz", hash = "sha256:610ca751c9bc2492b38eb9a38a7fbc93edbbb2d7182edaf34e66ae493dee5c8c", size = 5005329, upload-time = "2026-08-17T08:02:48.824Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/71/46/17f022dd3e953bf20a04a028a21ec746d942f8d2af30fa0f124fa0e6a684/pygments-2.21.0-py3-none-any.whl", hash = "sha256:2363c69b61c4a97c838da3b130dcd6468f4848992b21a82f2a63ec34377137d9", size = 1250147, upload-time = "2026-08-17T08:02:44.912Z" },
+]
+
+[[package]]
+name = "pylibiio"
+version = "0.25"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/43/27/ac30c489e86bd297111b09242b19aa05e470dfef8725a233346e9d67c642/pylibiio-0.25.tar.gz", hash = "sha256:f2615ab20093ec8ca87417f1e38dfdca1baa21a719328f4b27d28c99b1d23eb5", size = 14143, upload-time = "2023-08-10T14:03:16.994Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/68/a1/34bea2ef5bc4561e3c16506ff09ef157625771e7cb567e88711075c0b9a4/pylibiio-0.25-py3-none-any.whl", hash = "sha256:e49a0b317c9d4df100f4a2540e5aa6201222c3bd5495b296237e6598466afad1", size = 11490, upload-time = "2023-08-10T14:03:15.927Z" },
 ]
 
 [[package]]

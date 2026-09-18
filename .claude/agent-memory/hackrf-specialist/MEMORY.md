@@ -1,0 +1,2 @@
+- [Sample-rate/filter facts for 15.36 MS/s profile](hackrf_samplerate_filter_facts.md) — auto-filter rounds down to 10 MHz, not 12 MHz; 15.36 MS/s is exactly requested, not approximated
+- [HackRF One vs Pro identity ambiguity](hackrf_hardware_identity.md) — unresolved which physical unit is used; shared source code makes sample-rate/filter facts variant-agnostic so far

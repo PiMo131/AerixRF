@@ -140,6 +140,9 @@ class FrameResult:
         d, c, w = self.det, self.cls, self.window
         hb = w.health()
         health = "ok" if hb["capture_complete"] else f"INCOMPLETE(-{hb['dropped_or_missing_samples']})"
+        if hb.get("rate_warning") and hb["capture_complete"]:
+            ratio = hb.get("stream_rate_ratio")
+            health = f"RATE({ratio:.2f})" if ratio is not None else "RATE(?)"
         if hb.get("gap_before_samples"):
             health += f" gap={hb['gap_before_samples'] / self.window.sample_rate * 1000:.0f}ms"
         cad = f"{d.cadence_ms:.0f}ms" if d.cadence_ms else "-"

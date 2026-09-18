@@ -35,14 +35,29 @@ def _envs(name: str, default: str) -> str:
 @dataclass
 class Config:
     # --- SDR front end ---
-    sample_rate: float = 20e6          # HackRF Pro max; >= 15.36e6 needed for DroneID
+    sample_rate: float = 20e6          # HackRF Pro max; >= 15.36e6 needed for DroneID.
+                                        # Fixed-profile backends (antsdr_iio) ignore this
+                                        # unless sample_rate_requested is True -- see below.
+    sample_rate_requested: bool = False  # True once --sample-rate / $AERIX_RF_SAMPLE_RATE was
+                                        # explicitly set (vs. this dataclass's own default),
+                                        # so a backend with a fixed rate profile (antsdr_iio)
+                                        # can tell "apply this rate" from "use your own default".
     center_freq_mhz: float = 2440.0    # a DJI OcuSync 2.4 GHz centre; sweep later
-    gain_db: float = 40.0              # SoapySDR overall gain (soapy source only)
+    gain_db: float = 40.0              # SoapySDR overall gain (soapy source only); also the
+                                        # generic --gain-db for antsdr_iio's manual RX gain.
+    gain_mode: str = "manual"          # generic RX gain mode: manual | agc_slow | agc_fast
+                                        # (antsdr_iio only; HackRF backends ignore this).
     lna_gain: int = 16                 # hackrf_transfer LNA gain, 0-40 step 8
     vga_gain: int = 24                 # hackrf_transfer VGA gain, 0-62 step 2
     amp: bool = False                  # front-end amp (+14 dB); off for strong nearby signals
+    antsdr_uri: str = ""               # ANTSDR libiio network URI (antsdr_iio only);
+                                        # "" = backend default (ip:192.168.1.10)
+    antsdr_profile: str = ""           # antsdr_iio named profile: default | antsdr_13p44 |
+                                        # antsdr_11p52; "" = backend default ("default")
     band: str = "2.4GHz"
-    iq_file: str = ""                  # replay a captured .cs8 (int8 IQ) file instead of live SDR
+    iq_file: str = ""                  # replay a captured .cs8 (int8) or .cs16 (int16, e.g.
+                                        # ANTSDR) IQ file instead of live SDR; format/full-scale
+                                        # come from session metadata, see sdr/capture.py FileIQSource
 
     # --- framing / spectrogram ---
     window_s: float = 1.0              # one detection frame per second
@@ -82,10 +97,15 @@ class Config:
     def from_env(cls) -> "Config":
         lat = os.environ.get("AERIX_RF_LAT")
         lon = os.environ.get("AERIX_RF_LON")
+        sr_env = os.environ.get("AERIX_RF_SAMPLE_RATE")
         return cls(
             sample_rate=_envf("AERIX_RF_SAMPLE_RATE", cls.sample_rate),
+            sample_rate_requested=sr_env not in (None, ""),
             center_freq_mhz=_envf("AERIX_RF_CENTER_MHZ", cls.center_freq_mhz),
             gain_db=_envf("AERIX_RF_GAIN_DB", cls.gain_db),
+            gain_mode=_envs("AERIX_RF_ANTSDR_GAIN_MODE", cls.gain_mode),
+            antsdr_uri=_envs("AERIX_RF_ANTSDR_URI", cls.antsdr_uri),
+            antsdr_profile=_envs("AERIX_RF_ANTSDR_PROFILE", cls.antsdr_profile),
             band=_envs("AERIX_RF_BAND", cls.band),
             fft_size=_envi("AERIX_RF_FFT", cls.fft_size),
             score_threshold=_envf("AERIX_RF_SCORE_THRESHOLD", cls.score_threshold),

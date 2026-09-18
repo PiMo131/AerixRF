@@ -132,7 +132,7 @@ Do not present a stage-1 RF candidate as a confirmed drone merely because its ba
 
 ## Hardware strategy
 
-HackRF is the first field-test platform. ANTSDR E200 / AD9361 is the next target. Keep the shared receiver abstraction extensible without prematurely implementing ANTSDR-specific acceleration.
+ANTSDR E200 / AD9361 is the primary receiver platform (since 2026-09-18). HackRF is the secondary/reference backend and the first field-tested platform; it must keep working. Keep the shared receiver abstraction extensible without prematurely implementing ANTSDR-specific FPGA acceleration. Firmware changes and persistent device settings on the E200 are user-approval gates.
 
 Device-specific limitations must not silently become universal assumptions.
 
