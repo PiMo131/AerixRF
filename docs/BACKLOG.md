@@ -4,7 +4,9 @@ Small, approved-in-principle items discovered during work. Each needs a bounded 
 and independent review before it is "done". Evidence-wording rules apply.
 
 ## Decoder / protocol
-- [ ] Blocker-robustness fix (failure split shows hypothesis SELECTION is the cause: forced true centre decodes 119/120):
+- [x] (done 2026-09-18, pending review) Blocker-robustness fix — zc6-ranked centre selection + gated refinement:
+      bench n=60 → B_wb_blocker/CW arms all at the 6 dB floor (were 15.4/11.4/8.4), clean unchanged, 135 ms/window.
+      Blocker-robustness fix (failure split shows hypothesis SELECTION is the cause: forced true centre decodes 119/120):
       an attempted ZC4-only ±100 kHz refinement REGRESSED real-IQ decodes and was reverted 2026-09-18. Re-attempt only
       with a reliable local-search scorer (actual zc6/demod score, STO search), keep "break only on level ≥ B" and
       a 60 kHz DC-fallback dedup; acceptance = RUB golden identical + `B_wb_blocker` knee ≤ 12 dB. Route via rf-dsp-specialist.
@@ -12,7 +14,7 @@ and independent review before it is "done". Evidence-wording rules apply.
       `test_centre_hypotheses_band_peel` during a full-file run that overlapped a concurrent edit of the
       test file; 35 reruns × 16 seeds green, assertions hold with >1 MHz margin. Diagnostic messages added.
       If it recurs: capture system load + FFT thread count in situ.
-- [ ] Wideband adjacent blocker (+20 dB, 4.5–8.5 MHz) knee is 15.4 dB vs target ≤12 dB — filter transition
+- [x] (done 2026-09-18) Wideband adjacent blocker (+20 dB, 4.5–8.5 MHz) knee was 15.4 dB vs target ≤12 dB — filter transition
       band overlaps the blocker; `_grow_band` still grows through adjacent bands. Follow-up DSP tuning.
 - [ ] Widen `bench/canonical_rate_sweep.py` default SNR floor below 6 dB: true clean knee is now ≈2.8 dB in-band.
 - [ ] Document the two SNR conventions: `decode/_synth.make_encoded_burst(snr_db)` = full-band AWGN over Fs;

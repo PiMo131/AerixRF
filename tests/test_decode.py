@@ -794,6 +794,84 @@ def test_centre_hypotheses_band_peel():
             assert abs(hyps[i] - hyps[j]) >= droneid.PEEL_DEDUP_HZ, hyps
 
 
+def test_select_centre_accepts_higher_zc6_hypothesis(monkeypatch):
+    """Two hypotheses; the second scores above CENTRE_ACCEPT_ZC6 -> chosen,
+    and both were actually demodulated (no early accept on the first)."""
+    scores = [
+        {"zc_score": 0.6, "cfo_hz": 0.0, "integer_cfo_bins": 0, "zc6_score": 0.2},
+        {"zc_score": 0.6, "cfo_hz": 0.0, "integer_cfo_bins": 0, "zc6_score": 0.9},
+    ]
+    calls = {"n": 0}
+
+    def fake_demod(*_args, **_kwargs):
+        info = scores[calls["n"]]
+        calls["n"] += 1
+        return None, info
+
+    monkeypatch.setattr(droneid, "_demodulate", fake_demod)
+    fs = ofdm.NOMINAL_SAMPLE_RATE
+    iq = np.zeros(4000, dtype=np.complex64)
+
+    centre_hz, (demod, info), tried, _alts = droneid._select_centre(
+        iq, fs, [0.0, 5.0e5], deadline=None)
+    assert tried == 2
+    assert centre_hz == 5.0e5
+    assert demod is None and info["zc6_score"] == 0.9
+
+
+def test_select_centre_clean_burst_one_hypothesis():
+    """A clean synthetic burst has one DroneID-shaped band -> one hypothesis,
+    one demod, and the same CRC-valid decode as before the scorer existed."""
+    b = make_encoded_burst(_FIELDS, snr_db=None, seed=41)
+    attempts = decode_all(b.iq, b.sample_rate)
+    ok = [a for a in attempts if a.crc_ok]
+    assert len(ok) == 1, attempts
+    assert ok[0].hypotheses_tried == 1
+    assert ok[0].result.serial == _FIELDS["serial"]
+
+
+def test_select_centre_expired_deadline_returns_first_hypothesis_unevaluated(monkeypatch):
+    def fail_demod(*_args, **_kwargs):
+        raise AssertionError("must not evaluate any hypothesis past the deadline")
+
+    monkeypatch.setattr(droneid, "_demodulate", fail_demod)
+    fs = ofdm.NOMINAL_SAMPLE_RATE
+    iq = np.zeros(4000, dtype=np.complex64)
+    import time
+    deadline = time.perf_counter() - 1.0     # already in the past
+
+    centre_hz, (demod, _info), tried, _alts = droneid._select_centre(
+        iq, fs, [1.0e6, 2.0e6], deadline=deadline)
+    assert centre_hz == 1.0e6
+    assert demod is None
+    assert tried == 0
+
+
+def test_select_centre_refines_to_peak_at_plus_200khz(monkeypatch):
+    """Best first-order hypothesis is DroneID-shaped but not selective (zc6 <
+    CENTRE_REFINE_ZC6, zc4 above the gate) -> the +/-100..400 kHz grid is
+    scored and the +200 kHz point (the induced peak) wins."""
+    h0 = 0.0
+    table = {
+        h0: (0.5, 0.10),           # triggers refinement (zc6 < 0.35, zc4 >= 0.4)
+        h0 + 2.0e5: (0.6, 0.50),   # the peak: >= ZC6_CONFIRM_THRESHOLD, < CENTRE_ACCEPT_ZC6
+    }
+
+    def fake_score_centre(_slice_iq, _sample_rate, centre_hz, **_kwargs):
+        zc4, zc6 = table.get(centre_hz, (0.05, 0.05))
+        info = {"zc_score": zc4, "zc6_score": zc6, "cfo_hz": 0.0, "integer_cfo_bins": 0}
+        return (None, info), zc4, zc6
+
+    monkeypatch.setattr(droneid, "_score_centre", fake_score_centre)
+    fs = ofdm.NOMINAL_SAMPLE_RATE
+    iq = np.zeros(4000, dtype=np.complex64)
+
+    centre_hz, (_demod, info), _tried, _alts = droneid._select_centre(
+        iq, fs, [h0], deadline=None)
+    assert centre_hz == h0 + 2.0e5
+    assert info["zc6_score"] == 0.50
+
+
 def test_budget_checked_per_hypothesis(monkeypatch):
     fs = ofdm.NOMINAL_SAMPLE_RATE
     in_burst = ofdm.burst_length(fs)
@@ -821,6 +899,36 @@ def test_budget_checked_per_hypothesis(monkeypatch):
     assert elapsed < 0.6, f"decode_all took {elapsed:.2f}s"
     assert len(attempts) == 1
     assert attempts[0].hypotheses_tried <= 2, attempts[0].hypotheses_tried
+
+
+def test_fallback_single_hypothesis_never_refines(monkeypatch):
+    """decode_all's tried==0 fallback (guaranteed one evaluation of the first
+    hypothesis when the budget expired before the primary _select_centre call
+    could evaluate anything) must not fall into the +/-100..400 kHz refine
+    grid even when that lone hypothesis is DroneID-shaped-but-not-selective
+    (zc6 < CENTRE_REFINE_ZC6, zc4 above the gate) -- regression for a bug
+    that turned one guaranteed _demodulate call into nine."""
+    fs = ofdm.NOMINAL_SAMPLE_RATE
+    in_burst = ofdm.burst_length(fs)
+    rng = np.random.default_rng(402)
+    iq = (rng.standard_normal(2 * in_burst)
+          + 1j * rng.standard_normal(2 * in_burst)).astype(np.complex64)
+
+    calls = []
+
+    def slow_demod(*args, **kwargs):
+        import time as _time
+        calls.append(1)
+        _time.sleep(0.05)
+        return None, {"zc_score": 0.9, "cfo_hz": 0.0, "integer_cfo_bins": 0,
+                       "zc6_score": 0.2}
+
+    monkeypatch.setattr(droneid, "_demodulate", slow_demod)
+
+    attempts = decode_all(iq, fs, budget_s=1e-9)
+    assert len(attempts) == 1
+    assert attempts[0].hypotheses_tried == 1
+    assert len(calls) == 1, f"expected exactly 1 _demodulate call, got {len(calls)}"
 
 
 def test_channel_filter_passband_and_stopband():

@@ -1,6 +1,6 @@
 ---
 name: antsdr-backend-interface-decisions
-description: Rationale behind the proposed ANTSDR backend interface decisions (normalization, 15.36 MS/s default, iq_format, shared StreamAssembler, honest None for unknown loss)
+description: Rationale behind the ANTSDR backend interface decisions (normalization, sample-rate default, iq_format, shared StreamAssembler, honest None for unknown loss)
 metadata:
   type: project
 ---
@@ -13,10 +13,15 @@ architect approval). The reasoning, not the code shape, is what matters here:
    depending on 12-bit justification — *must be measured*, a wrong guess shifts every
    RSSI by 24 dB silently).
 
-2. **Default ANTSDR rate 15.36 MS/s, not 20 MS/s.** Two reasons that reinforce each
-   other: 16-bit IQ at 20 MS/s is 640 Mbit/s, marginal on 1 GbE from a Zynq-7020; and
-   15.36 MHz is exactly `ofdm.NOMINAL_SAMPLE_RATE`, so the DroneID decoder stops
-   resampling. 20 MS/s stays selectable purely for parity with the HackRF golden session.
+2. **Default ANTSDR rate: 12.288 MS/s** (SUPERSEDED the original 15.36 MS/s proposal,
+   2026-09-18). The original reasoning was that 15.36 MHz equals `ofdm.NOMINAL_SAMPLE_RATE`
+   so the DroneID decoder stops resampling, and that 20 MS/s (640 Mbit/s cs16) is marginal
+   on 1 GbE from a Zynq-7020. Measurement killed it: BIST-tone runs (brief §14) show 15.36
+   is **unusable** on this image (ratio 0.503, millions of phase jumps) — it is above the
+   iiod ceiling, not merely marginal. 12.288 MS/s is the default (gap-free over 600 s,
+   exact 5/4 canonical ratio, integer STFT timing) and 13.44 MS/s is a validated named
+   profile. The rate-vs-resampling tradeoff was the right axis; the ceiling was the
+   missing fact.
 
 3. **`iq_format` / `iq_full_scale` in `session.json`, defaulting to cs8/128.0 when
    absent.** That default is what keeps every existing HackRF session replayable without

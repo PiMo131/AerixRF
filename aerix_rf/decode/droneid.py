@@ -67,6 +67,18 @@ CANDIDATE_MARGIN_BURSTS = 0.25
 # decode_all stops starting new candidates once this much wall time was spent.
 DEFAULT_BUDGET_S = 0.25
 
+# Centre-hypothesis scorer (docs/design/decoder-blocker-robustness.md, "Scorer
+# design"): accept a hypothesis immediately once the equalized sym-6 ZC
+# confirm score reaches this (a real burst at the true centre is ~0.9); below
+# CENTRE_REFINE_ZC6 the best hypothesis is treated as mis-centred (not just
+# noisy) and a fine grid around it is tried, +/-CENTRE_REFINE_SPAN_HZ in
+# CENTRE_REFINE_STEP_HZ steps (closes the integer-CFO capture range gap,
+# 2*K*15 kHz = 120 kHz < 100 kHz step... i.e. do not raise the step above that).
+CENTRE_ACCEPT_ZC6 = 0.75
+CENTRE_REFINE_ZC6 = 0.35
+CENTRE_REFINE_SPAN_HZ = 4e5
+CENTRE_REFINE_STEP_HZ = 1e5
+
 # Per-candidate spectral shape (field lesson, Mini 3 2026-09-04): the window's
 # strongest bursts are Wi-Fi beacons (~18 MHz) and the RC uplink hops (~2 MHz),
 # both 20 dB above the DroneID burst, which sits anywhere inside the window --
@@ -640,6 +652,133 @@ def _centre_hypotheses(iq: np.ndarray, sample_rate: float) -> list[float]:
     return out[:MAX_CENTRE_HYPOTHESES]
 
 
+_EMPTY_DEMOD_INFO = {"zc_score": 0.0, "cfo_hz": 0.0, "integer_cfo_bins": 0, "zc6_score": 0.0}
+
+
+def _score_centre(slice_iq: np.ndarray, sample_rate: float, centre_hz: float, *,
+                  correlation_threshold: float = DEFAULT_CORRELATION_THRESHOLD,
+                  max_integer_cfo_bins: int = DEFAULT_MAX_INTEGER_CFO_BINS,
+                  region: tuple[int, int] | None = None,
+                  deadline: float | None,
+                  cache: dict,
+                  ) -> tuple[tuple["DroneIdDemod | None", dict] | None, float, float]:
+    """Mix ``slice_iq`` to ``centre_hz``, channel-filter, and score it via
+    :func:`_demodulate`.
+
+    Returns ``(demod_result, zc4, zc6)`` where ``demod_result`` is the
+    ``(demod, info)`` pair :func:`_demodulate` produces. ``demod_result`` is
+    ``None`` (with ``zc4 = zc6 = 0.0``) when ``deadline`` (a
+    ``time.perf_counter()`` deadline, or ``None`` to disable it) had already
+    passed and nothing new was evaluated.
+
+    Cached by ``round(centre_hz / 1e3)`` (1 kHz buckets) keyed into the
+    caller-owned ``cache`` dict, so a centre already scored -- in particular
+    the eventual winner -- is never re-demodulated; a cache hit is returned
+    even past ``deadline`` since it costs nothing new.
+    """
+    import time
+
+    key = round(centre_hz / 1e3)
+    cached = cache.get(key)
+    if cached is not None:
+        return cached
+    if deadline is not None and time.perf_counter() >= deadline:
+        return None, 0.0, 0.0
+    mix_hz = centre_hz if abs(centre_hz) > max_integer_cfo_bins * ofdm.CARRIER_SPACING_HZ else 0.0
+    h_slice = _mix(slice_iq, sample_rate, mix_hz)
+    h_slice = _channel_filter(h_slice, sample_rate)
+    demod, info = _demodulate(h_slice, sample_rate, correlation_threshold,
+                              max_integer_cfo_bins, region)
+    zc4 = float(info.get("zc_score", 0.0))
+    zc6 = float(info.get("zc6_score", 0.0))
+    result = ((demod, info), zc4, zc6)
+    cache[key] = result
+    return result
+
+
+def _select_centre(slice_iq: np.ndarray, sample_rate: float,
+                   hypotheses_hz: list[float] | tuple[float, ...], *,
+                   correlation_threshold: float = DEFAULT_CORRELATION_THRESHOLD,
+                   max_integer_cfo_bins: int = DEFAULT_MAX_INTEGER_CFO_BINS,
+                   region: tuple[int, int] | None = None,
+                   deadline: float | None = None,
+                   allow_refine: bool = True,
+                   ) -> tuple[float, tuple, int, tuple[float, ...]]:
+    """Pick the best centre-frequency hypothesis for one candidate slice.
+
+    Evaluates ``hypotheses_hz`` (:func:`_centre_hypotheses`' order) via
+    :func:`_score_centre`, accepting immediately at
+    ``zc6 >= CENTRE_ACCEPT_ZC6`` -- this keeps the clean/RUB path identical to
+    before the scorer existed: one hypothesis, one demod. Otherwise ranks
+    every hypothesis evaluated so far by ``(zc6, zc4)``; if the best is
+    DroneID-shaped but not selective (``zc6 < CENTRE_REFINE_ZC6`` and
+    ``zc4 >= correlation_threshold * ZC_GATE_FRACTION``), a
+    +/-CENTRE_REFINE_STEP_HZ..CENTRE_REFINE_SPAN_HZ grid around it is scored
+    too and the overall argmax taken (see
+    docs/design/decoder-blocker-robustness.md, "Scorer design"). Never accepts
+    a final result below ``ZC6_CONFIRM_THRESHOLD``: a noise-driven grid point
+    cannot win outright, so the first hypothesis (peel order) is returned
+    instead, unevaluated hypotheses included in ``alt_centers_hz``.
+
+    Returns ``(centre_hz, (demod, info), hypotheses_tried, alt_centers_hz)``.
+    ``hypotheses_tried`` counts distinct centres actually
+    mixed/filtered/demodulated (cache hits and deadline-skipped hypotheses do
+    not add to it). ``deadline`` is checked before every evaluation.
+    """
+    hyps = list(hypotheses_hz)
+    if not hyps:
+        return 0.0, (None, dict(_EMPTY_DEMOD_INFO)), 0, ()
+
+    cache: dict = {}
+
+    def score(h: float, dl: float | None):
+        return _score_centre(
+            slice_iq, sample_rate, h, correlation_threshold=correlation_threshold,
+            max_integer_cfo_bins=max_integer_cfo_bins, region=region,
+            deadline=dl, cache=cache)
+
+    scored: list[tuple[float, float, float, tuple]] = []  # (zc6, zc4, centre_hz, demod_result)
+    accepted: tuple[float, tuple] | None = None
+    for h in hyps:
+        demod_result, zc4, zc6 = score(h, deadline)
+        if demod_result is None:
+            break  # deadline passed before this hypothesis could be evaluated
+        scored.append((zc6, zc4, h, demod_result))
+        if zc6 >= CENTRE_ACCEPT_ZC6:
+            accepted = (h, demod_result)
+            break
+
+    if accepted is None and scored:
+        best_zc6, best_zc4, best_h, best_result = max(scored, key=lambda t: (t[0], t[1]))
+        if (allow_refine and best_zc6 < CENTRE_REFINE_ZC6
+                and best_zc4 >= correlation_threshold * ZC_GATE_FRACTION):
+            offsets = []
+            step = CENTRE_REFINE_STEP_HZ
+            while step <= CENTRE_REFINE_SPAN_HZ + 1.0:
+                offsets.extend((-step, step))
+                step += CENTRE_REFINE_STEP_HZ
+            for off in offsets:
+                demod_result, zc4, zc6 = score(best_h + off, deadline)
+                if demod_result is None:
+                    break  # deadline passed mid-refinement
+                scored.append((zc6, zc4, best_h + off, demod_result))
+            best_zc6, best_zc4, best_h, best_result = max(scored, key=lambda t: (t[0], t[1]))
+        if best_zc6 < ZC6_CONFIRM_THRESHOLD:
+            first_h = hyps[0]
+            demod_result, _zc4, _zc6 = score(first_h, deadline)  # cache hit -> free
+            accepted = (first_h, demod_result if demod_result is not None
+                       else (None, dict(_EMPTY_DEMOD_INFO)))
+        else:
+            accepted = (best_h, best_result)
+
+    if accepted is None:
+        accepted = (hyps[0], (None, dict(_EMPTY_DEMOD_INFO)))
+
+    centre_hz, demod_result = accepted
+    alt_centers_hz = tuple(h for h in hyps if h != centre_hz)
+    return centre_hz, demod_result, len(cache), alt_centers_hz
+
+
 BURST_SPECTRUM_ALT_MIN_DB = -30.0     # local maxima below this (rel. to the slice peak) are noise, not candidates
 
 
@@ -911,28 +1050,36 @@ def decode_all(iq: np.ndarray, sample_rate: float, *, max_bursts: int = 8,
         # passed the outer gate is always attempted.
         try:
             hyps = _centre_hypotheses(iq[lo:hi], sample_rate)
-            demod = info = None
-            mix_hz = 0.0
-            budget_note = None
-            for hyp_idx, h_hz in enumerate(hyps):
-                h_elapsed = time.perf_counter() - t_start
-                if (budget_s is not None and h_elapsed >= budget_s
-                        and attempt.hypotheses_tried > 0):
-                    budget_note = (f"budget_s={budget_s:g} exceeded after {h_elapsed:.2f}s; "
-                                   f"{len(hyps) - hyp_idx} weaker centre hypothes(es) not attempted")
-                    break
-                attempt.hypotheses_tried += 1
-                mix_hz = h_hz if abs(h_hz) > max_integer_cfo_bins * ofdm.CARRIER_SPACING_HZ else 0.0
-                h_slice = _mix(iq[lo:hi], sample_rate, mix_hz)
-                h_slice = _channel_filter(h_slice, sample_rate)
-                demod, info = _demodulate(h_slice, sample_rate, correlation_threshold,
-                                          max_integer_cfo_bins, region=(start - lo, end - lo))
-                attempt.level = _grade(demod, info, correlation_threshold)
-                attempt.chosen_center_offset_mhz = float(h_hz) / 1e6
-                if attempt.level != "none":
-                    break
-            if budget_note is not None:
-                attempt.error = budget_note if attempt.error is None else f"{attempt.error}; {budget_note}"
+            deadline = (t_start + budget_s) if budget_s is not None else None
+            h_hz, (demod, info), tried, _alt_hyps = _select_centre(
+                iq[lo:hi], sample_rate, hyps,
+                correlation_threshold=correlation_threshold,
+                max_integer_cfo_bins=max_integer_cfo_bins,
+                region=(start - lo, end - lo), deadline=deadline)
+            if tried == 0:
+                # A candidate that already passed the outer per-candidate
+                # budget gate always gets its first centre hypothesis
+                # evaluated, deadline notwithstanding (pre-scorer contract).
+                # allow_refine=False keeps this to exactly that one
+                # evaluation: with only one hypothesis in play, a
+                # DroneID-shaped-but-not-selective result would otherwise
+                # enter the +/-100..400 kHz refinement grid (extra
+                # _demodulate calls the single-evaluation contract forbids).
+                h_hz, (demod, info), tried, _alt_hyps = _select_centre(
+                    iq[lo:hi], sample_rate, hyps[:1],
+                    correlation_threshold=correlation_threshold,
+                    max_integer_cfo_bins=max_integer_cfo_bins,
+                    region=(start - lo, end - lo), deadline=None,
+                    allow_refine=False)
+            attempt.hypotheses_tried = int(tried)
+            mix_hz = h_hz if abs(h_hz) > max_integer_cfo_bins * ofdm.CARRIER_SPACING_HZ else 0.0
+            attempt.level = _grade(demod, info, correlation_threshold)
+            attempt.chosen_center_offset_mhz = float(h_hz) / 1e6
+            if budget_s is not None and time.perf_counter() - t_start >= budget_s and tried < len(hyps):
+                note = (f"budget_s={budget_s:g} exceeded after "
+                        f"{time.perf_counter() - t_start:.2f}s; "
+                        f"{len(hyps) - tried} weaker centre hypothes(es) not attempted")
+                attempt.error = note if attempt.error is None else f"{attempt.error}; {note}"
             if info is not None:
                 attempt.zc_score = float(info["zc_score"])
                 attempt.cfo_hz = float(mix_hz + info["cfo_hz"])

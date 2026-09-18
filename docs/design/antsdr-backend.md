@@ -385,3 +385,125 @@ the per-window ratio previously jittered ±2 % and fired false warnings on loss-
 (3) `AERIX_RF_ANTSDR_KBUFS` / `AERIX_RF_ANTSDR_BUFSAMPLES` exist for larger device-side buffering;
 whether 32 × 4 M protects against contention is UNMEASURED (run (c) owed on an idle host, plus a
 repeat 10-minute soak with nothing else running). Never place a session root on tmpfs.
+
+---
+
+## T7 — acquisition producer as a separate OS process (2026-09-18)
+
+**Decision.** §14/§14.1 of `research/briefs/antsdr-e200.md` isolated the mechanism: 12 busy *OS
+processes* do not perturb the libiio producer (ratio 0.9998), while an expensive consumer inside the
+producer's *own* process collapses it (ratio 0.41). The fix is therefore structural, not a deployment
+rule: run the libiio producer as its own OS process, handing samples to the DSP process through shared
+memory. `StreamAssembler`/`IQWindow` semantics are unchanged; only the producer moves.
+
+### 1. Process model
+
+```mermaid
+flowchart LR
+  subgraph PROD[producer process - libiio only, no DSP]
+    CTX[iio.Context + Buffer<br/>refill/read] --> CLIP[raw_clip_stats on int16]
+    CLIP --> W[ring writer: memcpy 4 MiB + header]
+  end
+  W --> SHM[(shared_memory ring<br/>32 slots x 4 MiB + header page)]
+  CTL[[control socketpair<br/>tune / params / stop / get_readback]] --- PROD
+  subgraph CONS[main process - DSP]
+    R[ring reader<br/>seq check, exact overrun count] --> ASM[StreamAssembler.push]
+    ASM --> WIN[read_window -> IQWindow] --> PIPE[Stage 1/2/3 + features_v2]
+    CTL --- R
+  end
+```
+
+* Producer entrypoint is a module (`python -m aerix_rf.sdr.producer_main`), started with
+  `multiprocessing` **spawn** (fork would inherit the parent's numpy/DSP state and fds). It does
+  *only* refill/read, `raw_clip_stats`, header write, memcpy — no complex64 conversion, no per-chunk
+  pickling — inside ~85 ms of wall time per 1 M-sample chunk at 12.288 MS/s.
+* Control channel: `multiprocessing.Connection` socketpair, JSON-only request/response. Ops:
+  `tune(center_hz)`, `set_params(gain/bw/rate)`, `get_readback(epoch)`, `stop`, `ping`. Readback
+  dicts are **never** sent per chunk: the header carries a `meta_epoch` u32 and the consumer pulls a
+  new snapshot only when it changes. Retune is applied between refills; the first chunk after it
+  carries `flags.RETUNE`, on which the consumer calls `StreamAssembler.flush()`.
+
+### 2. Ring and header (backend-neutral)
+
+Global header (first 4 KiB page): magic/version, `slot_count`, `slot_bytes`, `chunk_samples`,
+`sample_rate`, `iq_format`, `raw_full_scale`, `write_seq` (latest published), `read_seq` (diagnostic
+only — the producer **never** blocks on it), `producer_pid`, `producer_state`, `heartbeat_mono_ns`,
+`producer_errno`, device counters. Per-slot header (64 B, cacheline-aligned, kept in a header array
+so payloads stay page-aligned):
+
+| field | type | meaning |
+|---|---|---|
+| `seq` | u64 | chunk sequence, monotone from 0; also the seqlock (published last, re-checked after read) |
+| `sample_index` | u64 | index of this chunk's first sample since stream start |
+| `n_samples` | u32 | samples in this chunk (complex pairs) |
+| `flags` | u32 | RETUNE / PRODUCER_RESTART / DEVICE_WARNING |
+| `t_mono_ns` | u64 | CLOCK_MONOTONIC at refill completion (timing/rate math) |
+| `t_wall_ns` | u64 | CLOCK_REALTIME (session metadata only) |
+| `center_freq_hz` | f64 | LO in force for this chunk |
+| `clip_count` / `peak_abs` | u32 / f32 | from `raw_clip_stats` in the producer |
+| `meta_epoch` | u32 | readback-snapshot generation |
+
+Reader protocol: read slot header → `np.frombuffer` view → consume → re-read `seq`; if `seq`
+changed the producer lapped us, so the data is discarded and counted (below). **v1 copies the 4 MiB
+into a private buffer** (~0.4 ms, <0.5 % of the 85 ms budget) because the assembler's queue can hold
+more stream than the ring spans; zero-copy is a later flag, valid only when `ring_span_s >
+queue_max_s + margin`. Backend-neutral: the ring, both headers, the control op set, the exact-overrun
+accounting. libiio-specific: refill semantics, `kernel_buffers`, ad9361 attr names, readback
+contents, and `loss_detection="inferred_rate_only"`. HackRF can adopt the same ring unchanged (cs8
+chunks, `raw_full_scale=128`, device-side `loss_detection="exact"` from its sequence numbers).
+
+### 3. Failure semantics
+
+| Failure | Detection | Reported as |
+|---|---|---|
+| Producer death | control-pipe EOF + `heartbeat_mono_ns` stale > 1 s | stream ends; in-flight window emitted `complete=False`; `stream_end_reason="producer_exit"`, exit code + stderr tail in `session.json` |
+| Consumer stall / ring overrun | `write_seq - last_consumed > slot_count`, or post-read `seq` mismatch | `host_dropped_samples += skipped_chunks * chunk_samples` (**exact**), `host_overrun_events += 1`, window `complete=False`, `gap_before_samples` exact. Never silent. |
+| Device eviction (other libiio client, link drop) | `refill()` raises | producer sets `producer_state=ERROR` + errno, final heartbeat, exit non-zero. **No auto-reconnect in v1** — a silent reconnect manufactures an unmeasured gap. |
+| Clean shutdown | `stop` op | producer destroys the Buffer, resets debug attrs it set (`bist_tone` → `0 0 0 0`), closes the context, exits 0; consumer joins (5 s) → SIGTERM → SIGKILL, then `shm.close()/unlink()` in a `finally`. |
+
+Loss vocabulary splits in two and stays honest: `loss_detection` keeps its meaning — the
+**device→host** link, still `"inferred_rate_only"` on libiio — while a new
+`host_loss_detection="exact_ring"` with an always-integer `host_dropped_samples` covers the **host
+transport**. Never merge them: one is inferred, one is counted.
+
+### 4. Latency and memory at 12.288–13.44 MS/s cs16
+
+Chunk 1 Mi samples = 4 MiB = 85.3 ms @12.288, 78.0 ms @13.44; stream 49.2 / 53.8 MB/s. Ring
+**32 slots = 128 MiB payload** → 2.73 s @12.288, 2.50 s @13.44 (≥2 s met). Added latency: one chunk
+publication (~85 ms) + ~0.4 ms memcpy, negligible against the 1 s window. Producer RSS ≈ 60–90 MB
+(numpy + libiio, no DSP). Device-side kernel buffers (8 × 1 M ≈ 0.68 s) are unchanged and stack in
+front of the ring.
+
+### 5. Testability without hardware
+
+`producer_main --source synthetic` generates paced cs16 chunks (tone + noise) through the identical
+ring/control path, with injection flags `--stall-after N`, `--die-after N`, `--drop-chunk k`,
+`--slow-refill`. Tests use a small ring (4 × 64 ki) to stay fast and assert: exact
+`host_dropped_samples` under a slow consumer, stream end on producer death within 1 s, clean
+`/dev/shm` after every case.
+
+### 6. Acceptance
+
+(a) 600 s at 12.288 MS/s, full Stage-1/2/3 with `features_v2` live enabled (a deliberately heavy
+consumer), BIST tone injected by the producer: **zero device-side phase-jump events**, every
+host-side gap exactly accounted (sum of `host_dropped_samples` == measured missing samples).
+(b) Same run under concurrent pytest-suite load: same criterion. (c) `windows/wall ≥ 599/601.5`,
+no `/dev/shm` residue, `bist_tone` verified `0 0 0 0` afterwards.
+
+### 7. Builder task split
+
+| Task | Scope | Acceptance |
+|---|---|---|
+| **T7a** `sdr/shmring.py` | Neutral ring: header structs, writer/reader, seqlock, exact overrun accounting, wrap. No processes. | pytest: header round-trip, wrap, lap detection, overrun count exactness, clean unlink |
+| **T7b** `sdr/producer_main.py` + `sdr/process_source.py` | spawn supervision, control socketpair, `meta_epoch` readback fetch, synthetic source + injection flags, ring→`StreamAssembler`→`IQWindow` glue with the new host-loss fields | pytest with real subprocesses: kill / stall / clean stop / retune flush; exact loss; no shm leak |
+| **T7c** wiring | `--backend antsdr-proc` uses the producer process for the real libiio device; `session.json` gains `host_dropped_samples`, `host_overrun_events`, `host_loss_detection`, `producer_pid`, `stream_end_reason`; docs | hardware: acceptance (a)–(c) above |
+
+### 8. Risks
+
+1. **Python startup on the field box** — spawn + numpy + iio import is ~0.5–1.5 s; keep it inside
+   `open()`. `stream_rate_ratio`'s clock already starts at the first pushed chunk, so it must not be
+   charged as lost stream.
+2. **Shared-memory cleanup** — a crash leaks 128 MiB in `/dev/shm`; name segments `aerix-rx-<pid>-<uuid>` and sweep stale ones at startup. `resource_tracker` in spawn children emits spurious leak warnings.
+3. **Pickling** — solved by design (`meta_epoch`, JSON-only control payloads), but the readback dict must be JSON-clean: no numpy scalars, no `None`-vs-NaN ambiguity.
+4. **GIL-free placement** — cs16→complex64 stays in the consumer; `raw_clip_stats` moves to the
+   producer and must be measured to stay well under the 85 ms budget or it becomes the new stall.

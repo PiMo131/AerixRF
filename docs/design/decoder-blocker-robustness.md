@@ -214,3 +214,8 @@ hypothesis can outrank the true one - never accept a best below `ZC6_CONFIRM_THR
 peel order. The +-400 kHz span assumes edge-truncation bias stays within that; a blocker overlapping more
 of the band needs a different fix, not a wider grid. zc6 is an OFDM-structure match, not identity: it
 selects a centre, it does not raise the evidence level. Level C stays CRC-gated.
+
+
+### Result (2026-09-18, implemented)
+
+`_score_centre`/`_select_centre` implemented per § Scorer design. Bench (`bench/out/scorer_fix.log`, n=60, PYTHONHASHSEED=0, sweep 6–16 dB): B_canonical 6.00 (floor, unchanged), **B_wb_blocker 6.00 (was 15.40)**, B_cs8_blocker 6.00 (was 11.38), B_cs12_blocker 6.00 (was 8.36); mean decode 92 / 135 / 114 / 90 ms per window. RUB golden bit-identical; clean bursts take exactly one hypothesis. Evidence level: synthetic (level 1–2) + real-IQ non-regression.
