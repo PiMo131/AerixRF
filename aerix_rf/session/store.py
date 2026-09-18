@@ -388,8 +388,16 @@ class Session:
         """Append one protocol-decode attempt (see report.py for the fields used)."""
         self._append_jsonl(DECODE_FILE, record, "decodes")
 
-    def finalize(self, extra: dict[str, Any] | None = None) -> None:
-        """Stamp ended_at / duration_s / counts (and any ``extra`` keys) into session.json."""
+    def finalize(self, extra: dict[str, Any] | None = None, *, source: Any | None = None) -> None:
+        """Stamp ended_at / duration_s / counts (and any ``extra`` keys) into session.json.
+
+        ``source``: the live ``IQSource`` this session was recorded from, if any
+        (e.g. a ``ProcessIQSource``). If it has a ``stream_end_reason`` attribute
+        (``"completed" | "producer_lost" | "device_lost" | "user_stop"`` --
+        see ``process_source.py``), that value is stamped into the top-level
+        ``stream_end_reason`` key; a source with no such attribute (every
+        backend except the OS-process producer path today), or no ``source``
+        passed at all, records ``None`` -- never a guessed default."""
         now = datetime.now(timezone.utc)
         self.meta["ended_at"] = _utc_iso(now.timestamp())
         try:
@@ -409,6 +417,7 @@ class Session:
             if k == "test":
                 raise ValueError("finalize() must not overwrite the test-condition block")
             self.meta[k] = v
+        self.meta["stream_end_reason"] = getattr(source, "stream_end_reason", None)
         self._flush()
 
     # --- readers -----------------------------------------------------------

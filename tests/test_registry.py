@@ -171,8 +171,49 @@ def test_antsdr_iio_reports_available_when_bindings_present(monkeypatch):
 
 
 def test_registry_covers_all_documented_backends():
-    for name in ("libhackrf", "hackrf_transfer", "soapy", "file", "sim", "antsdr_iio"):
+    for name in ("libhackrf", "hackrf_transfer", "soapy", "file", "sim", "antsdr_iio",
+                 "antsdr_proc"):
         assert name in reg.REGISTRY
+
+
+# --- antsdr_proc (T7c): OS-process producer path to the same ANTSDR device ----
+
+def test_antsdr_proc_reports_unavailable_with_reason(monkeypatch):
+    import sys
+    monkeypatch.setitem(sys.modules, "iio", None)  # `import iio` -> ImportError
+    entry = reg.REGISTRY["antsdr_proc"]
+    available, reason = entry.probe()
+    assert available is False
+    assert reason and "iio" in reason.lower()
+    assert "antsdr_proc" not in reg.AUTO_ORDER
+
+
+def test_antsdr_proc_reports_available_when_bindings_present(monkeypatch):
+    import sys, types
+    monkeypatch.setitem(sys.modules, "iio", types.ModuleType("iio"))
+    available, reason = reg.REGISTRY["antsdr_proc"].probe()
+    assert available is True
+    assert reason
+
+
+def test_antsdr_proc_not_in_auto_order():
+    assert "antsdr_proc" not in reg.AUTO_ORDER
+
+
+def test_antsdr_proc_capabilities_backend_name():
+    caps = reg.REGISTRY["antsdr_proc"].capabilities
+    assert isinstance(caps, ReceiverCapabilities)
+    assert caps.backend == "antsdr_proc"
+    assert caps.receiver_type == "antsdr"          # same physical device as antsdr_iio
+    assert caps.loss_counter_available is False     # device itself has no overflow counter
+    assert caps.native_iq_format == "cs16"
+    assert caps.native_full_scale == 2048.0
+
+
+def test_antsdr_proc_probe_is_same_function_as_antsdr_iio():
+    # Both backends need the exact same python-iio import; deliberately the
+    # same probe callable, not a coincidentally-identical copy.
+    assert reg.REGISTRY["antsdr_proc"].probe is reg.REGISTRY["antsdr_iio"].probe
 
 
 @pytest.mark.parametrize("name", ["libhackrf", "hackrf_transfer", "soapy", "sim"])

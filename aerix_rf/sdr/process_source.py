@@ -37,7 +37,7 @@ from typing import Any, Iterator, Optional
 import numpy as np
 
 from .capture import IQSource, IQWindow, ReceiverCapabilities
-from .producer_main import recv_json_line, send_json_line
+from .producer_main import EXIT_DEVICE_LOST, recv_json_line, send_json_line
 from .shmring import FLAG_RETUNE, ShmRing, sweep_stale_rings
 from .stream import StreamAssembler
 
@@ -103,7 +103,14 @@ def process_capabilities(source_type: str, *, full_scale: float,
                           sample_rate: float) -> ReceiverCapabilities:
     return ReceiverCapabilities(
         receiver_type=f"process:{source_type}",
-        backend="process_source",
+        # "antsdr_proc" is the registry backend name (registry.py) for the
+        # "antsdr_iio" producer path, so a live ``ProcessIQSource`` instance's
+        # own ``.capabilities.backend`` -- what ``cli._receiver_meta`` records
+        # into session.json's ``receiver_backend`` -- names the actually
+        # selected backend, not this module's generic plumbing name. Every
+        # other source_type (only "synthetic" today, T7b) keeps that generic
+        # name: it has no registry entry of its own to name-match.
+        backend="antsdr_proc" if source_type == "antsdr_iio" else "process_source",
         tuning_range_hz=(0.0, 1e10),
         sample_rates_hz=(1e3, 1e8),
         sample_rate_is_range=True,
@@ -212,6 +219,32 @@ class ProcessIQSource(IQSource):
         self._reader_thread.start()
 
     # --- IQSource contract -----------------------------------------------
+    @property
+    def stream_end_reason(self) -> str:
+        """Best-effort classification of why the stream ended, meant to be
+        passed through to ``Session.finalize(extra={"stream_end_reason": ...})``:
+
+          * ``"device_lost"``  -- the producer hit a hardware-specific
+            unrecoverable error (exited with ``EXIT_DEVICE_LOST``, e.g. an
+            ANTSDR ``refill()``/libiio-side failure -- see
+            ``AntsdrIioProducerSource`` in ``producer_main.py``).
+          * ``"producer_lost"`` -- the producer exited/died for any other
+            reason before :meth:`close` was called.
+          * ``"user_stop"``    -- :meth:`close` was called while the producer
+            was still running (a normal, caller-initiated stop).
+          * ``"completed"``    -- neither of the above: the producer is gone
+            but this source was already stopping/stopped cleanly (exit 0),
+            or the caller hasn't stopped anything unusual has happened yet.
+        """
+        if self._producer_lost:
+            code = self._proc.poll() if self._proc is not None else None
+            if code == EXIT_DEVICE_LOST:
+                return "device_lost"
+            return "producer_lost"
+        if self._stopping:
+            return "user_stop"
+        return "completed"
+
     @property
     def capabilities(self) -> ReceiverCapabilities:
         return process_capabilities(

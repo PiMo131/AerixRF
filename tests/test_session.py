@@ -451,3 +451,48 @@ def test_write_iq_cs8_keeps_default_full_scale(tmp_path):
     entry = s.meta["files"][0]
     assert entry["iq_format"] == "cs8"
     assert entry["iq_full_scale"] == 128.0
+
+
+# --- stream_end_reason (T7c): finalize() reads it off the live source, if any -
+
+class _FakeSourceWithEndReason:
+    def __init__(self, reason: str) -> None:
+        self.stream_end_reason = reason
+
+
+def test_finalize_without_source_records_none(tmp_path):
+    cfg = Config(sample_rate=SR, window_s=DUR, sim=True)
+    s = Session.create(tmp_path, "no source", cfg=cfg, receiver={})
+    s.finalize()
+    assert s.meta["stream_end_reason"] is None
+    reopened = Session.open(s.path)
+    assert reopened.meta["stream_end_reason"] is None
+
+
+def test_finalize_with_source_lacking_attribute_records_none(tmp_path):
+    cfg = Config(sample_rate=SR, window_s=DUR, sim=True)
+    s = Session.create(tmp_path, "no attr", cfg=cfg, receiver={})
+
+    class _NoEndReason:
+        pass
+
+    s.finalize(source=_NoEndReason())
+    assert s.meta["stream_end_reason"] is None
+
+
+@pytest.mark.parametrize("reason", ["completed", "producer_lost", "device_lost", "user_stop"])
+def test_finalize_with_source_records_its_stream_end_reason(tmp_path, reason):
+    cfg = Config(sample_rate=SR, window_s=DUR, sim=True)
+    s = Session.create(tmp_path, f"end reason {reason}", cfg=cfg, receiver={})
+    s.finalize(source=_FakeSourceWithEndReason(reason))
+    assert s.meta["stream_end_reason"] == reason
+    reopened = Session.open(s.path)
+    assert reopened.meta["stream_end_reason"] == reason
+
+
+def test_finalize_extra_and_source_do_not_clobber_each_other(tmp_path):
+    cfg = Config(sample_rate=SR, window_s=DUR, sim=True)
+    s = Session.create(tmp_path, "extra+source", cfg=cfg, receiver={})
+    s.finalize(extra={"windows": 3}, source=_FakeSourceWithEndReason("device_lost"))
+    assert s.meta["windows"] == 3
+    assert s.meta["stream_end_reason"] == "device_lost"

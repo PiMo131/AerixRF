@@ -175,6 +175,17 @@ class IQWindow:
             "clip_fraction": self.metadata.get("clip_fraction"),
             "peak_abs_frac": self.metadata.get("peak_abs_frac"),
             "clip_warning": bool(self.metadata.get("clip_warning", False)),
+            # Host-side (OS-process producer / shared-memory ring) loss accounting --
+            # see process_source.py's module docstring: distinct from the ANTSDR
+            # device-side `loss_detection` above (which stays "inferred_rate_only"
+            # even on the antsdr_proc backend, since the AD9361 firmware itself has
+            # no overflow counter). Honestly ``None`` on every backend that isn't a
+            # separate-OS-process producer (sim/HackRF/file/in-thread antsdr_iio),
+            # never a fabricated 0/"exact".
+            "host_loss_detection": self.metadata.get("host_loss_detection"),
+            "host_dropped_samples": self.metadata.get("host_dropped_samples"),
+            "host_overrun_events": self.metadata.get("host_overrun_events"),
+            "producer_pid": self.metadata.get("producer_pid"),
         }
 
 

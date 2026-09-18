@@ -12,12 +12,14 @@ probe/factory does its own import lazily, inside the function body.
 
 from __future__ import annotations
 
+import os
 import shutil
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Callable
 
 from ..config import Config
 from .antsdr_iio import antsdr_iio_capabilities
+from .antsdr_iio_device import BUFFER_SAMPLES, IQ_FULL_SCALE, resolve_profile
 from .capture import (
     IQSource,
     ReceiverCapabilities,
@@ -115,6 +117,42 @@ def _make_sim(cfg: Config) -> IQSource:
     return SimSource(cfg)
 
 
+def _make_antsdr_proc(cfg: Config) -> IQSource:
+    from .process_source import ProcessIQSource
+
+    # Same URI/profile resolution _make_antsdr_iio uses (Config already falls
+    # back to $AERIX_RF_ANTSDR_URI / $AERIX_RF_ANTSDR_PROFILE in from_env());
+    # re-exported into the environment so the producer SUBPROCESS -- which
+    # reads those two env vars itself, inside AntsdrIioDevice.__init__ (see
+    # antsdr_iio_device.py) -- also sees an explicit --antsdr-uri/--antsdr-profile
+    # CLI flag, not only whatever the env var already was when this process
+    # started.
+    if cfg.antsdr_uri:
+        os.environ["AERIX_RF_ANTSDR_URI"] = cfg.antsdr_uri
+    if cfg.antsdr_profile:
+        os.environ["AERIX_RF_ANTSDR_PROFILE"] = cfg.antsdr_profile
+
+    # producer_main's antsdr_iio source does not (yet) support an "unset ->
+    # let the device pick its own profile rate" sentinel over argv: whatever
+    # --rate value ``ProcessIQSource`` passes is treated by
+    # ``AntsdrIioDevice`` as an explicit override (see its docstring). Resolve
+    # the same value ``_make_antsdr_iio`` would let the backend pick for
+    # itself (the profile's own rate) up front here instead, so the ring/
+    # window sizing this consumer needs before spawning the producer matches
+    # what the device will actually run at.
+    profile = resolve_profile(cfg.antsdr_profile or None)
+    sample_rate = cfg.sample_rate if cfg.sample_rate_requested else float(profile["sample_rate"])
+
+    return ProcessIQSource(
+        source_type="antsdr_iio",
+        sample_rate=sample_rate,
+        center_freq_hz=cfg.center_freq_mhz * 1e6,
+        chunk_samples=BUFFER_SAMPLES,
+        full_scale=IQ_FULL_SCALE,
+        window_seconds=cfg.window_s,
+    )
+
+
 def _make_antsdr_iio(cfg: Config) -> IQSource:
     from .antsdr_iio import AntsdrIIOSource
 
@@ -149,6 +187,26 @@ REGISTRY: dict[str, BackendEntry] = {
     "sim": BackendEntry("sim", _make_sim, _probe_sim, sim_capabilities()),
     "antsdr_iio": BackendEntry("antsdr_iio", _make_antsdr_iio, _probe_antsdr_iio,
                               antsdr_iio_capabilities()),
+    # T7c: the same ANTSDR/AD9361 device as "antsdr_iio", but read through the
+    # acquisition-producer OS process + shared-memory ring (process_source.py)
+    # instead of an in-process thread. ``_probe_antsdr_proc`` is deliberately
+    # the exact same probe as "antsdr_iio" (python-iio import only, no network
+    # context): both backends need the same library, and this one's factory
+    # only imports/opens the device inside the spawned subprocess, so probing
+    # it here must not block on an unreachable box either.
+    #
+    # Device-side loss stays exactly as honest as "antsdr_iio"
+    # (``loss_counter_available=False`` below -- the AD9361 firmware itself
+    # has no overflow/sequence counter, see antsdr_iio.py). What's new here is
+    # the HOST side: this backend's ring (``ShmRing``) makes every host-side
+    # loss -- an overrun or a producer-declared chunk drop -- an EXACT count
+    # (see process_source.py's module docstring, "host_loss_detection").
+    # ``ReceiverCapabilities`` has no separate field for that (it is reported
+    # per-window in ``IQWindow.health()``'s ``host_loss_detection``/
+    # ``host_dropped_samples``/``host_overrun_events``, not as a static
+    # capability), so this comment is the documentation of that fact.
+    "antsdr_proc": BackendEntry("antsdr_proc", _make_antsdr_proc, _probe_antsdr_iio,
+                                replace(antsdr_iio_capabilities(), backend="antsdr_proc")),
 }
 
 # Documented order ``make_source(cfg)`` tries with no explicit --backend / cfg.sim /
@@ -159,5 +217,6 @@ REGISTRY: dict[str, BackendEntry] = {
 # network URI, not something to silently fall back to when a HackRF is absent.
 # It is still listed in ``REGISTRY`` (with a real availability probe) so
 # `aerix-rf info` can show it and ``--backend antsdr_iio`` / ``AERIX_RF_BACKEND``
-# can select it explicitly.
+# can select it explicitly. Same for "antsdr_proc" (T7c, the OS-process
+# producer path to the same physical box): also excluded here on purpose.
 AUTO_ORDER: tuple[str, ...] = ("libhackrf", "soapy", "hackrf_transfer")
