@@ -30,14 +30,17 @@ from aerix_rf.scan.sweep import (
     load_baseline,
     parse_sweep_csv_multi,
     record_baseline,
+    record_baseline_via,
     run_hackrf_sweep,
     save_baseline,
     sweep_once,
+    sweep_via,
 )
 
 __all__ = [
     "BANDS", "resolve_band",
     "Baseline", "average_db", "parse_sweep_csv_multi", "run_hackrf_sweep",
     "sweep_once", "record_baseline", "save_baseline", "load_baseline",
+    "sweep_via", "record_baseline_via",
     "Candidate", "DEFAULT_WEIGHTS", "rank_candidates", "summarize", "to_dict",
 ]

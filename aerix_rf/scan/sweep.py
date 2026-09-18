@@ -52,6 +52,8 @@ __all__ = [
     "record_baseline",
     "save_baseline",
     "load_baseline",
+    "sweep_via",
+    "record_baseline_via",
 ]
 
 
@@ -256,6 +258,37 @@ def record_baseline(lo_mhz: float, hi_mhz: float, seconds: float = 30.0, *,
         dwell_s=float(seconds),
         recorded_at=datetime.now(timezone.utc).isoformat(timespec="seconds"),
         gains={"lna": int(lna), "vga": int(vga), "amp": bool(amp)},
+    )
+
+
+# --------------------------------------------------------------------------- #
+# backend-neutral entry points (T5) -- see aerix_rf.sdr.sweep.SweepSource
+# --------------------------------------------------------------------------- #
+
+def sweep_via(sweep_source, lo_mhz: float, hi_mhz: float, seconds: float = 2.0,
+             **kwargs) -> tuple[np.ndarray, np.ndarray, int]:
+    """``sweep_once``-equivalent for any ``aerix_rf.sdr.sweep.SweepSource``
+    (``HackrfSweepSource`` -- unchanged hackrf_sweep behaviour -- or
+    ``RetuneWelchSweep`` for any other ``IQSource``). Same
+    ``(freqs_mhz, power_matrix [n_rows, n_bins] dB, n_rows)`` contract as
+    :func:`sweep_once`; :mod:`aerix_rf.cli` picks which ``sweep_source`` to
+    pass based on ``ReceiverCapabilities.supports_sweep``.
+    """
+    return sweep_source.sweep(lo_mhz, hi_mhz, seconds, **kwargs)
+
+
+def record_baseline_via(sweep_source, lo_mhz: float, hi_mhz: float, seconds: float = 30.0,
+                        *, bin_hz: int = 500_000, gains: dict | None = None,
+                        **kwargs) -> Baseline:
+    """``record_baseline``-equivalent for any ``SweepSource``; see :func:`sweep_via`."""
+    freqs, matrix, n = sweep_source.sweep(lo_mhz, hi_mhz, seconds, bin_hz=bin_hz, **kwargs)
+    actual_bin_hz = float(np.median(np.diff(freqs)) * 1e6) if freqs.size > 1 else float(bin_hz)
+    return Baseline(
+        lo_mhz=float(lo_mhz), hi_mhz=float(hi_mhz), bin_hz=actual_bin_hz,
+        freqs_mhz=freqs, power_db=average_db(matrix), n_sweeps=n,
+        dwell_s=float(seconds),
+        recorded_at=datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        gains=dict(gains or {}),
     )
 
 

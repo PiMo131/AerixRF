@@ -831,3 +831,71 @@ def test_burst_spectrum_survives_continuous_stronger_blocker():
     cands = droneid._burst_spectrum_candidates(w, _FS_IN)
     shaped = [(c, bw) for c, bw, s in cands if s]
     assert any(abs(c - (-3e6)) < 0.5e6 for c, bw in shaped), shaped
+
+
+# ---------------------------------------------------------------------------
+# decode_records() -- band-peel hypothesis fields (hypotheses_tried,
+# chosen_center_offset_mhz, alt_centers_mhz) are additive to the existing keys.
+# ---------------------------------------------------------------------------
+
+def _make_frame_result(attempts):
+    from aerix_rf.pipeline import FrameResult
+    from aerix_rf.sdr.capture import IQWindow
+    from aerix_rf.detect.energy import Detection
+    from aerix_rf.classify.model import Classification
+
+    window = IQWindow(
+        iq=np.zeros(16, dtype=np.complex64), captured_at=0.0, sample_rate=15.36e6,
+        center_freq_hz=2440e6, receiver_type="sim",
+    )
+    det = Detection(score=0.5, snr_db=10.0, rssi_dbm=-60.0, peak_freq_mhz=2440.0,
+                     occupied_bw_mhz=10.0, burst_count=1, cadence_ms=None,
+                     signature_class="unknown")
+    cls = Classification(signature_class="unknown", confidence=0.0, source="rule")
+    return FrameResult(window=window, spec=None, det=det, cls=cls, plausible=True,
+                        attempts=attempts)
+
+
+def test_decode_records_includes_hypothesis_fields_for_crc_valid_attempt():
+    res = droneid.DroneIdResult(serial="ABC123", drone_lat=1.0, drone_lon=2.0,
+                                 operator_lat=None, operator_lon=None, protocol="ocusync2")
+    a = droneid.DecodeAttempt(
+        start_sample=0, end_sample=100, duration_ms=6.4, peak_power_db=-10.0,
+        level="C", zc_score=0.9, cfo_hz=100.0, integer_cfo_bins=0, crc_ok=True,
+        result=res, error=None, center_offset_hz=1.5e6, occupied_bw_hz=10e6,
+        droneid_shaped=True, alt_centers_hz=(1.5e6, -2.0e6), hypotheses_tried=2,
+        chosen_center_offset_mhz=1.5,
+    )
+    fr = _make_frame_result([a])
+    [rec] = fr.decode_records()
+
+    # Pre-existing keys are untouched.
+    assert rec["center_offset_mhz"] == 1.5
+    assert rec["occupied_bw_mhz"] == 10.0
+    assert rec["droneid_shaped"] is True
+    assert rec["crc_ok"] is True
+    assert rec["serial"] == "ABC123"
+
+    # New additive keys, correct types.
+    assert rec["hypotheses_tried"] == 2 and isinstance(rec["hypotheses_tried"], int)
+    assert rec["chosen_center_offset_mhz"] == 1.5 and isinstance(rec["chosen_center_offset_mhz"], float)
+    assert rec["alt_centers_mhz"] == [1.5, -2.0] and isinstance(rec["alt_centers_mhz"], list)
+
+
+def test_decode_records_hypothesis_fields_default_for_none_level_attempt():
+    a = droneid.DecodeAttempt(
+        start_sample=0, end_sample=100, duration_ms=6.4, peak_power_db=-20.0,
+        level="none", zc_score=0.1, cfo_hz=0.0, integer_cfo_bins=0, crc_ok=False,
+        result=None, error=None,
+    )
+    fr = _make_frame_result([a])
+    [rec] = fr.decode_records()
+
+    assert rec["level"] == "none"
+    assert rec["crc_ok"] is False
+    assert rec["serial"] is None
+
+    # Defaulted DecodeAttempt fields still surface with the right types.
+    assert rec["hypotheses_tried"] == 0 and isinstance(rec["hypotheses_tried"], int)
+    assert isinstance(rec["chosen_center_offset_mhz"], float)
+    assert rec["alt_centers_mhz"] == [] and isinstance(rec["alt_centers_mhz"], list)

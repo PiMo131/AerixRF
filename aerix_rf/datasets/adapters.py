@@ -16,13 +16,15 @@ sentinel, never a guess).
 from __future__ import annotations
 
 import hashlib
+import json
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Iterator, Optional, Protocol
+from typing import Any, Iterator, Optional, Protocol
 
 import numpy as np
 
+from ..sdr.capture import _read_cs8, _read_cs16
 from .spec import (
     Activity,
     EmitterClass,
@@ -369,7 +371,241 @@ class RubDroneSecurityAdapter:
         return LabelsGroup(scene=scene, window=scene)
 
 
+# ---------------------------------------------------------------------------
+# AERIX's own recorded sessions (Workstream D, T5) -- `aerix_rf.session.store
+# .Session` output directories (ANTSDR cs16 @ 12.288 MS/s, HackRF cs8 @
+# 20 MS/s, and any future receiver written by the same session format).
+# session.json schema v2 fields are read with the same optional-key fallback
+# rules `aerix_rf.sdr.capture.FileIQSource` already applies (schema-1
+# sessions -- no `iq_format`/`iq_full_scale`/`bandwidth_hz`/`channel_id`/
+# `timing` keys -- replay/normalise identically to schema-2 ones): iq_format
+# absent -> cs8; cs8 full scale absent -> 128.0; cs16 full scale is REQUIRED
+# (no default -- see capture.py), so a cs16 file with none recorded raises at
+# `load_iq()` time via `_read_cs16` itself rather than being silently guessed.
+# ---------------------------------------------------------------------------
+
+_AERIX_BACKGROUND_KEYWORDS = ("ambient", "baseline", "smoke", "soak", "probe")
+
+
+class AerixSessionAdapter:
+    """S1 adapter for one AERIX field-session batch directory (this project's
+    own recordings, not a third-party dataset).
+
+    One :class:`RecordingMeta` per IQ file (= one 1.0 s window at *that
+    file's own* recorded rate, ``files[i]['sample_rate']`` -- NOT
+    necessarily the session's top-level ``sample_rate``, which for the
+    ANTSDR backend is the pre-decimation IIO/ADC rate, not the stream rate
+    actually written to disk). ``recording_id`` is ``<session_id>/<file>``
+    and ``run_id`` is the bare ``session_id`` so every window of one session
+    shares one split group (never split across train/val/test).
+
+    A session directory's ``replays/<...>/session.json`` (a replay of an
+    already-captured session, not a new original capture) is never picked
+    up: :meth:`iter_recordings` globs exactly one directory level below
+    ``original/``, so nested replay sessions are excluded by construction,
+    not by an explicit filter.
+
+    Label semantics: ``emitter_class`` comes from the session's own
+    operator-authored ``test`` block ONLY -- never from ``detections.jsonl``/
+    ``decode.jsonl`` (this adapter never reads those files at all). A
+    ``drone_manufacturer``/``drone_model`` present in ``test`` is the
+    strongest signal (operator flew a real aircraft during the capture); a
+    session whose own label/``test_label`` names it as one of AERIX's
+    routine no-drone test kinds (ambient/baseline/smoke/soak/probe) with no
+    drone fields is ``background`` at the same operator-truth evidence
+    level -- the operator's own choice of session name is how this
+    project's field-test protocol records "no aircraft was present", the
+    same kind of authored ground truth as a filled-in ``test`` block, not a
+    filename-derived guess. Anything else (an un-suffixed/ambiguous session
+    name, no drone fields) stays ``unknown`` at the lowest evidence level --
+    never inferred from what a detector/decoder happened to find.
+    """
+
+    def __init__(self, dataset_id: str, mirror_dir_name: Optional[str] = None) -> None:
+        self.dataset_id = dataset_id
+        self.mirror_dir_name = mirror_dir_name or dataset_id
+
+    def iter_recordings(self, root: Path) -> Iterator[RecordingMeta]:
+        base = root / self.mirror_dir_name / "original"
+        for session_json in sorted(base.glob("*/session.json")):
+            session_dir = session_json.parent
+            try:
+                meta = json.loads(session_json.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                continue  # torn/unreadable session.json: skip, don't fail the whole scan
+            yield from self._recordings_for_session(session_dir, meta)
+
+    def _recordings_for_session(self, session_dir: Path, meta: dict) -> Iterator[RecordingMeta]:
+        session_id = str(meta.get("session_id") or session_dir.name)
+        session_receiver_type = meta.get("receiver_type")
+        session_receiver_serial = meta.get("receiver_serial")
+        session_receiver_backend = meta.get("receiver_backend")
+        receiver_type = str(session_receiver_type or "unknown")
+        session_bw_hz = meta.get("bandwidth_hz")
+        session_iq_format = meta.get("iq_format")
+        session_iq_full_scale = meta.get("iq_full_scale")
+        session_center_hz = meta.get("center_freq_hz")
+        test_block = dict(meta.get("test") or {})
+        session_label = str(meta.get("label") or test_block.get("test_label") or "")
+
+        receiver_extra = {
+            "type": receiver_type,
+            "backend": session_receiver_backend,
+            "firmware": meta.get("receiver_firmware"),
+            "gain_mode": meta.get("gain_mode"),
+            "gain_db": (meta.get("gains") or {}).get("gain_db"),
+            "clock": "host_wallclock",
+        }
+
+        for entry in meta.get("files") or []:
+            rel = entry.get("file")
+            if not rel:
+                continue
+            path = session_dir / rel
+            if not path.exists():
+                continue  # a listed file that never landed on disk (crash/partial session)
+
+            file_receiver_type = str(
+                entry.get("receiver_type") or session_receiver_type or "unknown"
+            )
+            file_receiver_serial = entry.get("receiver_serial")
+            if file_receiver_serial is None:
+                file_receiver_serial = session_receiver_serial
+            file_receiver_backend = entry.get("receiver_backend")
+            if file_receiver_backend is None:
+                file_receiver_backend = session_receiver_backend
+            device_id = (
+                f"{file_receiver_type}_{file_receiver_serial or file_receiver_backend or 'unknown'}"
+            )
+
+            in_rate_hz = entry.get("sample_rate")
+            in_rate_hz = float(in_rate_hz if in_rate_hz is not None else meta.get("sample_rate"))
+
+            centre_hz = entry.get("center_freq_hz")
+            centre_hz = centre_hz if centre_hz is not None else session_center_hz
+            centre_hz = float(centre_hz) if centre_hz is not None else None
+
+            bw_hz = entry.get("bandwidth_hz")
+            bw_hz = bw_hz if bw_hz is not None else session_bw_hz
+            bw_hz = float(bw_hz) if bw_hz is not None else in_rate_hz
+
+            iq_format = str(entry.get("iq_format") or session_iq_format or "cs8")
+            if iq_format == "cs8":
+                fs = entry.get("iq_full_scale")
+                fs = fs if fs is not None else session_iq_full_scale
+                iq_full_scale = float(fs) if fs is not None else 128.0
+            else:
+                fs = entry.get("iq_full_scale")
+                fs = fs if fs is not None else session_iq_full_scale
+                iq_full_scale = float(fs) if fs is not None else None  # required by _read_cs16;
+                # deliberately no default -- see the module docstring above.
+
+            sample_count = entry.get("sample_count")
+            if sample_count is None:
+                sample_count = int(round(float(entry.get("duration_s", 1.0)) * in_rate_hz))
+            sample_count = int(sample_count)
+
+            capture_health = entry.get("capture_health") or {}
+            note_parts = [f"{iq_format} session"]
+            if iq_format == "cs8":
+                note_parts.append("not native 12-bit (cs16)")
+            ratio = capture_health.get("stream_rate_ratio")
+            if ratio is not None:
+                note_parts.append(f"stream_rate_ratio={ratio}")
+            if capture_health.get("rate_warning"):
+                note_parts.append("rate_warning=True")
+
+            channel_id = entry.get("channel_id")
+
+            yield RecordingMeta(
+                dataset_id=self.dataset_id,
+                recording_id=f"{session_id}/{rel}",
+                device_id=device_id,
+                run_id=session_id,
+                source_paths=(path,),
+                original_rate_hz=in_rate_hz,
+                original_center_freq_hz=centre_hz,
+                original_bw_hz=bw_hz,
+                original_dtype=iq_format,
+                channel_id=(str(channel_id) if channel_id is not None else None),
+                notes="; ".join(note_parts),
+                extra={
+                    "sample_count": sample_count,
+                    "iq_full_scale": iq_full_scale,
+                    "iq_full_scale_source": "session_metadata",
+                    "test": test_block,
+                    "session_label": session_label,
+                    "receiver": receiver_extra,
+                },
+            )
+
+    def load_iq(
+        self, rec: RecordingMeta
+    ) -> tuple[np.ndarray, float, Optional[float], Optional[float]]:
+        path = str(rec.source_paths[0])
+        n = int(rec.extra["sample_count"])
+        if rec.original_dtype == "cs8":
+            iq = _read_cs8(path, 0, n)
+        elif rec.original_dtype == "cs16":
+            iq = _read_cs16(path, 0, n, full_scale=rec.extra.get("iq_full_scale"))
+        else:
+            raise ValueError(
+                f"AerixSessionAdapter: unsupported iq_format {rec.original_dtype!r} "
+                f"for {rec.recording_id!r} (expected 'cs8' or 'cs16')"
+            )
+        return iq, rec.original_rate_hz, None, None
+
+    def labels(self, rec: RecordingMeta) -> LabelsGroup:
+        test_block: dict[str, Any] = rec.extra.get("test") or {}
+        manufacturer = test_block.get("drone_manufacturer")
+        model = test_block.get("drone_model")
+        label_text = str(rec.extra.get("session_label") or "").lower()
+
+        if manufacturer or model:
+            inst = LabelInstance(
+                emitter_class=EmitterClass.DRONE_LINK,
+                link_family=LinkFamily.UNKNOWN,
+                link_role=LinkRole.UNKNOWN,
+                manufacturer=manufacturer or "unknown",
+                model=model or "unknown",
+                individual_id=test_block.get("drone_serial") or "unknown",
+                # Flight state (test_block['drone_state']) is not mapped onto
+                # Activity here -- no session in the current corpus exercises
+                # it and the free-text values AERIX's own test protocol uses
+                # are not yet audited against the Activity enum's members;
+                # left UNKNOWN rather than guessed.
+                activity=Activity.UNKNOWN,
+                evidence_level=EvidenceLevel.OPERATOR_TRUTH,
+                label_source=LabelSource.OPERATOR_GROUND_TRUTH,
+            )
+        elif any(kw in label_text for kw in _AERIX_BACKGROUND_KEYWORDS):
+            inst = LabelInstance(
+                emitter_class=EmitterClass.BACKGROUND,
+                link_family=LinkFamily.NOT_APPLICABLE,
+                link_role=LinkRole.NOT_APPLICABLE,
+                activity=Activity.UNKNOWN,
+                evidence_level=EvidenceLevel.OPERATOR_TRUTH,
+                label_source=LabelSource.OPERATOR_GROUND_TRUTH,
+            )
+        else:
+            # Never inferred from detections.jsonl/decode.jsonl: an
+            # unlabelled/ambiguous session name with no drone fields is
+            # genuinely unknown, not assumed background.
+            inst = LabelInstance(
+                emitter_class=EmitterClass.UNKNOWN,
+                link_family=LinkFamily.UNKNOWN,
+                link_role=LinkRole.UNKNOWN,
+                activity=Activity.UNKNOWN,
+                evidence_level=EvidenceLevel.RF_CANDIDATE,
+                label_source=LabelSource.UNKNOWN,
+            )
+        return LabelsGroup(scene=inst, window=inst)
+
+
 ADAPTERS: dict[str, Adapter] = {
     ZenodoDroneRF2020Adapter.dataset_id: ZenodoDroneRF2020Adapter(),
     RubDroneSecurityAdapter.dataset_id: RubDroneSecurityAdapter(),
+    "aerix_antsdr_ambient_2026_09_18": AerixSessionAdapter(
+        dataset_id="aerix_antsdr_ambient_2026_09_18"
+    ),
 }

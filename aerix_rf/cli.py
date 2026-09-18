@@ -245,12 +245,64 @@ def cmd_info(args) -> int:
     return 0
 
 
+def _sweep_source_for(cfg: Config, backend_name: str | None):
+    """Pick a ``SweepSource`` for `scan`/`baseline`: the existing hackrf_sweep
+    subprocess path when the resolved backend's ``supports_sweep`` is true,
+    else a generic retune+Welch sweep (``RetuneWelchSweep``) built on a live
+    ``IQSource`` from that same backend. Mirrors ``make_source``'s own
+    --backend / $AERIX_RF_BACKEND / auto-order resolution so `scan --backend X`
+    and `lock --backend X` pick the same physical receiver."""
+    from .sdr.registry import REGISTRY, AUTO_ORDER
+    from .sdr.sweep import HackrfSweepSource, RetuneWelchSweep
+    from .sdr.capture import make_source
+
+    prefer = backend_name or os.environ.get("AERIX_RF_BACKEND", "").strip().lower() or None
+    if cfg.sim and not prefer:
+        prefer = "sim"
+    if prefer:
+        entry = REGISTRY.get(prefer)
+        if entry is None:
+            raise SystemExit(f"unknown backend {prefer!r}; known backends: {', '.join(sorted(REGISTRY))}")
+        available, reason = entry.probe()
+        if not available:
+            raise SystemExit(f"backend {prefer!r} unavailable: {reason}")
+        supports_sweep = bool(entry.capabilities and entry.capabilities.supports_sweep)
+    else:
+        supports_sweep = None
+        for name in AUTO_ORDER:
+            available, _reason = REGISTRY[name].probe()
+            if available:
+                prefer = name
+                supports_sweep = bool(REGISTRY[name].capabilities and REGISTRY[name].capabilities.supports_sweep)
+                break
+        if supports_sweep is None:
+            raise SystemExit("no usable IQ backend for sweep (see `aerix-rf info`)")
+    if supports_sweep:
+        return HackrfSweepSource()
+    return RetuneWelchSweep(make_source(cfg, prefer=prefer))
+
+
 def cmd_baseline(args) -> int:
     from .scan import bands, sweep
+    from .sdr.sweep import HackrfSweepSource
+
+    cfg = _cfg_from(args)
     lo, hi = bands.resolve_band(args.band)
     out = Path(args.out)
     print(f"recording baseline {lo:.1f}-{hi:.1f} MHz for {args.seconds:.0f}s -- keep the test drones OFF", flush=True)
-    b = sweep.record_baseline(lo, hi, args.seconds, bin_hz=args.bin_hz, lna=args.lna or 16, vga=args.vga or 24)
+    src = _sweep_source_for(cfg, getattr(args, "backend", None))
+    try:
+        kwargs: dict = {}
+        gains: dict = {}
+        if isinstance(src, HackrfSweepSource):
+            kwargs.update(lna=args.lna or 16, vga=args.vga or 24)
+            gains = {"lna": args.lna or 16, "vga": args.vga or 24, "amp": bool(cfg.amp)}
+        else:
+            gains = {"gain_db": cfg.gain_db, "gain_mode": cfg.gain_mode}
+        b = sweep.record_baseline_via(src, lo, hi, args.seconds, bin_hz=args.bin_hz,
+                                      gains=gains, **kwargs)
+    finally:
+        src.close()
     path = sweep.save_baseline(b, out)
     print(f"baseline saved: {path}  ({b.n_sweeps} sweeps averaged, {b.freqs_mhz.size} bins, "
           f"floor {float(np.median(b.power_db)):.0f} dB)")
@@ -259,26 +311,33 @@ def cmd_baseline(args) -> int:
 
 def cmd_scan(args) -> int:
     from .scan import bands, sweep, candidates
+    from .sdr.sweep import HackrfSweepSource
+
+    cfg = _cfg_from(args)
     lo, hi = bands.resolve_band(args.band)
     base = sweep.load_baseline(args.baseline) if args.baseline else None
     if base is not None and (abs(base.lo_mhz - lo) > 0.5 or abs(base.hi_mhz - hi) > 0.5):
         print(f"warning: baseline covers {base.lo_mhz}-{base.hi_mhz} MHz, scan is {lo}-{hi}; "
               "differencing only where they overlap", file=sys.stderr)
     rounds = max(1, int(args.rounds))
-    for r in range(rounds):
-        freqs, pm, _n = sweep.sweep_once(lo, hi, args.seconds, bin_hz=args.bin_hz,
-                                         lna=args.lna or 16, vga=args.vga or 24)
-        cands = candidates.rank_candidates(freqs, pm, base, min_delta_db=args.min_delta_db,
-                                           min_width_mhz=args.min_width_mhz, max_candidates=args.max)
-        hdr = f"scan {lo:.0f}-{hi:.0f} MHz  ({pm.shape[0]} sweeps, baseline={'yes' if base else 'self'})"
-        print(hdr if rounds == 1 else f"[{r+1}/{rounds}] {hdr}")
-        if not cands:
-            print("  no candidates above threshold")
-        else:
-            print(candidates.summarize(cands))
-            print(f"  -> lock the top one:  aerix-rf lock --center-mhz {cands[0].center_mhz:.0f} --seconds 60")
-        if args.json:
-            print(json.dumps([c.to_dict() for c in cands]))
+    src = _sweep_source_for(cfg, getattr(args, "backend", None))
+    try:
+        kwargs = {"lna": args.lna or 16, "vga": args.vga or 24} if isinstance(src, HackrfSweepSource) else {}
+        for r in range(rounds):
+            freqs, pm, _n = sweep.sweep_via(src, lo, hi, args.seconds, bin_hz=args.bin_hz, **kwargs)
+            cands = candidates.rank_candidates(freqs, pm, base, min_delta_db=args.min_delta_db,
+                                               min_width_mhz=args.min_width_mhz, max_candidates=args.max)
+            hdr = f"scan {lo:.0f}-{hi:.0f} MHz  ({pm.shape[0]} sweeps, baseline={'yes' if base else 'self'})"
+            print(hdr if rounds == 1 else f"[{r+1}/{rounds}] {hdr}")
+            if not cands:
+                print("  no candidates above threshold")
+            else:
+                print(candidates.summarize(cands))
+                print(f"  -> lock the top one:  aerix-rf lock --center-mhz {cands[0].center_mhz:.0f} --seconds 60")
+            if args.json:
+                print(json.dumps([c.to_dict() for c in cands]))
+    finally:
+        src.close()
     return 0
 
 
@@ -351,7 +410,8 @@ def _run_locked(args, *, record_all: bool) -> int:
             n_plaus += int(fr.plausible)
             n_crc += int(fr.decoded is not None)
 
-            keep_iq = record_all or fr.plausible or fr.decoded is not None or fr.decode_level in ("A", "B")
+            keep_iq = (not getattr(args, "no_iq", False)) and (
+                record_all or fr.plausible or fr.decoded is not None or fr.decode_level in ("A", "B"))
             rec = fr.record()
             if keep_iq and iq_bytes + win.iq.size * 2 > max_bytes:
                 keep_iq = False
@@ -488,7 +548,18 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--seconds", type=float, default=30.0)
     p.add_argument("--out", required=True, help="output path (.npz)")
     p.add_argument("--bin-hz", type=int, default=500_000)
-    p.add_argument("--lna", type=int, default=None); p.add_argument("--vga", type=int, default=None)
+    p.add_argument("--lna", type=int, default=None, help="HackRF-only")
+    p.add_argument("--vga", type=int, default=None, help="HackRF-only")
+    p.add_argument("--backend", default=None,
+                   help="sweep backend: hackrf_sweep if it supports_sweep, else a generic "
+                        "retune+Welch sweep over that backend's live IQSource; " + _backend_help())
+    p.add_argument("--sim", action="store_true", help="synthetic IQ, no hardware")
+    p.add_argument("--gain-db", type=float, default=None, help="non-HackRF backends: RX gain in dB")
+    p.add_argument("--gain-mode", default=None, choices=["manual", "agc_slow", "agc_fast"],
+                   help="antsdr_iio only")
+    p.add_argument("--antsdr-uri", default=None, help="antsdr_iio only")
+    p.add_argument("--antsdr-profile", default=None,
+                   choices=["default", "antsdr_13p44", "antsdr_11p52"], help="antsdr_iio only")
     p.set_defaults(fn=cmd_baseline)
 
     p = sub.add_parser("scan", help="sweep a band and rank new/interesting signals")
@@ -500,7 +571,18 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--min-delta-db", type=float, default=6.0)
     p.add_argument("--min-width-mhz", type=float, default=1.0)
     p.add_argument("--max", type=int, default=8)
-    p.add_argument("--lna", type=int, default=None); p.add_argument("--vga", type=int, default=None)
+    p.add_argument("--lna", type=int, default=None, help="HackRF-only")
+    p.add_argument("--vga", type=int, default=None, help="HackRF-only")
+    p.add_argument("--backend", default=None,
+                   help="sweep backend: hackrf_sweep if it supports_sweep, else a generic "
+                        "retune+Welch sweep over that backend's live IQSource; " + _backend_help())
+    p.add_argument("--sim", action="store_true", help="synthetic IQ, no hardware")
+    p.add_argument("--gain-db", type=float, default=None, help="non-HackRF backends: RX gain in dB")
+    p.add_argument("--gain-mode", default=None, choices=["manual", "agc_slow", "agc_fast"],
+                   help="antsdr_iio only")
+    p.add_argument("--antsdr-uri", default=None, help="antsdr_iio only")
+    p.add_argument("--antsdr-profile", default=None,
+                   choices=["default", "antsdr_13p44", "antsdr_11p52"], help="antsdr_iio only")
     p.add_argument("--json", action="store_true")
     p.set_defaults(fn=cmd_scan)
 
@@ -516,6 +598,10 @@ def build_parser() -> argparse.ArgumentParser:
                             "keep logging); 1 s @ 20 MS/s = 40 MB")
         if name == "lock":
             p.add_argument("--record-all", action="store_true", help="keep raw IQ for every window")
+        p.add_argument("--no-iq", action="store_true",
+                       help="never write raw IQ to disk, even for plausible/decoded windows or "
+                            "--record-all -- detection/decode/session logging still run; for isolating "
+                            "disk-write cost when diagnosing sustained-throughput issues")
         _add_radio_flags(p)
         _add_test_flags(p)
         p.set_defaults(fn=fn)

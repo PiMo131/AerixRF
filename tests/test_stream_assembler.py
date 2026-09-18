@@ -254,30 +254,123 @@ def test_rate_ratio_at_95pct_rate_reads_near_0_95(monkeypatch):
         assert abs(r - 0.95) <= 0.01, ratios
 
 
-def test_rate_ratio_self_heals_after_sustained_early_dip(monkeypatch):
+def _run_synthetic_stream_full(monkeypatch, **kwargs):
+    """Like ``_run_synthetic_stream`` but returns the full ``info`` dict per
+    completed window (needed for ``stream_rate_ratio_recent`` /
+    ``samples_deficit`` assertions, not just ``stream_rate_ratio``)."""
+    import aerix_rf.sdr.stream as streammod
+
+    clock = _FakeClock()
+    monkeypatch.setattr(streammod.time, "time", clock)
+
+    sample_rate = kwargs.pop("sample_rate", 12.288e6)
+    chunk_samples = kwargs.pop("chunk_samples", 16384)
+    rate_window_s = kwargs.pop("rate_window_s", 5.0)
+    rate_frac = kwargs.pop("rate_frac")
+    total_s = kwargs.pop("total_s")
+    phase2_rate_frac = kwargs.pop("phase2_rate_frac", None)
+    phase2_after_s = kwargs.pop("phase2_after_s", None)
+
+    asm = streammod.StreamAssembler(sample_rate, raw_to_iq=_raw_to_iq_i16,
+                                     reports_drops=False, queue_max_s=5.0,
+                                     chunk_samples_hint=chunk_samples,
+                                     rate_window_s=rate_window_s)
+    n = int(sample_rate * 1.0)
+    nominal_chunk_dt = chunk_samples / sample_rate
+    infos = []
+    pushed_s = 0.0
+    while pushed_s < total_s:
+        current_frac = rate_frac
+        if phase2_rate_frac is not None and pushed_s >= (phase2_after_s or 0.0):
+            current_frac = phase2_rate_frac
+        dt = nominal_chunk_dt / current_frac
+        clock.advance(dt)
+        raw = np.zeros(chunk_samples * 2, dtype=np.int16)
+        asm.push(raw, clock(), 2437e6, dropped_before=0)
+        pushed_s += nominal_chunk_dt / current_frac
+        if asm._pushed_samples - asm.total_samples >= n:
+            win = asm.read_window(n, timeout_s=0.01)
+            if win is not None:
+                infos.append(win[1])
+    return infos
+
+
+def test_rate_ratio_recent_self_heals_after_sustained_early_dip(monkeypatch):
     """Reproduces the live 2026-09-18 ANTSDR soak-test anomaly at reduced scale:
     the real 590s capture ran at ~65% instantaneous throughput for its first
     ~63 windows (~65-95s, per ``captured_at`` deltas in the recorded session),
-    then recovered to ~100% for the remaining ~500 windows -- yet the reported
-    ``stream_rate_ratio`` only climbed from 0.67 to 0.947 gradually over the
-    ENTIRE 590s, because it was a lifetime average anchored at stream start.
+    then recovered to ~100% for the remaining ~500 windows.
 
-    This test models the same two-phase shape at 1/10th scale (6.3s dip, then
-    recovery) and requires the FIXED ratio to settle near the recovered
-    (~1.0) steady state within ``rate_window_s`` of the recovery, not still be
-    dragged toward the old ~0.7-0.9 lifetime-average value seconds later.
+    ``stream_rate_ratio`` is now a CUMULATIVE average and, by design, does NOT
+    self-heal quickly -- a real early deficit stays visible in it for the
+    life of the capture (honest: that lost stream is gone for good).
+    ``stream_rate_ratio_recent`` is the trailing-window estimate and DOES
+    self-heal within ``rate_window_s`` of recovery -- it answers "is the
+    stream healthy right now", not "how much have I lost overall".
     """
-    ratios = _run_synthetic_stream(monkeypatch, rate_frac=0.65, total_s=15.0,
-                                    rate_window_s=5.0,
-                                    phase2_rate_frac=1.0, phase2_after_s=6.3)
-    assert len(ratios) >= 10
-    # Early windows (during the dip) do read low, honestly.
-    assert ratios[0] < 0.75
-    # By ~5-6s after recovery (>= rate_window_s), the ratio must reflect
-    # CURRENT throughput, not the stale lifetime average -- the live run's
-    # equivalent metric was still reading ~0.70-0.76 at this relative point.
-    for r in ratios[-3:]:
-        assert r >= 0.97, ratios
+    infos = _run_synthetic_stream_full(monkeypatch, rate_frac=0.65, total_s=15.0,
+                                        rate_window_s=5.0,
+                                        phase2_rate_frac=1.0, phase2_after_s=6.3)
+    assert len(infos) >= 10
+    # Early windows (during the dip) do read low, honestly, on both metrics.
+    assert infos[0]["stream_rate_ratio"] < 0.75
+    assert infos[0]["stream_rate_ratio_recent"] < 0.75
+    # By ~5-6s after recovery (>= rate_window_s), the RECENT ratio must
+    # reflect CURRENT throughput.
+    for info in infos[-3:]:
+        assert info["stream_rate_ratio_recent"] >= 0.97, infos
+    # The CUMULATIVE ratio, by contrast, stays visibly below 1.0 for the rest
+    # of this short capture -- it never pretends the early loss didn't happen.
+    assert infos[-1]["stream_rate_ratio"] < 0.95, infos
+    assert infos[-1]["samples_deficit"] > 0
+
+
+# These two tests push 600s of *simulated* stream time through the assembler
+# (the clock is already fake -- see ``_FakeClock`` -- so no real wall-clock
+# elapses waiting on the 10s/5s gates). But at the real ``default`` profile
+# rate (12.288e6) and its BUFFER_SAMPLES-sized chunks (1_048_576), that's
+# ~7e9 raw int16 elements pushed/concatenated/converted through numpy across
+# ~590 windows -- genuinely CPU-bound, ~65s each. ``stream_rate_ratio`` /
+# ``samples_deficit`` math is dimensionless (a ratio of sample counts to
+# elapsed time), so it is exercised identically at any sample rate: use a
+# rate/chunk size scaled down 100x (same nominal per-chunk cadence, ~0.085s,
+# so the same number of chunks/windows over 600s) purely to keep these two
+# stress tests fast.
+_TEN_MIN_TEST_SAMPLE_RATE = 122_880.0   # 12.288e6 / 100
+_TEN_MIN_TEST_CHUNK_SAMPLES = 10_486    # 1_048_576 / 100, same nominal chunk_dt
+
+
+def test_cumulative_ratio_and_deficit_at_nominal_rate_over_10min(monkeypatch):
+    """No loss, sustained over 600s of simulated stream time: the cumulative
+    ratio must stay very close to 1.0 (no warning threshold, currently 0.995,
+    would ever fire) and the reported ``samples_deficit`` must be small."""
+    infos = _run_synthetic_stream_full(monkeypatch, rate_frac=1.0, total_s=600.0,
+                                        sample_rate=_TEN_MIN_TEST_SAMPLE_RATE,
+                                        chunk_samples=_TEN_MIN_TEST_CHUNK_SAMPLES)
+    assert len(infos) >= 590
+    last = infos[-1]
+    assert last["stream_rate_elapsed_s"] >= 595.0
+    assert last["stream_rate_ratio"] >= 0.999, last
+    assert (abs(last["samples_deficit"])
+            < 0.001 * last["stream_rate_elapsed_s"] * _TEN_MIN_TEST_SAMPLE_RATE)
+
+
+def test_cumulative_ratio_and_deficit_at_95pct_rate_over_10min(monkeypatch):
+    """A sustained 5% shortfall over 600s must read a cumulative ratio near
+    0.95 (below the 0.995 warning threshold, i.e. it WOULD warn) with
+    ``samples_deficit`` approximately 5% of the expected sample count -- a 5%
+    loss over 10 minutes is visible as a concrete, honest sample count."""
+    infos = _run_synthetic_stream_full(monkeypatch, rate_frac=0.95, total_s=600.0,
+                                        sample_rate=_TEN_MIN_TEST_SAMPLE_RATE,
+                                        chunk_samples=_TEN_MIN_TEST_CHUNK_SAMPLES)
+    assert len(infos) >= 560   # ~600 * 0.95 windows completed at 95% delivery rate
+    last = infos[-1]
+    elapsed = last["stream_rate_elapsed_s"]
+    assert abs(last["stream_rate_ratio"] - 0.95) <= 0.01, last
+    assert last["stream_rate_ratio"] < 0.995   # would trip the antsdr rate_warning gate
+    expected = elapsed * _TEN_MIN_TEST_SAMPLE_RATE
+    deficit_frac = last["samples_deficit"] / expected
+    assert abs(deficit_frac - 0.05) <= 0.01, last
 
 
 def test_hackrf_producer_path_preserves_documented_info_keys():

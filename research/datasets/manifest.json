@@ -480,6 +480,36 @@
       "preprocessing_status": "pre-segmented candidate slices (4.5 ms / 14.55 ms), not continuous spectrum; extracted verbatim from upstream repo zip, not converted",
       "notes": "AGPL-3.0 licensed: samples MUST NOT be copied into the aerix-rf git repo; kept only under ~/rf-datasets/RUB-DroneSecurity/original/. Pre-segmented candidate slices 4.5 ms / 14.55 ms, not continuous spectrum. Local copy at ~/rf-datasets/RUB-DroneSecurity/original/samples, extracted 2026-09-18 from research/library mirror of the upstream repo zip (RUB-SysSec_DroneSecurity_public_squash.zip). See SOURCE.md in that directory for sha256 pins and extraction provenance. Merged 2026-09-18: retired duplicate placeholder entry 'dji_droneid_iq_rub_syssec' (same underlying samples, discovered independently via research/index.md before this entry's sha256-verified extraction existed) - no other unique fields.",
       "local_path": "rub_dronesecurity"
+    },
+    {
+      "dataset_id": "aerix_antsdr_ambient_2026_09_18",
+      "dataset_name": "AERIX ANTSDR E200 Ambient 2.4GHz (no drone) 2026-09-18",
+      "source": "local capture, AERIX RF project, ANTSDR E200 receiver",
+      "doi": null,
+      "paper": null,
+      "authors": "AERIX RF project (operator: pikemoerland@gmail.com)",
+      "publication_year": 2026,
+      "license": "project-internal",
+      "access_status": "local",
+      "download_status": "complete",
+      "size_expected": "n/a (local capture, not a download)",
+      "size_downloaded": "~13 GB (271 IQ files verified, 6 sessions; one session's IQ was deleted pre-preservation, metadata only)",
+      "checksum_status": "verified: 271/271 present IQ files SHA-256-matched against per-file sha256 in each session's session.json, 0 mismatches",
+      "signal_format": "AERIX session schema v2, cs16 (one session cs8 - flagged), full-scale 2048, IQ files under <session>/iq/*.cs16 or *.cs8, per-window metadata + capture_health in session.json files[]",
+      "sample_rate": "12.288 MS/s",
+      "center_frequency_bands": "2.4 GHz ISM, center 2437 MHz, rf_bw 10 MHz",
+      "number_of_devices": 0,
+      "drone_models": "none (no drone present - operator ground truth)",
+      "controller_models": "none",
+      "background_interference_classes": "Wi-Fi-dominated 2.4 GHz ISM ambient (indoor dev bench)",
+      "operating_modes": "ambient/idle only; smoke test, t4b1 check, two 10-min soak tests (~5% known sample loss), two 60s probes",
+      "recording_hardware": "ANTSDR E200 (AD9361), IIO firmware v0.34-dirty, manual gain 40 dB, antenna unknown/stock",
+      "environment": "indoor dev bench (no address recorded)",
+      "labels_available": "operator ground truth 'no drone present' (session-level negative label); Stage-1 morphology/detection labels in each session's detections.jsonl (RF-candidate level only, not protocol-confirmed)",
+      "intended_aerix_use": "Tier-D negative-class hold-out + receiver-ID probe",
+      "preprocessing_status": "raw session directories only (as produced by AERIX capture pipeline); not converted to a separate prepared/ format",
+      "notes": "Only Tier-D (real-receiver negative-class) dataset AERIX currently has. Preserved 2026-09-18 from an ephemeral session-scoped scratchpad directory that would otherwise have been lost; see SOURCE.md for full per-session breakdown, the cs8-vs-cs16 smoke-test format flag, and the known ~5% sample-loss issue on the 600s soak runs. Do not describe any Stage-1 detection in this set as a confirmed drone - ground truth is 'no drone present' for every session.",
+      "local_path": "aerix_antsdr_ambient_2026_09_18"
     }
   ]
 }

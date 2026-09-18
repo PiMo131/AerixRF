@@ -96,6 +96,13 @@ _CODE_VERSION = _git_sha()
 _IO_SOURCES = {
     "int16_interleaved": ("int16_full_scale_32768", "interleaved_i2"),
     "float32_interleaved": ("native_unit_scale_assumed", "interleaved_f4"),
+    # AerixSessionAdapter's own session.json-recorded formats (Workstream D,
+    # T5): the full scale is never assumed -- it is whatever session.json's
+    # per-file/session `iq_full_scale` says (128.0 for cs8, 2048.0 for
+    # ANTSDR/AD9361 cs16) -- hence "session_metadata", not a fixed constant
+    # like the two entries above.
+    "cs8": ("session_metadata", "interleaved_i1"),
+    "cs16": ("session_metadata", "interleaved_i2"),
 }
 
 

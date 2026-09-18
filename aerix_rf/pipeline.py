@@ -132,6 +132,11 @@ class FrameResult:
                 "home_lat": getattr(res, "home_lat", None),
                 "home_lon": getattr(res, "home_lon", None),
                 "drone_height": getattr(res, "drone_height", None),
+                # Additive fields (band-peel multi-hypothesis decode attempts).
+                # Old readers/reports that don't know these keys are unaffected.
+                "hypotheses_tried": int(getattr(a, "hypotheses_tried", 0)),
+                "chosen_center_offset_mhz": getattr(a, "chosen_center_offset_mhz", None),
+                "alt_centers_mhz": [round(h / 1e6, 3) for h in getattr(a, "alt_centers_hz", ())],
             })
         return out
 

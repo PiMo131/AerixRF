@@ -200,3 +200,28 @@ Update 2026-09-18 (folder-layout housekeeping pass, ~07:29):
 - Did NOT touch any `prepared/` contents (`rub_dronesecurity/prepared`,
   `zenodo_drone_rf_video_2020/prepared` untouched, only their `original/`
   subdirs were relocated into the same already-existing `dataset_id` parent).
+
+Update 2026-09-18 (~08:30, Tier-D preservation task):
+- New local dataset `aerix_antsdr_ambient_2026_09_18` added (17th entry, both
+  manifests): 6 real ANTSDR E200 ambient-2.4GHz sessions rescued from an
+  ephemeral session-scoped scratchpad before it would have vanished. This is
+  AERIX's **only Tier-D (real-receiver negative-class) data** to date -
+  operator ground truth "no drone present" for every session, Wi-Fi-dominated
+  indoor bench ambient. Local copy at
+  `~/rf-datasets/aerix_antsdr_ambient_2026_09_18/original/<session_dir>/`,
+  full per-session breakdown + known issues in the dataset's own `SOURCE.md`
+  (not duplicated in memory - read that file for specifics, not this note).
+  271/271 present IQ files SHA-256-verified against each session's own
+  `session.json` (0 mismatches, ~13 GB). One session
+  (`2026-09-18_111959_soak10min`) has IQ deleted pre-preservation (metadata
+  only, expected not a copy failure). One session (the smoke test) is **cs8**
+  format, not native cs16 - do not silently mix it into a cs16 dataset
+  loader without checking `iq_format` per session.
+- `status.sh` required **no code change** - it already iterates every real
+  (non-symlink) `dataset_id` dir under `$ROOT` generically, so the new
+  dataset showed up automatically once its folder existed.
+- Reminder for future asks like this: session-scoped scratchpads
+  (`/tmp/claude-*/.../scratchpad/`) are ephemeral and can vanish between
+  sessions - if the architect or a specialist mentions "live capture data"
+  sitting in a scratchpad, treat it as at-risk and flag/propose preservation
+  proactively rather than waiting to be asked again.

@@ -1,4 +1,6 @@
-"""Spectrogram / IQ -> fixed-length feature vectors.
+"""Spectrogram / IQ -> fixed-length feature vectors. Frozen as ``features_v1``:
+kept for backward compatibility and existing bundles; new work uses
+``aerix_rf/classify/features_v2.py`` (see ``docs/design/features-and-benchmark.md``).
 
 The single source of truth for how a 1-second RF frame becomes a model input.
 Both training (``train.py``) and inference (``classify.model``) call these, so

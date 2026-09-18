@@ -51,6 +51,10 @@ and independent review before it is "done". Evidence-wording rules apply.
 - [ ] Locate data hosts for CageDroneRF and UAVSig.
 
 ## Receiver / sessions
+- [ ] `RetuneWelchSweep.step_hz` fallback uses `capabilities.max_instantaneous_bw_hz` (analog max) — decision
+      2026-09-18: derive step from the live source's actual sample rate × usable fraction (ANTSDR default
+      10 MHz; sim 20 MS/s → 12 MHz) and cap by capabilities; fix `cli.py` baseline floor print to `nanmedian`.
+      Do together with the first hardware `baseline --backend antsdr_iio` run.
 - [ ] `capture` has a hardcoded per-session IQ cap (~6 GB; prints "IQ cap … reached" and keeps detecting).
       Expose as `--max-iq-gb` / config and record `iq_capped` + the cap in `session.json`; at cs16 12.288 MS/s
       the cap is hit after ~122 s.

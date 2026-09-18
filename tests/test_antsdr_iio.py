@@ -12,6 +12,7 @@ with blocking-free ``refill()``/``read()``.
 from __future__ import annotations
 
 import sys
+import time
 import types
 
 import numpy as np
@@ -272,24 +273,28 @@ def test_tune_updates_lo_and_flushes(monkeypatch):
 
 # --- rate warning ---------------------------------------------------------------
 
-def test_rate_warning_below_threshold(monkeypatch):
-    """A producer that has been delivering ~90% of the nominal rate for >= 2s
-    of measured stream time must raise rate_warning -- this drives the
-    source's ratio -> rate_warning mapping (RATE_WARNING_RATIO=0.999, gated on
-    >= 2s of ``stream_rate_elapsed_s``) with a realistic sustained-shortfall
-    reading, not just a low ratio with no elapsed time attached (see
-    test_no_rate_warning_below_2s for that early-window case)."""
+def _fake_info(src, *, ratio=1.0, ratio_recent=None, elapsed_s=15.0, samples_deficit=0):
+    return {
+        "captured_at": 0.0, "center_freq_hz": src._center_hz, "complete": True,
+        "dropped_samples": None, "overflow_count": 0, "gap_before_samples": 0,
+        "short_reads": 0, "stream_rate_ratio": ratio,
+        "stream_rate_ratio_recent": ratio_recent if ratio_recent is not None else ratio,
+        "stream_rate_elapsed_s": elapsed_s, "samples_deficit": samples_deficit,
+        "loss_detection": "inferred_rate_only",
+        "channel_id": 0, "bandwidth_hz": src.rf_bandwidth, "timing": {},
+    }
+
+
+def test_rate_warning_cumulative_below_threshold_after_warmup(monkeypatch):
+    """A sustained cumulative shortfall (< RATE_WARNING_RATIO=0.995) after >=
+    RATE_WARNING_MIN_ELAPSED_S (10s) of measured stream time must raise
+    rate_warning -- this drives the source's cumulative-ratio -> rate_warning
+    mapping."""
     src = _make_source(monkeypatch)
     try:
         n = int(src.sample_rate * src.window_seconds)
         fake_iq = np.zeros(n, dtype=np.complex64)
-        fake_info = {
-            "captured_at": 0.0, "center_freq_hz": src._center_hz, "complete": True,
-            "dropped_samples": None, "overflow_count": 0, "gap_before_samples": 0,
-            "short_reads": 0, "stream_rate_ratio": 0.90, "stream_rate_elapsed_s": 2.5,
-            "loss_detection": "inferred_rate_only",
-            "channel_id": 0, "bandwidth_hz": src.rf_bandwidth, "timing": {},
-        }
+        fake_info = _fake_info(src, ratio=0.90, ratio_recent=0.90, elapsed_s=15.0)
         monkeypatch.setattr(src._asm, "read_window", lambda *a, **kw: (fake_iq, fake_info))
         win = next(src.windows())
         assert win.metadata["stream_rate_ratio"] == 0.90
@@ -299,21 +304,17 @@ def test_rate_warning_below_threshold(monkeypatch):
         src.close()
 
 
-def test_no_rate_warning_below_2s(monkeypatch):
-    """The same low ratio, but before 2s of stream time have been measured,
-    must NOT raise rate_warning -- early windows don't have enough data for
-    the ratio to be trustworthy yet (see antsdr_iio.windows())."""
+def test_no_rate_warning_cumulative_below_warmup(monkeypatch):
+    """The same low cumulative ratio, but before RATE_WARNING_MIN_ELAPSED_S
+    (10s) of stream time have been measured, must NOT raise rate_warning via
+    the cumulative gate -- early windows don't have enough history for the
+    cumulative average to be trustworthy yet. The recent ratio also has to be
+    healthy here, or its own (ungated) threshold would fire instead."""
     src = _make_source(monkeypatch)
     try:
         n = int(src.sample_rate * src.window_seconds)
         fake_iq = np.zeros(n, dtype=np.complex64)
-        fake_info = {
-            "captured_at": 0.0, "center_freq_hz": src._center_hz, "complete": True,
-            "dropped_samples": None, "overflow_count": 0, "gap_before_samples": 0,
-            "short_reads": 0, "stream_rate_ratio": 0.42, "stream_rate_elapsed_s": 0.3,
-            "loss_detection": "inferred_rate_only",
-            "channel_id": 0, "bandwidth_hz": src.rf_bandwidth, "timing": {},
-        }
+        fake_info = _fake_info(src, ratio=0.42, ratio_recent=1.0, elapsed_s=0.3)
         monkeypatch.setattr(src._asm, "read_window", lambda *a, **kw: (fake_iq, fake_info))
         win = next(src.windows())
         assert win.metadata["rate_warning"] is False
@@ -327,12 +328,39 @@ def test_no_rate_warning_at_full_rate(monkeypatch):
     try:
         n = int(src.sample_rate * src.window_seconds)
         fake_iq = np.zeros(n, dtype=np.complex64)
-        fake_info = {
-            "captured_at": 0.0, "center_freq_hz": src._center_hz, "complete": True,
-            "dropped_samples": None, "overflow_count": 0, "gap_before_samples": 0,
-            "short_reads": 0, "stream_rate_ratio": 1.0, "loss_detection": "inferred_rate_only",
-            "channel_id": 0, "bandwidth_hz": src.rf_bandwidth, "timing": {},
-        }
+        fake_info = _fake_info(src, ratio=1.0, ratio_recent=1.0, elapsed_s=15.0)
+        monkeypatch.setattr(src._asm, "read_window", lambda *a, **kw: (fake_iq, fake_info))
+        win = next(src.windows())
+        assert win.metadata["rate_warning"] is False
+    finally:
+        src.close()
+
+
+def test_rate_warning_recent_fires_regardless_of_cumulative(monkeypatch):
+    """A healthy cumulative average can hide a fresh stall/burst of loss --
+    the recent (trailing-window) threshold has no warm-up gate specifically
+    to catch this."""
+    src = _make_source(monkeypatch)
+    try:
+        n = int(src.sample_rate * src.window_seconds)
+        fake_iq = np.zeros(n, dtype=np.complex64)
+        fake_info = _fake_info(src, ratio=0.999, ratio_recent=0.5, elapsed_s=120.0)
+        monkeypatch.setattr(src._asm, "read_window", lambda *a, **kw: (fake_iq, fake_info))
+        win = next(src.windows())
+        assert win.metadata["rate_warning"] is True
+        assert win.metadata["stream_rate_ratio_recent"] == 0.5
+    finally:
+        src.close()
+
+
+def test_no_rate_warning_just_above_thresholds(monkeypatch):
+    """Both ratios just above their thresholds -- must not warn (boundary
+    check for the two-part gate)."""
+    src = _make_source(monkeypatch)
+    try:
+        n = int(src.sample_rate * src.window_seconds)
+        fake_iq = np.zeros(n, dtype=np.complex64)
+        fake_info = _fake_info(src, ratio=0.996, ratio_recent=0.981, elapsed_s=15.0)
         monkeypatch.setattr(src._asm, "read_window", lambda *a, **kw: (fake_iq, fake_info))
         win = next(src.windows())
         assert win.metadata["rate_warning"] is False
@@ -343,15 +371,42 @@ def test_no_rate_warning_at_full_rate(monkeypatch):
 # --- lifecycle -------------------------------------------------------------------
 
 def test_close_stops_thread(monkeypatch):
+    # ARCHITECT DECISION: windows() must drain any windows that were already
+    # complete in the queue at stop time (never discard captured complete
+    # data), then terminate -- it must not hang forever once the stream is
+    # stopped, but it also must not discard a complete window just because
+    # close() already ran.
     src = _make_source(monkeypatch)
     assert src._thread is not None
     assert src._thread.is_alive()
     src.close()
     assert src._thread is None
-    # windows() must not hang forever once the stream is stopped: the
-    # generator returns (StopIteration) rather than blocking, so next()'s
-    # default is what we get back.
+
+    deadline = time.time() + 1.0
+    drained = []
+    it = src.windows()
+    while time.time() < deadline:
+        try:
+            drained.append(next(it))
+        except StopIteration:
+            break
+    else:
+        pytest.fail("windows() did not terminate within 1s of close()")
+    for win in drained:
+        assert win.complete is True
+
+
+def test_close_with_empty_queue_windows_returns_immediately(monkeypatch):
+    src = _make_source(monkeypatch)
+    src.close()
+    # Drain whatever was already queued at stop time (same as
+    # test_close_stops_thread), then the queue is empty: the NEXT call to
+    # windows() must return immediately with nothing, not hang.
+    for _ in src.windows():
+        pass
+    t0 = time.time()
     assert next(src.windows(), "stopped") == "stopped"
+    assert time.time() - t0 < 1.0
 
 
 def test_missing_devices_raises_clear_error(monkeypatch):

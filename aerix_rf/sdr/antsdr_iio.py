@@ -22,10 +22,16 @@ Hard device facts this module encodes (measured on the lab unit, not derived):
   * libiio gives no per-buffer overflow/sequence counter on this firmware, so
     this backend can NEVER assert an exact drop count -- ``StreamAssembler`` is
     constructed with ``reports_drops=False`` and every window's
-    ``loss_detection`` is ``"inferred_rate_only"``. The only silent-loss signal
-    is a running ``stream_rate_ratio`` (achieved samples / nominal, over wall
-    time); this module additionally raises ``rate_warning`` once that ratio
-    drops below 0.999, since a caller cannot get an exact number here at all.
+    ``loss_detection`` is ``"inferred_rate_only"``. The only silent-loss
+    signal is ``stream_rate_ratio`` (CUMULATIVE achieved/nominal samples since
+    the first pushed chunk -- see stream.py) plus ``stream_rate_ratio_recent``
+    (a noisier trailing ~5s estimate). ``rate_warning`` fires when the
+    cumulative ratio drops below ``RATE_WARNING_RATIO`` (0.995) after
+    ``RATE_WARNING_MIN_ELAPSED_S`` (10s) of history, OR the recent ratio drops
+    below ``RATE_WARNING_RATIO_RECENT`` (0.98) at any time -- see
+    docs/design/antsdr-backend.md "Measured host-path throughput
+    (2026-09-18)" for why a bare trailing-window threshold alone false-fired
+    on loss-free captures.
   * Measured throughput: 12.288 MS/s is clean over the GbE link; >=15.36 MS/s
     is lossy on this host/link -- see the profile table below.
 
@@ -62,7 +68,15 @@ IQ_FULL_SCALE = 2048.0                 # 12-bit, right-justified in int16 (measu
 KERNEL_BUFFERS = 8
 BUFFER_SAMPLES = 1_048_576
 QUEUE_MAX_S = 2.0
-RATE_WARNING_RATIO = 0.999             # only silent-loss detector on this backend
+# Only silent-loss detector on this backend. Two-part gate (see
+# docs/design/antsdr-backend.md "Measured host-path throughput (2026-09-18)"):
+# the CUMULATIVE ratio is stable/low-noise but slow to react, so it needs a
+# tight threshold and a minimum warm-up; the RECENT (trailing-window) ratio
+# is noisy but reacts fast, so it needs a looser threshold to avoid firing on
+# normal jitter while still catching a stream that stalls outright.
+RATE_WARNING_RATIO = 0.995             # cumulative-ratio warning threshold
+RATE_WARNING_MIN_ELAPSED_S = 10.0      # cumulative ratio must have this much history
+RATE_WARNING_RATIO_RECENT = 0.98       # trailing-window ratio warning threshold
 MAX_SUSTAINED_RATE_HZ = 13.44e6        # measured link ceiling; see module docstring
 
 # Architect-approved default + named profiles (sample_rate Hz, rf_bandwidth Hz).
@@ -310,11 +324,15 @@ class AntsdrIIOSource(IQSource):
                 return   # stream stopped / device lost
             iq, info = win
             ratio = info["stream_rate_ratio"]
-            # Only trust the ratio once at least 2s of stream have been measured
-            # from the first pushed chunk -- early windows have too little data
-            # for the ratio to be meaningful (also avoids false warnings before
-            # ``elapsed > 0.5`` naturally forces ratio to 1.0 in the assembler).
-            rate_warning = ratio < RATE_WARNING_RATIO and info.get("stream_rate_elapsed_s", 0.0) >= 2.0
+            ratio_recent = info.get("stream_rate_ratio_recent", ratio)
+            elapsed_s = info.get("stream_rate_elapsed_s", 0.0)
+            # Cumulative ratio: only trust it once >=10s of stream have been
+            # measured from the first pushed chunk (a short/noisy cumulative
+            # average is not trustworthy yet). Recent ratio: no warm-up gate --
+            # it exists specifically to catch a stall or stalled-then-recovered
+            # burst fast, so it must fire immediately if it's bad.
+            rate_warning = ((ratio < RATE_WARNING_RATIO and elapsed_s >= RATE_WARNING_MIN_ELAPSED_S)
+                             or ratio_recent < RATE_WARNING_RATIO_RECENT)
             self._rate_warning = rate_warning
             yield IQWindow(
                 iq=iq, captured_at=info["captured_at"], sample_rate=self.sample_rate,
@@ -334,7 +352,11 @@ class AntsdrIIOSource(IQSource):
                     "gain_db": self.gain_db,
                     "loss_detection": info.get("loss_detection"),
                     "stream_rate_ratio": ratio,
+                    "stream_rate_ratio_recent": ratio_recent,
+                    "stream_rate_elapsed_s": elapsed_s,
+                    "samples_deficit": info.get("samples_deficit"),
                     "rate_warning": rate_warning,
+                    "max_refill_gap_ms": round(self._max_refill_gap_s * 1000.0, 1),
                     "overflow_count": info["overflow_count"],
                     "gap_before_samples": info.get("gap_before_samples", 0),
                     "short_reads": info["short_reads"],

@@ -355,3 +355,31 @@ shows no behaviour change.
 14. Evidence-level discipline: an ANTSDR DJI-event firmware output is a *vendor-decoded
     claim*, not our CRC-valid decode. It must enter as its own evidence level with an
     explicit source, never be merged into stage-3 decode records.
+
+## Measured host-path throughput (2026-09-18)
+
+All runs: E200 stock IIO image, `antsdr_iio` default profile (12.288 MS/s, rf_bandwidth 10 MHz,
+cs16 / full scale 2048, manual gain 40 dB), `aerix-rf capture --center-mhz 2437` through the full
+Stage-1/2/3 pipeline on the 24-core dev host. Ground truth = one-second windows produced vs wall clock.
+
+| Run | Duration | IQ to disk | Device buffers | Windows / wall | Effective rate | Notes |
+|---|---|---|---|---|---|---|
+| soak10min_b | 600 s | on (49 MB/s cs16, hit 6 GB cap at 122 s) | 8 × 1 M | 560 / 590.9 s | ≈11.64 MS/s (**−5 %**) | concurrent `pytest` full-suite runs by other agents on the same host |
+| probe_default | 60 s | on | 8 × 1 M | 60 / ~57 s streaming | ≈12.29 MS/s (0 %) | idle host |
+| probe_k32_4m | 60 s | on | 32 × 4 M | 59 / ~57 s streaming | ≈12.29 MS/s (0 %) | idle host |
+| a_iq_default | 300 s | on | 8 × 1 M | 300 / 301.5 s incl. setup | ≈12.29 MS/s (0 %) | idle host |
+| b_noiq_default | 300 s | off (`--no-iq`) | 8 × 1 M | 300 / 301.4 s incl. setup | ≈12.29 MS/s (0 %) | idle host |
+| c_iq_k32_4m | 300 s planned | on | 32 × 4 M | aborted at 65 s | — | host tmpfs ran out of space (session root was on /tmp); rerun owed |
+| bare libiio loop (no DSP) | 25 s | — | 8 × 1 M | — | 12.297 MS/s (ratio 1.0007) | `rx_throughput_test2.py` |
+
+Conclusions (MEASURED): at the default profile the AERIX host path sustains the full rate with or
+without IQ writing on an otherwise idle host; the only observed loss (−5 % over 10 min) occurred
+while other CPU-heavy processes ran on the same host, consistent with producer-thread starvation
+(the libiio path has no overflow counter, so such loss is silent). Consequences: (1) the field box
+must not share CPU with unrelated heavy work — document as a deployment rule; (2) `stream_rate_ratio`
+is now cumulative since the first chunk plus a trailing-5 s `stream_rate_ratio_recent`, with
+`rate_warning` at cumulative < 0.995 (after 10 s) or recent < 0.98, and a `samples_deficit` count —
+the per-window ratio previously jittered ±2 % and fired false warnings on loss-free runs;
+(3) `AERIX_RF_ANTSDR_KBUFS` / `AERIX_RF_ANTSDR_BUFSAMPLES` exist for larger device-side buffering;
+whether 32 × 4 M protects against contention is UNMEASURED (run (c) owed on an idle host, plus a
+repeat 10-minute soak with nothing else running). Never place a session root on tmpfs.

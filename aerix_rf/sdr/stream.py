@@ -330,21 +330,47 @@ class StreamAssembler:
             first_push_ts = self._first_push_ts
             pushed_samples = self._pushed_samples
             baseline = self._rate_hist[0] if self._rate_hist else None
+
+        # ``stream_rate_ratio`` is now CUMULATIVE since the first pushed chunk
+        # (samples pushed / (elapsed x Fs)) -- deliberately NOT a trailing
+        # window. A per-window trailing-window estimate is noisy by
+        # construction: window boundaries, GC pauses, and normal scheduling
+        # jitter move a handful of milliseconds of "recent" data in or out of
+        # a short window, so the ratio swings +/-5-10% window to window even
+        # with zero real loss (see docs/design/antsdr-backend.md "Measured
+        # host-path throughput (2026-09-18)": 0.96-1.08 jitter and false
+        # warnings on ~55/60 loss-free windows). The cumulative average has no
+        # such noise floor and turns a real 5% loss over 10 minutes into a
+        # small, honest, monotonically-informative ``samples_deficit`` sample
+        # count instead of alarm-fatigue noise. ``stream_rate_ratio_recent``
+        # (the old trailing-``rate_window_s`` estimate) is still reported
+        # alongside it for callers that want current-instant health and can
+        # tolerate its noise -- e.g. to catch a stream that has actually
+        # stopped, which a cumulative average over a long capture would mask
+        # for a long time.
         if first_push_ts is None:
             elapsed = 0.0
-            pushed_for_ratio = 0
-        elif baseline is not None and (now - first_push_ts) > self.rate_window_s:
-            # Enough stream seen: use the trailing window so a one-time startup
-            # transient does not suppress the ratio for the rest of the capture.
-            baseline_ts, baseline_samples = baseline
-            elapsed = now - baseline_ts
-            pushed_for_ratio = pushed_samples - baseline_samples
+            ratio = 1.0
+            samples_deficit = 0
         else:
-            # Warm-up: too little stream for a windowed estimate to mean
-            # anything yet -- fall back to the lifetime-since-first-push average.
             elapsed = now - first_push_ts
-            pushed_for_ratio = pushed_samples
-        ratio = (pushed_for_ratio / (elapsed * self.sample_rate)) if elapsed > 0.5 else 1.0
+            if elapsed > 0.5:
+                expected = elapsed * self.sample_rate
+                ratio = pushed_samples / expected
+                samples_deficit = int(round(expected - pushed_samples))
+            else:
+                ratio = 1.0
+                samples_deficit = 0
+
+        if first_push_ts is None:
+            ratio_recent = 1.0
+        elif baseline is not None and (now - baseline[0]) > 0.5:
+            baseline_ts, baseline_samples = baseline
+            recent_elapsed = now - baseline_ts
+            recent_pushed = pushed_samples - baseline_samples
+            ratio_recent = recent_pushed / (recent_elapsed * self.sample_rate)
+        else:
+            ratio_recent = ratio
 
         timing: dict[str, Any] = {"clock_source": "host_wallclock",
                                   "sample_index": self._running_sample_index}
@@ -361,7 +387,9 @@ class StreamAssembler:
             "gap_before_samples": int(gap_before),
             "short_reads": int(self.short_reads),
             "stream_rate_ratio": round(float(ratio), 4),
+            "stream_rate_ratio_recent": round(float(ratio_recent), 4),
             "stream_rate_elapsed_s": round(float(elapsed), 3),
+            "samples_deficit": int(samples_deficit),
             "loss_detection": loss_detection,
             "channel_id": self.channel_id,
             "bandwidth_hz": self.bandwidth_hz,
