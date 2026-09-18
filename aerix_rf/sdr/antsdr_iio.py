@@ -69,23 +69,34 @@ exists; documented here instead of extending that dataclass out of scope):
 from __future__ import annotations
 
 import logging
-import os
-import re
 import threading
 import time
 from typing import Any, Iterator, Optional
 
 import numpy as np
 
+from .antsdr_iio_device import (
+    BUFFER_SAMPLES,
+    DEFAULT_URI,
+    IQ_FULL_SCALE,
+    KERNEL_BUFFERS,
+    MAX_SUSTAINED_RATE_HZ,
+    PROFILES,
+    READBACK_TOL_GAIN_DB,
+    READBACK_TOL_LO_HZ,
+    READBACK_TOL_RATE_FRAC,
+    RSSI_READ_BUDGET_MS,
+    SAMPLE_RATE_RANGE_HZ,
+    AntsdrIioDevice,
+    _load_iio,
+    _parse_leading_float,
+    resolve_profile,
+)
 from .capture import GainStage, IQSource, IQWindow, ReceiverCapabilities
 from .stream import StreamAssembler
 
 log = logging.getLogger("aerix.rf.sdr.antsdr_iio")
 
-DEFAULT_URI = "ip:192.168.1.10"
-IQ_FULL_SCALE = 2048.0                 # 12-bit, right-justified in int16 (measured)
-KERNEL_BUFFERS = 8
-BUFFER_SAMPLES = 1_048_576
 QUEUE_MAX_S = 2.0
 # Only silent-loss detector on this backend. Two-part gate (see
 # docs/design/antsdr-backend.md "Measured host-path throughput (2026-09-18)"):
@@ -106,40 +117,10 @@ RATE_WARNING_RATIO_RECENT = 0.97       # trailing-window ratio warning threshold
 RATE_WARNING_RECENT_DEFICIT_FRAC = 0.005   # min recent-window deficit (frac of one
                                             # capture window's samples) to count as
                                             # a real, not merely jitter-driven, dip
-MAX_SUSTAINED_RATE_HZ = 13.44e6        # measured link ceiling; see module docstring
-
-# Readback-vs-requested tolerance (see module docstring "requested config is
-# not proof of actual state"). Architect-approved tolerances, not measured
-# AD9361 precision limits -- they exist to catch a genuinely wrong/stuck
-# device state, not to assert exact round-trip equality of a string attr.
-READBACK_TOL_GAIN_DB = 0.5             # hardwaregain, manual mode only
-READBACK_TOL_RATE_FRAC = 0.01          # rf_bandwidth / sampling_frequency, +/-1%
-READBACK_TOL_LO_HZ = 1000.0            # RX LO, +/-1 kHz
-RSSI_READ_BUDGET_MS = 5.0              # per-window rssi attr read; see _read_rssi_if_cheap
-
-# Architect-approved default + named profiles (sample_rate Hz, rf_bandwidth Hz).
-PROFILES: dict[str, dict[str, float]] = {
-    "default": {"sample_rate": 12.288e6, "rf_bandwidth": 10.0e6},
-    "antsdr_13p44": {"sample_rate": 13.44e6, "rf_bandwidth": 11.0e6},
-    "antsdr_11p52": {"sample_rate": 11.52e6, "rf_bandwidth": 10.0e6},
-}
-
-_IMPORT_HINT = (
-    "python-iio (pylibiio) is required for the ANTSDR backend. Install with "
-    "`uv sync --extra antsdr` plus the libiio runtime; on this host also set "
-    "LD_LIBRARY_PATH=/home/jarvis/aerix-rf/.antsdr-tools/mamba/envs/antsdr/lib"
-)
-
-_LEADING_FLOAT_RE = re.compile(r"[-+]?[0-9]*\.?[0-9]+(?:[eE][-+]?[0-9]+)?")
-
-
-def _load_iio():
-    """Lazy ``import iio``; never a hard dependency of this module or the registry."""
-    try:
-        import iio
-    except Exception as exc:  # noqa: BLE001
-        raise ImportError(_IMPORT_HINT) from exc
-    return iio
+# MAX_SUSTAINED_RATE_HZ, READBACK_TOL_*, RSSI_READ_BUDGET_MS, PROFILES,
+# resolve_profile, _load_iio, _parse_leading_float now live in
+# antsdr_iio_device.py (imported above) -- re-exported here under the same
+# names since existing callers/tests reference them as ``antsdr_iio.NAME``.
 
 
 def _cs16_2048_to_iq(raw: np.ndarray) -> np.ndarray:
@@ -147,33 +128,6 @@ def _cs16_2048_to_iq(raw: np.ndarray) -> np.ndarray:
     raw = raw.astype(np.float32)
     iq = raw[0::2] + 1j * raw[1::2]
     return (iq / IQ_FULL_SCALE).astype(np.complex64)
-
-
-def _parse_leading_float(s: Optional[str]) -> Optional[float]:
-    """Parse the leading numeric token of an attr string, e.g. ``"40.000000 dB"``
-    -> ``40.0``, ``"12288000"`` -> ``12288000.0``. ``None`` on anything
-    unparseable (missing attr, empty string, non-numeric) -- callers must treat
-    that as "could not verify", not as a silent 0.0."""
-    if not s:
-        return None
-    m = _LEADING_FLOAT_RE.match(s.strip())
-    if not m:
-        return None
-    try:
-        return float(m.group(0))
-    except ValueError:
-        return None
-
-
-def resolve_profile(name: Optional[str]) -> dict[str, float]:
-    """Look up a named profile; ``None`` -> ``$AERIX_RF_ANTSDR_PROFILE`` -> "default"."""
-    key = (name or os.environ.get("AERIX_RF_ANTSDR_PROFILE") or "default").strip()
-    try:
-        return dict(PROFILES[key])
-    except KeyError:
-        raise ValueError(
-            f"unknown ANTSDR profile {key!r}; known profiles: {', '.join(sorted(PROFILES))}"
-        ) from None
 
 
 _GAIN_STAGES = (GainStage("rx", 0.0, 73.0, None),)  # AD9361 RX hardwaregain, continuous
@@ -189,7 +143,7 @@ def antsdr_iio_capabilities(*, firmware: str | None = None) -> ReceiverCapabilit
         receiver_type="antsdr",
         backend="antsdr_iio",
         tuning_range_hz=(70e6, 6e9),
-        sample_rates_hz=(2.083e6, 61.44e6),
+        sample_rates_hz=SAMPLE_RATE_RANGE_HZ,
         sample_rate_is_range=True,
         max_instantaneous_bw_hz=56e6,
         channel_count=1,
@@ -211,13 +165,16 @@ def antsdr_iio_capabilities(*, firmware: str | None = None) -> ReceiverCapabilit
     )
 
 
-class AntsdrIIOSource(IQSource):
+class AntsdrIIOSource(AntsdrIioDevice, IQSource):
     """Continuous ANTSDR E200 / AD9361 RX stream via the libiio network context.
 
-    Producer thread: blocking ``buf.refill()`` -> ``buf.read()`` -> cheap
-    ``np.frombuffer`` view -> :meth:`StreamAssembler.push`. All int16 ->
-    complex64 scaling happens in the consumer thread inside the assembler,
-    exactly like ``LibHackRFSource`` / ``HackRFStream``.
+    Inherits device-only open/configure/readback/tune/refill logic from
+    :class:`~aerix_rf.sdr.antsdr_iio_device.AntsdrIioDevice` (T7c-1 factoring)
+    and adds the producer-thread + :class:`StreamAssembler` shape on top:
+    blocking ``buf.refill()`` -> ``buf.read()`` -> cheap ``np.frombuffer``
+    view -> :meth:`StreamAssembler.push`. All int16 -> complex64 scaling
+    happens in the consumer thread inside the assembler, exactly like
+    ``LibHackRFSource`` / ``HackRFStream``.
     """
 
     receiver_type = "antsdr"
@@ -228,81 +185,18 @@ class AntsdrIIOSource(IQSource):
                  gain_db: float = 40.0, kernel_buffers: int = KERNEL_BUFFERS,
                  buffer_samples: int = BUFFER_SAMPLES,
                  window_seconds: float = 1.0) -> None:
-        self._iio = _load_iio()
-        self.uri = uri or os.environ.get("AERIX_RF_ANTSDR_URI", DEFAULT_URI)
-        prof = resolve_profile(profile)
-        self.rf_bandwidth = float(prof["rf_bandwidth"])
-        if sample_rate is not None:
-            # Caller (CLI --sample-rate) asked to override this fixed profile's
-            # rate: apply it, but validate against the AD9361's own range and
-            # warn (not reject) above the measured sustained link ceiling --
-            # the chip still accepts it, `stream_rate_ratio` just won't stay
-            # near 1.0 there (see module docstring).
-            lo, hi = antsdr_iio_capabilities().sample_rates_hz
-            if not (lo <= sample_rate <= hi):
-                raise ValueError(
-                    f"--sample-rate {sample_rate:g} Hz is outside the ANTSDR/AD9361 "
-                    f"capability range {lo:g}-{hi:g} Hz"
-                )
-            if sample_rate > MAX_SUSTAINED_RATE_HZ:
-                log.warning(
-                    "ANTSDR sample_rate %.3f MS/s exceeds the measured sustained "
-                    "link ceiling %.3f MS/s; expect stream_rate_ratio to drop below 1.0",
-                    sample_rate / 1e6, MAX_SUSTAINED_RATE_HZ / 1e6,
-                )
-            self.sample_rate = float(sample_rate)
-        else:
-            self.sample_rate = float(prof["sample_rate"])
-        self.gain_mode = str(gain_mode)
-        self.gain_db = float(gain_db)
-        # ``kernel_buffers``/``buffer_samples`` ctor args win; else an env var
-        # (for diagnosing sustained-throughput host-path config without a CLI
-        # flag -- see docs/design/antsdr-backend.md "Measured host-path
-        # throughput"); else the module default.
-        self.kernel_buffers = int(os.environ.get("AERIX_RF_ANTSDR_KBUFS", kernel_buffers)
-                                   if kernel_buffers == KERNEL_BUFFERS else kernel_buffers)
-        self.buffer_samples = int(os.environ.get("AERIX_RF_ANTSDR_BUFSAMPLES", buffer_samples)
-                                   if buffer_samples == BUFFER_SAMPLES else buffer_samples)
+        super().__init__(
+            uri=uri, profile=profile, sample_rate=sample_rate,
+            center_freq_hz=center_freq_hz, gain_mode=gain_mode, gain_db=gain_db,
+            kernel_buffers=kernel_buffers, buffer_samples=buffer_samples,
+        )
         self.window_seconds = float(window_seconds)
-        self._center_hz = float(center_freq_hz)
         # Debug counters for diagnosing host-path throughput (refill cadence,
         # not device-reported -- this firmware has no overflow/seq counter).
         self._refill_count = 0
         self._refill_bytes = 0
         self._max_refill_gap_s = 0.0
         self._last_refill_end_ts: float | None = None
-        # Config readback state (see module docstring); populated by
-        # ``_refresh_readback`` after open and after every ``tune()``.
-        self.readback: dict[str, Any] = {}
-        self.readback_mismatch: bool = False
-        # rssi read-cost gate: None = not measured yet, True/False = decided
-        # on the first window (see ``_read_rssi_if_cheap``).
-        self._rssi_enabled: Optional[bool] = None
-        self._rssi_read_ms: Optional[float] = None
-
-        self.ctx = self._iio.Context(self.uri)
-        self.phy = self.ctx.find_device("ad9361-phy")
-        self.rxdev = self.ctx.find_device("cf-ad9361-lpc")
-        if self.phy is None or self.rxdev is None:
-            raise RuntimeError(
-                f"ANTSDR devices not found on {self.uri!r} "
-                "(need ad9361-phy + cf-ad9361-lpc; wrong URI or device off?)"
-            )
-
-        self._rx_ctrl = self.phy.find_channel("voltage0", False)   # RX input ctrl
-        self._lo_ctrl = self.phy.find_channel("altvoltage0", True)  # RX LO (output chan)
-        self._i_chan = self.rxdev.find_channel("voltage0", False)
-        self._q_chan = self.rxdev.find_channel("voltage1", False)
-        for ch in (self._i_chan, self._q_chan):
-            ch.enabled = True
-
-        ctx_attrs = getattr(self.ctx, "attrs", {}) or {}
-        self.fw_version = ctx_attrs.get("fw_version")
-        self.hw_model = ctx_attrs.get("hw_model") or ctx_attrs.get("ad9361-phy,model")
-
-        self._apply_config(apply_lo=True)
-        self.rxdev.set_kernel_buffers_count(self.kernel_buffers)
-        self._refresh_readback()
 
         self._asm = StreamAssembler(
             self.sample_rate, raw_to_iq=_cs16_2048_to_iq, reports_drops=False,
@@ -317,118 +211,12 @@ class AntsdrIIOSource(IQSource):
         self._rate_warning = False
         self._start()
 
-    # --- device configuration -------------------------------------------------
-    def _apply_config(self, *, apply_lo: bool) -> None:
-        """Set runtime-only phy attrs (nothing persisted to the device)."""
-        self._rx_ctrl.attrs["sampling_frequency"].value = str(int(self.sample_rate))
-        self._rx_ctrl.attrs["rf_bandwidth"].value = str(int(self.rf_bandwidth))
-        self._rx_ctrl.attrs["gain_control_mode"].value = self.gain_mode
-        if self.gain_mode == "manual":
-            # "%g"-style formatting: "40" for a whole-number dB value (matches the
-            # attribute strings a real ad9361-phy round-trips), "40.5" otherwise.
-            self._rx_ctrl.attrs["hardwaregain"].value = f"{self.gain_db:g}"
-        if apply_lo:
-            self._lo_ctrl.attrs["frequency"].value = str(int(self._center_hz))
-
-    def _attr_value(self, chan, name: str) -> Optional[str]:
-        """Best-effort read of ``chan.attrs[name].value``; ``None`` if the attr
-        doesn't exist on this firmware/channel or the read otherwise fails --
-        a readback that can't be verified must never be mistaken for a match."""
-        try:
-            return chan.attrs[name].value
-        except Exception:  # noqa: BLE001 -- KeyError (fake) or OSError (real libiio)
-            return None
-
-    def _refresh_readback(self) -> None:
-        """Read back ``ad9361-phy`` config attrs after a config change (open or
-        ``tune()``) and compare against what was requested; see module
-        docstring "requested config is not proof of actual state"."""
-        hw_raw = self._attr_value(self._rx_ctrl, "hardwaregain")
-        mode_raw = self._attr_value(self._rx_ctrl, "gain_control_mode")
-        bw_raw = self._attr_value(self._rx_ctrl, "rf_bandwidth")
-        fs_raw = self._attr_value(self._rx_ctrl, "sampling_frequency")
-        port_raw = self._attr_value(self._rx_ctrl, "rf_port_select")
-        lo_raw = self._attr_value(self._lo_ctrl, "frequency")
-
-        rb: dict[str, Any] = {
-            "hardwaregain_db": _parse_leading_float(hw_raw),
-            "hardwaregain_raw": hw_raw,
-            "gain_control_mode": mode_raw,
-            "rf_bandwidth_hz": _parse_leading_float(bw_raw),
-            "rf_bandwidth_raw": bw_raw,
-            "sampling_frequency_hz": _parse_leading_float(fs_raw),
-            "sampling_frequency_raw": fs_raw,
-            "rf_port": port_raw,
-            "rx_lo_hz": _parse_leading_float(lo_raw),
-            "rx_lo_raw": lo_raw,
-            "fw_version": self.fw_version,
-            "hw_model": self.hw_model,
-        }
-
-        mismatches: list[str] = []
-        if self.gain_mode == "manual":
-            got = rb["hardwaregain_db"]
-            if got is None or abs(got - self.gain_db) > READBACK_TOL_GAIN_DB:
-                mismatches.append(f"hardwaregain requested={self.gain_db:g}dB readback={got!r}")
-        if rb["gain_control_mode"] != self.gain_mode:
-            mismatches.append(
-                f"gain_control_mode requested={self.gain_mode!r} readback={rb['gain_control_mode']!r}"
-            )
-        bw_got = rb["rf_bandwidth_hz"]
-        if bw_got is None or abs(bw_got - self.rf_bandwidth) > READBACK_TOL_RATE_FRAC * self.rf_bandwidth:
-            mismatches.append(f"rf_bandwidth requested={self.rf_bandwidth:g}Hz readback={bw_got!r}")
-        fs_got = rb["sampling_frequency_hz"]
-        if fs_got is None or abs(fs_got - self.sample_rate) > READBACK_TOL_RATE_FRAC * self.sample_rate:
-            mismatches.append(f"sampling_frequency requested={self.sample_rate:g}Hz readback={fs_got!r}")
-        lo_got = rb["rx_lo_hz"]
-        if lo_got is None or abs(lo_got - self._center_hz) > READBACK_TOL_LO_HZ:
-            mismatches.append(f"rx_lo requested={self._center_hz:g}Hz readback={lo_got!r}")
-
-        self.readback = rb
-        self.readback_mismatch = bool(mismatches)
-        if mismatches:
-            log.warning("ANTSDR readback mismatch (device may not be in the requested "
-                        "state): %s", "; ".join(mismatches))
-
-    def _read_rssi_if_cheap(self) -> Optional[float]:
-        """Read ``voltage0.rssi`` (e.g. ``"32.75 dB"``) once per window. This is
-        an attr read over the network to the IIOD daemon, not a local register
-        read, so its cost is measured on the first call: if it exceeds
-        ``RSSI_READ_BUDGET_MS`` the per-window read is permanently disabled for
-        this source (an occasional slow read is tolerated; only a sustained-slow
-        first measurement disables it) and ``rssi_db_readback`` is ``None`` for
-        every subsequent window."""
-        if self._rssi_enabled is False:
-            return None
-        t0 = time.time()
-        raw = self._attr_value(self._rx_ctrl, "rssi")
-        dt_ms = (time.time() - t0) * 1000.0
-        if self._rssi_enabled is None:
-            self._rssi_enabled = dt_ms <= RSSI_READ_BUDGET_MS
-            self._rssi_read_ms = dt_ms
-            if not self._rssi_enabled:
-                log.warning(
-                    "ANTSDR rssi attr read took %.2f ms (> %.1f ms budget); "
-                    "disabling per-window rssi readback for this session",
-                    dt_ms, RSSI_READ_BUDGET_MS,
-                )
-        if not self._rssi_enabled:
-            return None
-        return _parse_leading_float(raw)
-
     @property
     def capabilities(self) -> ReceiverCapabilities:
         return antsdr_iio_capabilities(firmware=self.fw_version or self.hw_model)
 
-    @property
-    def center_freq_hz(self) -> float:
-        """Actual RX LO, for session metadata -- see ``cli._receiver_meta``."""
-        return self._center_hz
-
     def tune(self, center_freq_hz: float) -> None:
-        self._center_hz = float(center_freq_hz)
-        self._lo_ctrl.attrs["frequency"].value = str(int(self._center_hz))
-        self._refresh_readback()
+        super().tune(center_freq_hz)
         self._asm.flush()
 
     # --- producer thread -------------------------------------------------------
@@ -438,12 +226,11 @@ class AntsdrIIOSource(IQSource):
         self._thread.start()
 
     def _run(self) -> None:
-        buf = self._iio.Buffer(self.rxdev, self.buffer_samples, False)
+        self.open_buffer()
         try:
             while not self._stop_evt.is_set():
                 t_before = time.time()
-                buf.refill()
-                data = buf.read()
+                data = self.refill_read()
                 t_after = time.time()
                 if self._last_refill_end_ts is not None:
                     gap = t_before - self._last_refill_end_ts
@@ -544,3 +331,4 @@ class AntsdrIIOSource(IQSource):
         if self._thread is not None:
             self._thread.join(timeout=5.0)
             self._thread = None
+        super().close()
