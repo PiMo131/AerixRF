@@ -2,3 +2,4 @@
 - [Bootstrap/access setup](bootstrap_access.md) — network config, micromamba libiio env, no-sudo/UART blocker
 - [Firmware strategy](firmware_strategy.md) — why we keep stock 1R1T image instead of 2R2T/UHD, and when to revisit
 - [Firmware & streaming ceiling](firmware_streaming_ceiling.md) — iiod ~59 MB/s ceiling is firmware-bound; UHD fw unquantified; stay on IIO
+- [Silent-loss BIST measurement](silent_loss_bist_measurement.md) — 12.288/13.44 clean, 15.36 badly broken (not marginal), GIL/CPU contention risk, diagnostic-overhead pitfall

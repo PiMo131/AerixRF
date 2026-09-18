@@ -214,3 +214,31 @@ Honest answer: **no reliable documented method found to raise the ~59 MB/s ceili
 1. Re-run the §3 throughput test with C `iio_readdev` at larger buffer counts and, if feasible, sc8 format, on the real production network path — zero firmware risk, answers §12 item 1–2 and §13.B's open sc8 idea in an afternoon.
 2. If ≥20 MS/s clean is a hard requirement AERIX cannot compromise on, evaluate UHD firmware via **SD-card swap only** (leaves QSPI/IIO image intact per the evidence above) as a bounded, reversible experiment — budget for a patched UHD build and expect app-compatibility friction; do not commit the architecture to it until a bench sustained-rate number is actually measured on our unit.
 3. Do not pursue 2R2T-on-IIO or the DJI-event firmware for the throughput/timestamp problem — neither addresses it (2R2T shares the same bottleneck; DJI firmware isn't an IQ path at all). Keep DJI-event firmware as a separate, later, protocol-specific evaluation track for `rf-protocol-analyst`/`hardware-architect`, not a throughput solution.
+
+## 14. Silent-loss measurement with the AD9361 BIST tone (2026-09-18)
+
+Method (MEASURED): the `ad9361-phy` debug attr `bist_tone` injects a deterministic tone into the RX
+datapath (bypasses the analog front end — no antenna/gain/clipping effects). A production-like Python
+libiio loop (8 × 1 M-sample kernel buffers, `refill()`+`read()`, separate analysis thread) unwraps the
+received tone phase; any phase step inconsistent with the tone frequency is a gap and its size gives the
+missing sample count. Script: session scratchpad `bist_loss.py` (600 s per run). The attr is reset to
+`0 0 0 0` at the end of every run (verified: `bist_tone` reads `0` afterwards).
+
+| Rate | Host | Buffers | Phase-jump events | Jumps at buffer boundaries | Throughput ratio | Verdict |
+|---|---|---|---|---|---|---|
+| 12.288 MS/s | idle | 7,031 | 0 | 0 | 0.99989 | gap-free over 600 s |
+| 13.44 MS/s | idle | 7,690 | 0 | 0 | 0.99989 | gap-free over 600 s |
+| 15.36 MS/s | idle | 4,417 | 2,128,221 | 261 | 0.503 | unusable (above the iiod ceiling) |
+| 12.288 MS/s | synthetic CPU load (busy loop, 12 cores) | 2,896 | 8,760,365 | 281 | 0.412 | catastrophic silent loss |
+
+Conclusions: (1) at the live profile (12.288) and at 13.44 the E200→host path drops nothing measurable
+in 10 minutes on an idle host — 13.44 is therefore a *validated* named profile, not just "clean by
+wall clock"; 12.288 stays the default for its exact 5/4 canonical ratio and integer STFT timing.
+(2) 15.36 is not a marginal rate but a broken one on this image. (3) CPU contention does not cost a
+few percent — it collapses the stream; because the IIO path has no overflow counter, the only
+defences are the deployment rule (field box runs nothing else heavy), the cumulative/recent rate
+monitor with `samples_deficit`, and `loss_counter_available=False` in the capabilities so
+timing-sensitive code refuses to run here. Caveat: BIST bypasses the analog front end, so ADC
+clipping/AGC are NOT exercised by this test — `clip_fraction` covers that separately.
+
+**Architect addendum (2026-09-18):** the "load" row measured IN-PROCESS GIL contention (analysis threads in the same Python process as the producer), which is exactly the production backend's structure, but NOT genuine multi-core OS contention — that remains unmeasured (an external-subprocess load run was killed by host low-memory protection). The earlier 600 s soak under concurrent pytest suites showed ≈5 % loss, so both mechanisms exist. Decision: 12.288 MS/s stays the default (exact 5/4 canonical ratio, integer STFT timing); 13.44 MS/s is a validated named profile; 15.36 is unusable on this image; deployment rule stands (nothing heavy on the field box; keep the DSP consumer light or move the producer out of the GIL). Caveat: BIST bypasses the analog front end — clipping/AGC are covered by `clip_fraction`, not by this test.
