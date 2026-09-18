@@ -225,3 +225,38 @@ Update 2026-09-18 (~08:30, Tier-D preservation task):
   sessions - if the architect or a specialist mentions "live capture data"
   sitting in a scratchpad, treat it as at-risk and flag/propose preservation
   proactively rather than waiting to be asked again.
+
+Update 2026-09-18 (~10:42 EDT, housekeeping pass 2 - soak600 preservation +
+aria2c restart):
+- Moved (not copied, same filesystem) the two finalized ANTSDR soak600
+  sessions from `~/rf-sessions/soak_2026_09_18/` into
+  `aerix_antsdr_ambient_2026_09_18/original/`: `soak600_default_noiq`
+  (600 windows, 0 IQ by design, metadata/detections only, 121M) and
+  `soak600_k32_4m_iq` (**actual dir name has 133337 not 133338 timestamp**
+  - task description had a 1s typo, used the real dir; 599 cs16 IQ files,
+    ~28G, all 599 SHA-256-verified against session.json, 0 mismatches).
+  Also moved sweep baselines `base_24.npz`/`base_58.npz` into
+  `original/sweeps_2026_09_18/` (unchecksummed, no per-file hash existed).
+  Both soak600 sessions carry a `receiver_readback` block (live AD9361
+  read-back, not just requested config) confirming gain 40dB manual,
+  rf_bandwidth 10MHz, sampling_frequency 12.288MHz, rf_port A_BALANCED,
+  rx_lo ~2437MHz (2436999998 Hz exact), hw_model "PlutoSDR Rev.C
+  (Z7010-AD9364)" - useful precedent: `receiver_readback` is per-file in
+  `files[]`, not session-level, on sessions produced by the newer capture
+  pipeline (software_git_sha d04332d+). Full per-session table and
+  integrity log now in `~/rf-datasets/aerix_antsdr_ambient_2026_09_18/SOURCE.md`
+  (running total 870 IQ files verified, 0 mismatches, ~41-54GB depending on
+  du apparent-vs-disk accounting). Dataset total now shows as `original=54G`
+  in status.sh (up from ~13G).
+- **DroneRFb-DIR aria2c had fully died** (not just stalled at 0B/s as the
+  task description assumed) at 07:56 EDT with `errorCode=19 DNS resolution
+  failed for china.scidb.cn` on all 6 connections - a ~2h46m silent gap
+  before this pass caught it. DNS resolved fine on manual `curl` retest, so
+  restarted with `-c -x6 -s6 -k1M` same `--out`/`--dir`/URL; confirmed
+  clean resume from 22GiB/63GiB (35%), new PID, ~3-4 MiB/s, ETA ~3h.
+  Incident recorded in `dronerfb_dir` manifest entry `notes` field (both
+  manifest.json copies). **Lesson: always check `pgrep -af aria2c` actually
+  shows a live process before trusting a "last known %" from the .out log -
+  a fully-dead process leaves the same-looking stale progress line as a
+  merely-stalled one, only the process list and .out/.log mtime distinguish
+  them.**

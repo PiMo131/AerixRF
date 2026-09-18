@@ -51,12 +51,13 @@ before feature extraction (design doc S5.5): the old ``rate_warning=True``
 string-match in ``notes`` is a *trailing-window* rate estimate that
 false-positives on loss-free sessions (median ratio 0.96-1.01 across most
 sessions despite the flag firing on individual windows). The rule here
-instead prefers a typed ``receiver.window_deficit_frac`` /
-``receiver.samples_deficit`` field if the sidecar has one (window > 1e-3 or
-session > 1e-2 excludes), and otherwise falls back to the **session-level**
-(``run_id``) median ``stream_rate_ratio=`` parsed from ``notes`` (< 0.95
-excludes) -- this keeps loss-free sessions whose per-window metric fired
-spuriously and drops only the session with a real deficit.
+instead prefers the typed ``sc.signal.window_deficit_frac`` /
+``sc.signal.session_deficit_frac`` / ``sc.signal.capture_complete`` fields
+(window > 1e-3 or session > 1e-2 or ``capture_complete is False``
+excludes), and otherwise falls back to the **session-level** (``run_id``)
+median ``stream_rate_ratio=`` parsed from ``notes`` (< 0.95 excludes) --
+this keeps loss-free sessions whose per-window metric fired spuriously and
+drops only the session with a real deficit.
 
 Usage::
 
@@ -65,11 +66,13 @@ Usage::
         --dataset rub_dronesecurity \\
         --report bench/out/receiver_id_probe.md
 
-Exit codes: 0 pass/conditional (or a variant simply not runnable, exit 3,
-see above), 1 fail or INCONCLUSIVE (label-matched probe balanced accuracy >
-chance + 0.25, or the probe could not produce an informative result -- see
-the INCONCLUSIVE conditions above), 2 unexpected error, 3 label-matched
-probe not runnable.
+Exit codes: 0 pass/conditional, 1 fail or INCONCLUSIVE (label-matched probe
+balanced accuracy > chance + 0.25, the probe could not produce an
+informative result -- see the INCONCLUSIVE conditions above -- or the
+label-matched subset was not runnable due to a pre-fold guard, e.g. <2
+groups after restricting to the matched subset), 2 unexpected error, 3 no
+emitter_class is shared by >=2 datasets (label-matched probe cannot even be
+attempted).
 """
 
 from __future__ import annotations
@@ -137,16 +140,20 @@ def _rate_ratio_from_notes(sc: WindowSidecar) -> float | None:
     return float(m.group(1)) if m else None
 
 
-def _typed_deficits(sc: WindowSidecar) -> tuple[float | None, float | None]:
-    """``(window_deficit_frac, session samples_deficit)`` from typed sidecar
-    fields if present -- forward-compat with a builder adding
-    ``receiver.window_deficit_frac`` / ``receiver.samples_deficit``. Returns
-    ``(None, None)`` if neither typed field exists on this sidecar, in which
-    case callers fall back to the ``notes`` ``stream_rate_ratio=`` rule."""
-    recv = getattr(sc, "receiver", None)
-    if recv is None:
-        return None, None
-    return getattr(recv, "window_deficit_frac", None), getattr(recv, "samples_deficit", None)
+def _typed_deficits(sc: WindowSidecar) -> tuple[float | None, float | None, bool | None]:
+    """``(window_deficit_frac, session_deficit_frac, capture_complete)`` from
+    the typed ``sc.signal`` fields (``aerix_rf/datasets/spec.py``
+    ``SignalInfo``). Returns ``(None, None, None)`` if ``sc.signal`` is
+    absent, in which case callers fall back to the ``notes``
+    ``stream_rate_ratio=`` rule."""
+    sig = getattr(sc, "signal", None)
+    if sig is None:
+        return None, None, None
+    return (
+        getattr(sig, "window_deficit_frac", None),
+        getattr(sig, "session_deficit_frac", None),
+        getattr(sig, "capture_complete", None),
+    )
 
 
 def _session_rate_ratio_medians(dataset_id: str, root: Path) -> dict[str, float]:
@@ -164,18 +171,21 @@ def _session_rate_ratio_medians(dataset_id: str, root: Path) -> dict[str, float]
 
 
 def _rate_deficit_reason(sc: WindowSidecar, session_ratio_medians: dict[str, float]) -> str | None:
-    """Exclusion reason string, or ``None`` to keep the row. Prefers typed
-    ``receiver.window_deficit_frac`` / ``receiver.samples_deficit`` if
-    present (window > 1e-3 or session > 1e-2 excludes); else falls back to
-    the session-level (``run_id``) median ``stream_rate_ratio`` from
+    """Exclusion reason string, or ``None`` to keep the row. Prefers the
+    typed ``sc.signal.window_deficit_frac`` / ``sc.signal.session_deficit_frac``
+    / ``sc.signal.capture_complete`` fields if present (window > 1e-3 or
+    session > 1e-2 or ``capture_complete is False`` excludes); else falls
+    back to the session-level (``run_id``) median ``stream_rate_ratio`` from
     ``notes`` (< 0.95 excludes -- a real session-wide deficit, not a
     spurious per-window rate estimate)."""
-    window_d, session_d = _typed_deficits(sc)
-    if window_d is not None or session_d is not None:
+    window_d, session_d, capture_complete = _typed_deficits(sc)
+    if window_d is not None or session_d is not None or capture_complete is not None:
         if window_d is not None and window_d > 1e-3:
             return "window_samples_deficit"
         if session_d is not None and session_d > 1e-2:
             return "session_samples_deficit"
+        if capture_complete is False:
+            return "capture_incomplete"
         return None
     median = session_ratio_medians.get(sc.identity.run_id)
     if median is not None and median < SESSION_RATE_RATIO_MIN:
@@ -637,7 +647,7 @@ def main(argv: list[str] | None = None) -> int:
     else:
         label_matched_result = run_probe(subset, "label_matched")
         reason = f"restricted to emitter_class={matched_label!r} ({label_matched_result.n_rows} rows)"
-        exit_code = 0 if (not label_matched_result.runnable or label_matched_result.verdict in ("pass", "conditional")) else 1
+        exit_code = 0 if (label_matched_result.runnable and label_matched_result.verdict in ("pass", "conditional")) else 1
 
     elapsed = time.monotonic() - t0
     report_md = render_report(

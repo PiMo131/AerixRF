@@ -72,6 +72,9 @@ def _write_window(
     emitter_class: EmitterClass,
     rng: np.random.Generator,
     rate_deficit: bool = False,
+    window_deficit_frac: float | None = None,
+    session_deficit_frac: float | None = None,
+    capture_complete: bool | None = None,
 ) -> None:
     """Write one synthetic `<uid>.tensor.npy` + index row. The only thing
     that differs between the two fake receivers is `noise_std` (a pure
@@ -80,7 +83,9 @@ def _write_window(
     session-level `stream_rate_ratio=` below the S5.5 exclusion threshold
     (0.95) in `notes`, matching the current `_rate_deficit_reason` fallback
     path (the retired `rate_warning=True` string-match is no longer read by
-    the probe)."""
+    the probe). `window_deficit_frac` / `session_deficit_frac` /
+    `capture_complete` set the typed `SignalInfo` fields the probe now reads
+    directly (`sc.signal.*`), taking priority over the `notes` fallback."""
     tensor = (-70.0 + rng.normal(0.0, noise_std, size=(N_MS, 1024))).astype(np.float32)
     uid = f"{dataset_id}_{device_id}_{run_id}_{idx}"
     prepared_dir = root / dataset_id / "prepared"
@@ -103,6 +108,9 @@ def _write_window(
             n_samples=int(N_MS / 1000.0 * CANONICAL_FS),
             bandwidth_hz=CANONICAL_FS,
             usable_bw_hz=10.0e6,
+            window_deficit_frac=window_deficit_frac,
+            session_deficit_frac=session_deficit_frac,
+            capture_complete=capture_complete,
         ),
         source=SourceInfo(
             original_rate_hz=CANONICAL_FS,
@@ -183,6 +191,51 @@ def test_load_rows_excludes_rate_warning(tmp_path: Path):
     assert len(rip.USABLE_FEATURE_NAMES) == rip.FEATURES_V2_DIM - 12
 
 
+def test_load_rows_excludes_typed_window_deficit(tmp_path: Path):
+    """`sc.signal.window_deficit_frac` (typed field, `spec.SignalInfo`) above
+    1e-3 excludes with reason `window_samples_deficit` -- this is the field
+    the probe must actually read (there is no `sc.receiver.*` deficit
+    field)."""
+    ds = "fake_receiver_typed"
+    rng = np.random.default_rng(3)
+    _write_window(tmp_path, ds, "dev", "run0", 0, noise_std=0.2,
+                  emitter_class=EmitterClass.BACKGROUND, rng=rng)
+    _write_window(tmp_path, ds, "dev", "run1", 0, noise_std=0.2,
+                  emitter_class=EmitterClass.BACKGROUND, rng=rng, window_deficit_frac=0.5)
+    rows, skipped = rip.load_rows([ds], root=tmp_path)
+    assert len(rows) == 1
+    assert skipped.get(f"{ds}:window_samples_deficit") == 1
+
+
+def test_load_rows_excludes_typed_session_deficit(tmp_path: Path):
+    """`sc.signal.session_deficit_frac` above 1e-2 excludes with reason
+    `session_samples_deficit`."""
+    ds = "fake_receiver_typed2"
+    rng = np.random.default_rng(4)
+    _write_window(tmp_path, ds, "dev", "run0", 0, noise_std=0.2,
+                  emitter_class=EmitterClass.BACKGROUND, rng=rng)
+    _write_window(tmp_path, ds, "dev", "run1", 0, noise_std=0.2,
+                  emitter_class=EmitterClass.BACKGROUND, rng=rng, session_deficit_frac=0.02)
+    rows, skipped = rip.load_rows([ds], root=tmp_path)
+    assert len(rows) == 1
+    assert skipped.get(f"{ds}:session_samples_deficit") == 1
+
+
+def test_load_rows_falls_back_to_legacy_notes_ratio_when_typed_fields_absent(tmp_path: Path):
+    """With both typed `signal.window_deficit_frac`/`signal.session_deficit_frac`
+    left `None`, the probe falls back to the legacy `notes`
+    `stream_rate_ratio=` session-median rule."""
+    ds = "fake_receiver_legacy"
+    rng = np.random.default_rng(5)
+    _write_window(tmp_path, ds, "dev", "run0", 0, noise_std=0.2,
+                  emitter_class=EmitterClass.BACKGROUND, rng=rng)
+    _write_window(tmp_path, ds, "dev", "run_bad", 0, noise_std=0.2,
+                  emitter_class=EmitterClass.BACKGROUND, rng=rng, rate_deficit=True)
+    rows, skipped = rip.load_rows([ds], root=tmp_path)
+    assert len(rows) == 1
+    assert skipped.get(f"{ds}:session_rate_ratio_lt_0.95") == 1
+
+
 def test_probe_pipeline_runs_and_detects_noise_scale_confound(tmp_path: Path):
     ds_a, ds_b = _build_two_receiver_corpus(tmp_path, shared_label=True)
     rows, _ = rip.load_rows([ds_a, ds_b], root=tmp_path)
@@ -236,6 +289,41 @@ def test_main_writes_report_and_exit_code_3_when_label_matched_not_runnable(tmp_
     assert "background exists for receivers" in text
     captured = capsys.readouterr()
     assert "label-matched probe not runnable" in captured.out
+
+
+def test_main_exit_code_1_when_label_matched_subset_not_runnable_after_match(tmp_path: Path, monkeypatch):
+    """Defect fix: when `matched_label` is found (an emitter_class shared by
+    >=2 datasets, so the probe is *attempted*) but `run_probe()` on that
+    matched subset itself comes back `runnable=False` (a pre-fold guard --
+    e.g. <2 groups / <5 rows per class in the matched subset -- fails), the
+    result is INCONCLUSIVE, not a pass. Exit code must be 1, not 0. Exit
+    code 3 is reserved for the "no emitter_class shared by >=2 datasets"
+    case (`matched_label is None`), which is a different, already-covered
+    branch (`test_main_writes_report_and_exit_code_3_when_label_matched_not_runnable`)."""
+    ds_a, ds_b = _build_two_receiver_corpus(tmp_path, shared_label=True)
+
+    real_run_probe = rip.run_probe
+
+    def fake_run_probe(rows, variant):
+        if variant == "label_matched":
+            return rip.ProbeResult(
+                variant=variant, runnable=False,
+                reason="only 1 distinct group(s) present, need >=2 for grouped CV",
+            )
+        return real_run_probe(rows, variant)
+
+    monkeypatch.setattr(rip, "run_probe", fake_run_probe)
+
+    report_path = tmp_path / "out" / "receiver_id_probe.md"
+    code = rip.main([
+        "--dataset", ds_a, "--dataset", ds_b,
+        "--root", str(tmp_path),
+        "--report", str(report_path),
+    ])
+    assert code == 1
+    assert report_path.exists()
+    text = report_path.read_text(encoding="utf-8")
+    assert "INCONCLUSIVE" in text
 
 
 def test_main_exit_code_0_when_label_matched_runnable(tmp_path: Path):

@@ -25,13 +25,16 @@ Hard device facts this module encodes (measured on the lab unit, not derived):
     ``loss_detection`` is ``"inferred_rate_only"``. The only silent-loss
     signal is ``stream_rate_ratio`` (CUMULATIVE achieved/nominal samples since
     the first pushed chunk -- see stream.py) plus ``stream_rate_ratio_recent``
-    (a noisier trailing ~5s estimate). ``rate_warning`` fires when the
+    (a noisier trailing >=10s estimate). ``rate_warning`` fires when the
     cumulative ratio drops below ``RATE_WARNING_RATIO`` (0.995) after
     ``RATE_WARNING_MIN_ELAPSED_S`` (10s) of history, OR the recent ratio drops
-    below ``RATE_WARNING_RATIO_RECENT`` (0.98) at any time -- see
-    docs/design/antsdr-backend.md "Measured host-path throughput
-    (2026-09-18)" for why a bare trailing-window threshold alone false-fired
-    on loss-free captures.
+    below ``RATE_WARNING_RATIO_RECENT`` (0.97) AND the recent-window sample
+    deficit (``samples_deficit_recent``) is at least
+    ``RATE_WARNING_RECENT_DEFICIT_FRAC`` (0.5%) of one capture window's
+    samples -- see docs/design/antsdr-backend.md "Measured host-path
+    throughput (2026-09-18)" for why a bare trailing-window ratio threshold
+    alone (no deficit evidence required) false-fired on 487/599 windows of a
+    real loss-free 600s soak.
   * Measured throughput: 12.288 MS/s is clean over the GbE link; >=15.36 MS/s
     is lossy on this host/link -- see the profile table below.
   * The *requested* config (what this backend told ``ad9361-phy`` to do) is
@@ -88,11 +91,21 @@ QUEUE_MAX_S = 2.0
 # docs/design/antsdr-backend.md "Measured host-path throughput (2026-09-18)"):
 # the CUMULATIVE ratio is stable/low-noise but slow to react, so it needs a
 # tight threshold and a minimum warm-up; the RECENT (trailing-window) ratio
-# is noisy but reacts fast, so it needs a looser threshold to avoid firing on
-# normal jitter while still catching a stream that stalls outright.
+# is noisy (chunk-timing/OS scheduling jitter) but reacts fast, so a bare
+# threshold on it alone false-fired ``rate_warning`` on 487/599 windows of a
+# real loss-free 600s soak (``stream_rate_ratio`` never dropped below 0.9998
+# in that run). The recent branch therefore ALSO requires evidence of an
+# actual sample deficit accrued during that same trailing window
+# (``samples_deficit_recent``, from ``StreamAssembler`` -- honest, computed
+# from chunk sample counts/timestamps, not wall-clock read deltas) of at
+# least ``RATE_WARNING_RECENT_DEFICIT_FRAC`` of one capture window's samples:
+# jitter alone (no lost samples) must never warn.
 RATE_WARNING_RATIO = 0.995             # cumulative-ratio warning threshold
 RATE_WARNING_MIN_ELAPSED_S = 10.0      # cumulative ratio must have this much history
-RATE_WARNING_RATIO_RECENT = 0.98       # trailing-window ratio warning threshold
+RATE_WARNING_RATIO_RECENT = 0.97       # trailing-window ratio warning threshold
+RATE_WARNING_RECENT_DEFICIT_FRAC = 0.005   # min recent-window deficit (frac of one
+                                            # capture window's samples) to count as
+                                            # a real, not merely jitter-driven, dip
 MAX_SUSTAINED_RATE_HZ = 13.44e6        # measured link ceiling; see module docstring
 
 # Readback-vs-requested tolerance (see module docstring "requested config is
@@ -465,13 +478,18 @@ class AntsdrIIOSource(IQSource):
             ratio = info["stream_rate_ratio"]
             ratio_recent = info.get("stream_rate_ratio_recent", ratio)
             elapsed_s = info.get("stream_rate_elapsed_s", 0.0)
+            deficit_recent = info.get("samples_deficit_recent", 0) or 0
             # Cumulative ratio: only trust it once >=10s of stream have been
             # measured from the first pushed chunk (a short/noisy cumulative
             # average is not trustworthy yet). Recent ratio: no warm-up gate --
             # it exists specifically to catch a stall or stalled-then-recovered
-            # burst fast, so it must fire immediately if it's bad.
+            # burst fast, so it must fire immediately if it's bad -- but ONLY
+            # when the dip is backed by an actual sample deficit accrued in
+            # that same trailing window, never on jitter alone (see
+            # RATE_WARNING_RECENT_DEFICIT_FRAC above).
             rate_warning = ((ratio < RATE_WARNING_RATIO and elapsed_s >= RATE_WARNING_MIN_ELAPSED_S)
-                             or ratio_recent < RATE_WARNING_RATIO_RECENT)
+                             or (ratio_recent < RATE_WARNING_RATIO_RECENT
+                                 and deficit_recent >= RATE_WARNING_RECENT_DEFICIT_FRAC * n))
             self._rate_warning = rate_warning
             rssi_db_readback = self._read_rssi_if_cheap()
             yield IQWindow(
@@ -495,6 +513,7 @@ class AntsdrIIOSource(IQSource):
                     "stream_rate_ratio_recent": ratio_recent,
                     "stream_rate_elapsed_s": elapsed_s,
                     "samples_deficit": info.get("samples_deficit"),
+                    "samples_deficit_recent": info.get("samples_deficit_recent"),
                     "rate_warning": rate_warning,
                     "max_refill_gap_ms": round(self._max_refill_gap_s * 1000.0, 1),
                     "overflow_count": info["overflow_count"],

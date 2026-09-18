@@ -149,12 +149,25 @@ def test_cli_receiver_meta_uses_source_not_cfg_defaults(monkeypatch):
         src.close()
 
 
-def test_antsdr_iio_reports_unavailable_with_reason():
+def test_antsdr_iio_reports_unavailable_with_reason(monkeypatch):
+    # Simulate a host without the libiio Python bindings: the probe must report
+    # unavailable with a human-readable reason, and antsdr_iio must never be
+    # auto-selected (it needs an explicit --backend / env choice).
+    import sys
+    monkeypatch.setitem(sys.modules, "iio", None)  # `import iio` -> ImportError
     entry = reg.REGISTRY["antsdr_iio"]
     available, reason = entry.probe()
     assert available is False
-    assert reason  # non-empty, explains why (T4 not implemented yet)
-    assert "antsdr_iio" not in reg.AUTO_ORDER  # placeholder must not be auto-selected
+    assert reason and "iio" in reason.lower()
+    assert "antsdr_iio" not in reg.AUTO_ORDER
+
+
+def test_antsdr_iio_reports_available_when_bindings_present(monkeypatch):
+    import sys, types
+    monkeypatch.setitem(sys.modules, "iio", types.ModuleType("iio"))
+    available, reason = reg.REGISTRY["antsdr_iio"].probe()
+    assert available is True
+    assert reason
 
 
 def test_registry_covers_all_documented_backends():

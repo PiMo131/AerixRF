@@ -113,6 +113,16 @@ def test_session_json_layout(session):
     assert meta["counts"]["iq_windows"] == 2 and meta["counts"]["detections"] == 3
     assert meta["counts"]["decodes"] == 2 and meta["counts"]["spectrograms"] == 1
     assert len(list((s.path / "spectrograms").glob("*.png"))) == 1
+    # ANTSDR-only diagnostics must pass through honestly as ``None`` (not
+    # silently dropped) on a sim source, so session.json is diagnosable
+    # offline for every backend without a fixed/incomplete key set.
+    for entry in files:
+        health = entry["capture_health"]
+        for k in ("samples_deficit_recent", "readback_mismatch", "rssi_db_readback",
+                  "max_refill_gap_ms", "stream_rate_ratio_recent", "stream_rate_elapsed_s",
+                  "samples_deficit"):
+            assert k in health, k
+            assert health[k] is None, (k, health[k])
 
 
 def test_replay_matches_original(session):

@@ -368,13 +368,15 @@ def test_tune_updates_lo_and_flushes(monkeypatch):
 
 # --- rate warning ---------------------------------------------------------------
 
-def _fake_info(src, *, ratio=1.0, ratio_recent=None, elapsed_s=15.0, samples_deficit=0):
+def _fake_info(src, *, ratio=1.0, ratio_recent=None, elapsed_s=15.0, samples_deficit=0,
+                samples_deficit_recent=0):
     return {
         "captured_at": 0.0, "center_freq_hz": src._center_hz, "complete": True,
         "dropped_samples": None, "overflow_count": 0, "gap_before_samples": 0,
         "short_reads": 0, "stream_rate_ratio": ratio,
         "stream_rate_ratio_recent": ratio_recent if ratio_recent is not None else ratio,
         "stream_rate_elapsed_s": elapsed_s, "samples_deficit": samples_deficit,
+        "samples_deficit_recent": samples_deficit_recent,
         "loss_detection": "inferred_rate_only",
         "channel_id": 0, "bandwidth_hz": src.rf_bandwidth, "timing": {},
     }
@@ -431,19 +433,43 @@ def test_no_rate_warning_at_full_rate(monkeypatch):
         src.close()
 
 
-def test_rate_warning_recent_fires_regardless_of_cumulative(monkeypatch):
+def test_rate_warning_recent_fires_when_backed_by_a_real_deficit(monkeypatch):
     """A healthy cumulative average can hide a fresh stall/burst of loss --
     the recent (trailing-window) threshold has no warm-up gate specifically
-    to catch this."""
+    to catch this -- but ONLY when the dip is backed by an actual recent
+    sample deficit, not on ratio alone."""
     src = _make_source(monkeypatch)
     try:
         n = int(src.sample_rate * src.window_seconds)
         fake_iq = np.zeros(n, dtype=np.complex64)
-        fake_info = _fake_info(src, ratio=0.999, ratio_recent=0.5, elapsed_s=120.0)
+        fake_info = _fake_info(src, ratio=0.999, ratio_recent=0.5, elapsed_s=120.0,
+                                samples_deficit_recent=int(0.5 * n))
         monkeypatch.setattr(src._asm, "read_window", lambda *a, **kw: (fake_iq, fake_info))
         win = next(src.windows())
         assert win.metadata["rate_warning"] is True
         assert win.metadata["stream_rate_ratio_recent"] == 0.5
+    finally:
+        src.close()
+
+
+def test_no_rate_warning_recent_dip_without_deficit():
+    pass  # placeholder removed below; see test_no_rate_warning_recent_dip_with_zero_deficit
+
+
+def test_no_rate_warning_recent_dip_with_zero_deficit(monkeypatch):
+    """A noisy recent-ratio dip with NO accompanying sample deficit (jitter,
+    not loss) must never warn -- this is the exact root cause of the
+    2026-09-18 soak-test false positives (487/599 windows warned with
+    samples_deficit effectively 0/unreported)."""
+    src = _make_source(monkeypatch)
+    try:
+        n = int(src.sample_rate * src.window_seconds)
+        fake_iq = np.zeros(n, dtype=np.complex64)
+        fake_info = _fake_info(src, ratio=1.0004, ratio_recent=0.90, elapsed_s=120.0,
+                                samples_deficit_recent=0)
+        monkeypatch.setattr(src._asm, "read_window", lambda *a, **kw: (fake_iq, fake_info))
+        win = next(src.windows())
+        assert win.metadata["rate_warning"] is False
     finally:
         src.close()
 
@@ -455,7 +481,25 @@ def test_no_rate_warning_just_above_thresholds(monkeypatch):
     try:
         n = int(src.sample_rate * src.window_seconds)
         fake_iq = np.zeros(n, dtype=np.complex64)
-        fake_info = _fake_info(src, ratio=0.996, ratio_recent=0.981, elapsed_s=15.0)
+        fake_info = _fake_info(src, ratio=0.996, ratio_recent=0.971, elapsed_s=15.0,
+                                samples_deficit_recent=int(0.01 * n))
+        monkeypatch.setattr(src._asm, "read_window", lambda *a, **kw: (fake_iq, fake_info))
+        win = next(src.windows())
+        assert win.metadata["rate_warning"] is False
+    finally:
+        src.close()
+
+
+def test_rate_warning_recent_deficit_just_below_frac_threshold_does_not_warn(monkeypatch):
+    """The recent ratio is below threshold AND there is SOME deficit, but it's
+    under RATE_WARNING_RECENT_DEFICIT_FRAC (0.5%) of one window's samples --
+    must not warn (boundary check for the deficit-fraction gate itself)."""
+    src = _make_source(monkeypatch)
+    try:
+        n = int(src.sample_rate * src.window_seconds)
+        fake_iq = np.zeros(n, dtype=np.complex64)
+        fake_info = _fake_info(src, ratio=0.999, ratio_recent=0.5, elapsed_s=120.0,
+                                samples_deficit_recent=int(0.004 * n))
         monkeypatch.setattr(src._asm, "read_window", lambda *a, **kw: (fake_iq, fake_info))
         win = next(src.windows())
         assert win.metadata["rate_warning"] is False

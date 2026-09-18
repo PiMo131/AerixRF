@@ -125,10 +125,24 @@ class IQWindow:
             "overflow_count": int(self.metadata.get("overflow_count", 0)),
             "gap_before_samples": int(self.metadata.get("gap_before_samples", 0)),
             "stream_rate_ratio": self.metadata.get("stream_rate_ratio"),
+            # Both honestly ``None`` (not fabricated 0/1.0) on backends that
+            # don't populate ``metadata`` with these keys (e.g. sim, file
+            # replay, HackRF) -- previously missing entirely from every
+            # session.json/detections.jsonl record on every backend, incl.
+            # ANTSDR where they ARE always populated (see stream.py).
+            "stream_rate_ratio_recent": self.metadata.get("stream_rate_ratio_recent"),
+            "stream_rate_elapsed_s": self.metadata.get("stream_rate_elapsed_s"),
+            "samples_deficit": self.metadata.get("samples_deficit"),
+            "samples_deficit_recent": self.metadata.get("samples_deficit_recent"),
             "rate_warning": bool(self.metadata.get("rate_warning", False)),
             "loss_detection": self.metadata.get("loss_detection"),
             "capture_complete": bool(self.complete),
             "source_backend": self.receiver_type,
+            # ANTSDR-only diagnostics (see antsdr_iio.py); honestly ``None``
+            # on backends (sim/HackRF/file) that never populate these keys.
+            "readback_mismatch": self.metadata.get("readback_mismatch"),
+            "rssi_db_readback": self.metadata.get("rssi_db_readback"),
+            "max_refill_gap_ms": self.metadata.get("max_refill_gap_ms"),
         }
 
 

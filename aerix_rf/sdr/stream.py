@@ -50,7 +50,17 @@ log = logging.getLogger("aerix.rf.sdr.stream")
 _DEFAULT_QUEUE_MAX_S = 2.0
 _DEFAULT_CHUNK_SAMPLES_HINT = 131072   # only used to size the queue depth
 _RAW_UNITS_PER_SAMPLE = 2              # interleaved I,Q -> 2 raw elements/sample
-_DEFAULT_RATE_WINDOW_S = 5.0           # ``stream_rate_ratio`` trailing-window width
+_DEFAULT_RATE_WINDOW_S = 10.0          # ``stream_rate_ratio_recent`` trailing-window
+                                        # width. Must be several multiples of a
+                                        # realistic chunk cadence (~85ms at the
+                                        # default ANTSDR profile) so ordinary OS
+                                        # scheduling jitter on a handful of chunks
+                                        # can't swing the ratio by itself -- a 5s
+                                        # window (the previous default) false-fired
+                                        # ``rate_warning`` on 487/599 windows of a
+                                        # real loss-free 600s soak (see
+                                        # docs/design/antsdr-backend.md "Measured
+                                        # host-path throughput (2026-09-18)").
 
 
 @dataclass
@@ -362,15 +372,27 @@ class StreamAssembler:
                 ratio = 1.0
                 samples_deficit = 0
 
+        # ``samples_deficit_recent``: the (honest, non-negative) sample deficit
+        # accrued strictly WITHIN the trailing ``rate_window_s`` baseline, as
+        # opposed to ``samples_deficit`` which is since the first pushed chunk.
+        # A caller combines this with ``ratio_recent`` to distinguish "the
+        # recent ratio dipped because of ordinary chunk-timing/GC jitter with
+        # zero real samples lost" (deficit ~0) from "the recent ratio dipped
+        # because the stream is actually behind" (deficit > 0) -- see
+        # docs/design/antsdr-backend.md "Measured host-path throughput
+        # (2026-09-18)".
         if first_push_ts is None:
             ratio_recent = 1.0
+            samples_deficit_recent = 0
         elif baseline is not None and (now - baseline[0]) > 0.5:
             baseline_ts, baseline_samples = baseline
             recent_elapsed = now - baseline_ts
             recent_pushed = pushed_samples - baseline_samples
             ratio_recent = recent_pushed / (recent_elapsed * self.sample_rate)
+            samples_deficit_recent = max(0, int(round(recent_elapsed * self.sample_rate - recent_pushed)))
         else:
             ratio_recent = ratio
+            samples_deficit_recent = max(0, samples_deficit)
 
         timing: dict[str, Any] = {"clock_source": "host_wallclock",
                                   "sample_index": self._running_sample_index}
@@ -390,6 +412,7 @@ class StreamAssembler:
             "stream_rate_ratio_recent": round(float(ratio_recent), 4),
             "stream_rate_elapsed_s": round(float(elapsed), 3),
             "samples_deficit": int(samples_deficit),
+            "samples_deficit_recent": int(samples_deficit_recent),
             "loss_detection": loss_detection,
             "channel_id": self.channel_id,
             "bandwidth_hz": self.bandwidth_hz,

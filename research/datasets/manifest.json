@@ -90,7 +90,7 @@
       "labels_available": "individual airframe identity (not just model) - designed for RF fingerprinting/individual drone ID, not just type classification",
       "intended_aerix_use": "HIGH VALUE for individual-emitter RF fingerprinting research (distinct from model classification); also usable for detection since raw IQ at 2.4-2.48GHz",
       "preprocessing_status": "download in progress, not extracted",
-      "notes": "IMPORTANT: aria2c 'prealloc' file allocation reserves full 63.6GiB on disk immediately at download start, so `du -sh` reports the FULL size even when actual transferred bytes are near zero - use status.sh (parses aria2c log %) not du to judge true progress. As of last check: 0% per aria2c own progress counter, ETA ~2.5-4h at ~6-7 MiB/s from china.scidb.cn. Single aria2c process (PID logged in dronerfb_dir_download.log) running detached via setsid, confirmed alive at start of this session. ADDED 2026-09-18: folder layout decision - canonical local path is dataset_id 'dronerfb_dir' (relative to AERIX_RF_DATASET_ROOT). Download still in progress into display-named ~/rf-datasets/DroneRFb-DIR/ - DO NOT move/rename until aria2c finishes (was at 31% / ~19GiB of 63GiB as of 2026-09-18 07:29 check). Move original/ -> dronerfb_dir/original/ + symlink DroneRFb-DIR -> dronerfb_dir once complete, matching pattern used for dronerf, dronerfa, rub_dronesecurity, zenodo_drone_rf_video_2020.",
+      "notes": "IMPORTANT: aria2c 'prealloc' file allocation reserves full 63.6GiB on disk immediately at download start, so `du -sh` reports the FULL size even when actual transferred bytes are near zero - use status.sh (parses aria2c log %) not du to judge true progress. As of last check: 0% per aria2c own progress counter, ETA ~2.5-4h at ~6-7 MiB/s from china.scidb.cn. Single aria2c process (PID logged in dronerfb_dir_download.log) running detached via setsid, confirmed alive at start of this session. ADDED 2026-09-18: folder layout decision - canonical local path is dataset_id 'dronerfb_dir' (relative to AERIX_RF_DATASET_ROOT). Download still in progress into display-named ~/rf-datasets/DroneRFb-DIR/ - DO NOT move/rename until aria2c finishes (was at 31% / ~19GiB of 63GiB as of 2026-09-18 07:29 check). Move original/ -> dronerfb_dir/original/ + symlink DroneRFb-DIR -> dronerfb_dir once complete, matching pattern used for dronerf, dronerfa, rub_dronesecurity, zenodo_drone_rf_video_2020. INCIDENT 2026-09-18 ~10:42 EDT: aria2c process had fully exited (not just stalled) since ~07:56 EDT (~2h46m gap) due to DNS resolution failure for china.scidb.cn (errorCode=19, all 6 connections). Restarted with the same resumable command (-c, same --out/--dir, china.scidb.cn now resolves again) from ~/rf-datasets/DroneRFb-DIR/original/ - confirmed resuming cleanly from ~22GiB/63GiB (35%), new PID 273435, ~3-4 MiB/s throughput, ETA ~3h. Partial .zip file (already prealloc'd to full 63.6GB, see prealloc gotcha note) was left untouched.",
       "local_path": "dronerfb_dir"
     },
     {
@@ -493,8 +493,8 @@
       "access_status": "local",
       "download_status": "complete",
       "size_expected": "n/a (local capture, not a download)",
-      "size_downloaded": "~13 GB (271 IQ files verified, 6 sessions; one session's IQ was deleted pre-preservation, metadata only)",
-      "checksum_status": "verified: 271/271 present IQ files SHA-256-matched against per-file sha256 in each session's session.json, 0 mismatches",
+      "size_downloaded": "~41 GB (870 IQ files verified across 8 sessions with IQ; one session's IQ was deleted pre-preservation, metadata only; includes 2 sweep baseline .npz files, unchecksummed)",
+      "checksum_status": "verified: 870/870 present IQ files SHA-256-matched against per-file sha256 in each session's session.json, 0 mismatches (271 in first preservation pass + 599 in 2026-09-18 afternoon soak600_k32_4m_iq pass); soak600_default_noiq has 0 IQ files by design; sweep .npz baselines unchecksummed (no per-file hash recorded at capture time)",
       "signal_format": "AERIX session schema v2, cs16 (one session cs8 - flagged), full-scale 2048, IQ files under <session>/iq/*.cs16 or *.cs8, per-window metadata + capture_health in session.json files[]",
       "sample_rate": "12.288 MS/s",
       "center_frequency_bands": "2.4 GHz ISM, center 2437 MHz, rf_bw 10 MHz",
@@ -502,13 +502,13 @@
       "drone_models": "none (no drone present - operator ground truth)",
       "controller_models": "none",
       "background_interference_classes": "Wi-Fi-dominated 2.4 GHz ISM ambient (indoor dev bench)",
-      "operating_modes": "ambient/idle only; smoke test, t4b1 check, two 10-min soak tests (~5% known sample loss), two 60s probes",
+      "operating_modes": "ambient/idle only; smoke test, t4b1 check, two prior 10-min soak tests (~5% known sample loss), two 60s probes, two new 10-min soak600 tests (default vs k32/4M buffer config, both loss-free by ground truth per capture_health), plus 2.4/5.8GHz sweep baselines",
       "recording_hardware": "ANTSDR E200 (AD9361), IIO firmware v0.34-dirty, manual gain 40 dB, antenna unknown/stock",
       "environment": "indoor dev bench (no address recorded)",
       "labels_available": "operator ground truth 'no drone present' (session-level negative label); Stage-1 morphology/detection labels in each session's detections.jsonl (RF-candidate level only, not protocol-confirmed)",
       "intended_aerix_use": "Tier-D negative-class hold-out + receiver-ID probe",
       "preprocessing_status": "raw session directories only (as produced by AERIX capture pipeline); not converted to a separate prepared/ format",
-      "notes": "Only Tier-D (real-receiver negative-class) dataset AERIX currently has. Preserved 2026-09-18 from an ephemeral session-scoped scratchpad directory that would otherwise have been lost; see SOURCE.md for full per-session breakdown, the cs8-vs-cs16 smoke-test format flag, and the known ~5% sample-loss issue on the 600s soak runs. Do not describe any Stage-1 detection in this set as a confirmed drone - ground truth is 'no drone present' for every session.",
+      "notes": "Only Tier-D (real-receiver negative-class) dataset AERIX currently has. Preserved 2026-09-18 from an ephemeral session-scoped scratchpad directory that would otherwise have been lost; see SOURCE.md for full per-session breakdown, the cs8-vs-cs16 smoke-test format flag, and the known ~5% sample-loss issue on the two earlier 600s soak runs. Afternoon 2026-09-18 pass added soak600_default_noiq and soak600_k32_4m_iq (both loss-free by ground truth, both include a receiver_readback block confirming live AD9361 config: gain 40dB manual, rf_bandwidth 10MHz, 12.288 MS/s, LO ~2437MHz, port A_BALANCED) plus sweep baselines (sweeps_2026_09_18/base_24.npz, base_58.npz). Do not describe any Stage-1 detection in this set as a confirmed drone - ground truth is 'no drone present' for every session.",
       "local_path": "aerix_antsdr_ambient_2026_09_18"
     }
   ]

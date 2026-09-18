@@ -116,15 +116,19 @@ def _rate_ratio_from_notes(sc: WindowSidecar) -> float | None:
     return float(m.group(1)) if m else None
 
 
-def _typed_deficits(sc: WindowSidecar) -> tuple[float | None, float | None]:
-    """``(window_deficit_frac, session samples_deficit)`` from typed sidecar
-    fields if present (forward-compat with a builder adding
-    ``receiver.window_deficit_frac`` / ``receiver.samples_deficit``); else
-    ``(None, None)`` -- callers fall back to the ``notes`` rule below."""
-    recv = getattr(sc, "receiver", None)
-    if recv is None:
-        return None, None
-    return getattr(recv, "window_deficit_frac", None), getattr(recv, "samples_deficit", None)
+def _typed_deficits(sc: WindowSidecar) -> tuple[float | None, float | None, bool | None]:
+    """``(window_deficit_frac, session_deficit_frac, capture_complete)`` from
+    the typed ``sc.signal`` fields (``aerix_rf/datasets/spec.py``
+    ``SignalInfo``); ``(None, None, None)`` if ``sc.signal`` is absent --
+    callers fall back to the ``notes`` rule below."""
+    sig = getattr(sc, "signal", None)
+    if sig is None:
+        return None, None, None
+    return (
+        getattr(sig, "window_deficit_frac", None),
+        getattr(sig, "session_deficit_frac", None),
+        getattr(sig, "capture_complete", None),
+    )
 
 
 def _session_rate_ratio_medians(dataset_id: str, root: Path) -> dict[str, float]:
@@ -139,18 +143,21 @@ def _session_rate_ratio_medians(dataset_id: str, root: Path) -> dict[str, float]
 
 
 def _rate_deficit_reason(sc: WindowSidecar, session_ratio_medians: dict[str, float]) -> str | None:
-    """Exclusion reason string, or ``None`` to keep the row. Prefers typed
-    ``receiver.window_deficit_frac`` / ``receiver.samples_deficit`` if
-    present (window > 1e-3 or session > 1e-2 excludes); else falls back to
-    the session-level (``run_id``) median ``stream_rate_ratio`` from
+    """Exclusion reason string, or ``None`` to keep the row. Prefers the
+    typed ``sc.signal.window_deficit_frac`` / ``sc.signal.session_deficit_frac``
+    / ``sc.signal.capture_complete`` fields if present (window > 1e-3 or
+    session > 1e-2 or ``capture_complete is False`` excludes); else falls
+    back to the session-level (``run_id``) median ``stream_rate_ratio`` from
     ``notes`` (< 0.95 excludes -- a real session-wide deficit, not a
     spurious per-window rate estimate)."""
-    window_d, session_d = _typed_deficits(sc)
-    if window_d is not None or session_d is not None:
+    window_d, session_d, capture_complete = _typed_deficits(sc)
+    if window_d is not None or session_d is not None or capture_complete is not None:
         if window_d is not None and window_d > 1e-3:
             return "window_samples_deficit"
         if session_d is not None and session_d > 1e-2:
             return "session_samples_deficit"
+        if capture_complete is False:
+            return "capture_incomplete"
         return None
     median = session_ratio_medians.get(sc.identity.run_id)
     if median is not None and median < SESSION_RATE_RATIO_MIN:

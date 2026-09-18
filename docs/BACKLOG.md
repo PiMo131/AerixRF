@@ -62,6 +62,12 @@ and independent review before it is "done". Evidence-wording rules apply.
 - [ ] Locate data hosts for CageDroneRF and UAVSig.
 
 ## Receiver / sessions
+- [ ] `samples_deficit` can go negative on a loss-free run (−665 k samples over 60 s ≈ device clock 0.09 %
+      fast relative to host wall clock). Decide: keep signed (honest) but document; consider estimating the
+      clock offset from the first N seconds and reporting `deficit_vs_measured_rate`. (2026-09-18 live check:
+      60 windows, 0 warnings, recent ratio 0.979–0.999, max refill gap 4.2 ms.)
+- [x] (done 2026-09-18) `rate_warning` false alarms: rule now requires cumulative < 0.995 after 10 s OR
+      (recent < 0.97 AND real deficit growth); all diagnostic health keys persisted in sessions.
 - [x] (done 2026-09-18) Device read-back state recorded per session (`receiver_readback`, per-file
       `readback_mismatch`); typed `window_deficit_frac`/`session_deficit_frac` in sidecars.
 - [x] (done 2026-09-18) Clean 10-min soak: 600/600 windows, idle host, default buffers, no IQ.
