@@ -206,6 +206,57 @@ def test_file_capabilities_none_in_registry():
     assert reg.REGISTRY["file"].capabilities is None
 
 
+# --- timestamp_quality / loss_counter_available (multi-receiver/TDOA gate) ----
+
+def test_timestamp_quality_and_loss_counter_static_values():
+    caps = {name: reg.REGISTRY[name].capabilities
+            for name in ("libhackrf", "hackrf_transfer", "soapy", "sim")}
+    assert (caps["libhackrf"].timestamp_quality, caps["libhackrf"].loss_counter_available) \
+        == ("host_wallclock", True)
+    assert (caps["hackrf_transfer"].timestamp_quality, caps["hackrf_transfer"].loss_counter_available) \
+        == ("host_wallclock", False)
+    assert (caps["soapy"].timestamp_quality, caps["soapy"].loss_counter_available) \
+        == ("host_wallclock", True)
+    assert (caps["sim"].timestamp_quality, caps["sim"].loss_counter_available) \
+        == ("device_counter", True)
+
+
+def test_antsdr_iio_timestamp_quality_and_loss_counter():
+    from aerix_rf.sdr.antsdr_iio import antsdr_iio_capabilities
+    caps = antsdr_iio_capabilities()
+    assert caps.timestamp_quality == "host_wallclock"
+    assert caps.loss_counter_available is False
+
+
+def test_supports_multi_receiver_timing():
+    assert reg.REGISTRY["sim"].capabilities.supports_multi_receiver_timing() is True
+    assert reg.REGISTRY["libhackrf"].capabilities.supports_multi_receiver_timing() is False
+    from aerix_rf.sdr.antsdr_iio import antsdr_iio_capabilities
+    assert antsdr_iio_capabilities().supports_multi_receiver_timing() is False
+
+
+def test_file_capabilities_loss_counter_from_session_meta():
+    from aerix_rf.sdr.capture import FileIQSource
+    from aerix_rf.config import Config
+    import numpy as np
+    import tempfile
+
+    cfg = Config(sim=False, iq_file="")
+    with tempfile.NamedTemporaryFile(suffix=".cs8") as f:
+        f.write(np.zeros(8, dtype=np.int8).tobytes())
+        f.flush()
+        src_exact = FileIQSource(cfg, path=f.name, meta={"loss_detection": "exact"})
+        caps_exact = src_exact.capabilities
+        assert caps_exact.timestamp_quality == "host_wallclock"
+        assert caps_exact.loss_counter_available is True
+
+        src_inferred = FileIQSource(cfg, path=f.name, meta={"loss_detection": "inferred_rate_only"})
+        assert src_inferred.capabilities.loss_counter_available is False
+
+        src_none = FileIQSource(cfg, path=f.name, meta={})
+        assert src_none.capabilities.loss_counter_available is False
+
+
 # --- aerix-rf info: never raises on a host with no attached devices ------------
 
 def test_cmd_info_never_raises_with_no_devices(monkeypatch):

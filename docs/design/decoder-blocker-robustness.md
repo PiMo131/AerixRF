@@ -121,3 +121,45 @@ Acceptance:
   level 4, not re-argued from the synthetic bench.
 - Time-disjoint Wi-Fi/RC bursts are unmodelled; the peel is per-slice so it should be neutral, but
   that is an assumption, not a measurement.
+
+## § Failure split (2026-09-18)
+
+Question (Fable gate): at the `B_wb_blocker` knee, does the decode fail at candidate detection or at
+sync/decode? Method: 40 windows per SNR, bench helpers `_make_master_burst` / `_resample_arm` /
+`_add_wb_blocker`; `decode_all` instrumented externally (wrappers on `_rank_candidates`,
+`_centre_hypotheses`, `_demodulate`) plus an unbudgeted forced-centre probe (mix 0 Hz = ground-truth
+burst centre, same slice, same FIR, same front end). Script: scratchpad `failure_split.py` (not committed).
+
+| arm | SNR | success | no_correct_hyp | budget_exh | wrong_centre_early_sync | sync_fail@correct | crc_fail@correct |
+|---|---|---|---|---|---|---|---|
+| B_wb_blocker | 10 | 18 | 12 | 0 | 8 | 2 | 0 |
+| B_wb_blocker | 12 | 19 | 8 | 0 | 11 | 1 | 1 |
+| B_wb_blocker | 14 | 21 | 10 | 0 | 6 | 3 | 0 |
+| clean B_canonical | 4 | 35 | 0 | 0 | 0 | 0 | 5 |
+| clean B_canonical | 5 | 38 | 0 | 0 | 0 | 0 | 2 |
+| clean B_canonical | 6 | 37 | 0 | 0 | 0 | 0 | 3 |
+
+Conclusion: detection dominates. With the blocker present, the forced-centre probe decodes the serial in
+119/120 windows at 10/12/14 dB, i.e. the FIR + ZC/CFO/turbo chain already has the SNR headroom; the 15.4 dB
+SNR50_final is a centre-hypothesis artifact, not a sync-robustness limit. Two distinct mechanisms:
+1. Centre-estimate bias (30/120). The blocker skirt truncates the upper edge of the grown band, so the
+   peel centre lands at -0.1…-0.4 MHz instead of 0. `_centre_hypotheses` then suppresses the 0.0 fallback
+   (`PEEL_DEDUP_HZ = 0.5e6`), so the true centre is never offered. Where |h| > K*15 kHz = 60 kHz the slice
+   is mixed by the biased amount, leaving a 4.5-6.5 subcarrier residual: ZC4 gate still fires (0.84-0.97,
+   shift ambiguity) but zc6 confirm collapses (0.01-0.03) -> level "A", the 6 `sync_fail@correct` rows.
+2. Wrong-centre early exit (25/120). Hypothesis 0 at -0.5…-1.7 MHz reaches level "A" and breaks the loop
+   before hypothesis 1 (the true 0.0 centre) is tried. The loop breaks on `level != "none"`, and the ZC4
+   gate is not frequency-selective enough to reject a 1.7 MHz centre error.
+Budget was never the cause (0/120): 8 candidates/window is not where the time goes.
+Clean-arm baseline failure mode is different and expected: every failure is CRC/turbo at the correct
+centre (forced probe also fails, zc6 0.50-0.73) — i.e. genuine low-SNR decode, not detection.
+
+Implication: per-subband envelope / hypothesis ordering work is justified; the FIR and the CFO estimator
+should not be redesigned for this arm. Cheapest fixes, in order: (a) only break the hypothesis loop on
+level "B", keeping the best "A" for reporting; (b) make the DC/true-centre fallback survive dedup (append
+unless a kept centre is within ~60 kHz, not 500 kHz); (c) de-bias the occupied-band edge estimate when an
+adjacent band was peeled, or add a fine +-100 kHz centre refinement before demod.
+
+Caveats: the forced probe mixes to the known true centre, so it is an upper bound on achievable
+performance, not a proposed algorithm; a real receiver still has to estimate that centre. Single synthetic
+blocker geometry (+20 dB, +4.5…+8.5 MHz, time-coincident); no stored-IQ or live confirmation yet.

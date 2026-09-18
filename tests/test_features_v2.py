@@ -365,6 +365,150 @@ def g6_of(result, names, name):
     return float(result.vector[names.index(name)])
 
 
+# ---------------------------------------------------------------------------
+# Fable review follow-up (docs/design/features-and-benchmark.md S1.6 Q2):
+# where does the G6 window-internal spectral floor (deg-2 polyfit over the
+# quietest 30% of in-band bins) actually break as band occupancy approaches
+# and exceeds the ~70% design limit? Analog FPV video at 5.8 GHz is a
+# continuous (duty 1.0) 6-8 MHz FM-like emitter in a 10 MHz usable dwell,
+# i.e. 60-80% occupancy -- exactly at the documented boundary.
+# ---------------------------------------------------------------------------
+
+
+def _g6_metrics(result, names):
+    def v(name):
+        return float(result.vector[names.index(name)])
+    return {
+        "occ_frac_6db": v("g6_occ_frac_6db"),
+        "persistent_bw_hz": v("g6_persistent_bw_hz"),
+        "widest_cluster_hz": v("g6_widest_cluster_hz"),
+        "level_p50_db": v("g6_level_p50_db"),
+        "floor_delta_db": v("g6_floor_delta_db"),
+        "frac_time_occupied": v("g6_frac_time_occupied"),
+    }
+
+
+def test_g6_fpv_occupancy_sweep_4_6_7_8_9mhz():
+    """G6 boundary sweep for continuous (duty 1.0), +25 dB, band-centred
+    flat emitters at 4/6/7/8/9 MHz width in the 10.005 MHz common band
+    (40/60/70/80/90% occupancy).
+
+    Documented behaviour (docs/design/features-and-benchmark.md S1.6 Q2,
+    "above ~70% occupancy the spectral floor degrades"):
+      - 4, 6 MHz (<=70% occ): G6 tracks width/level accurately.
+      - 8 MHz (80% occ): boundary case -- still reliably flagged PERSISTENT
+        (frac_time_occupied >= 0.9, occ_frac_6db >= 0.3) but width/level
+        readout is expected to degrade; degradation is recorded, not
+        asserted tightly.
+      - 9 MHz (90% occ): known limit -- the quietest-30%-of-bins reference
+        set for the deg-2 polyfit is itself partly inside the emitter, so
+        nfs_k is biased upward and G6 occupancy/level readout is unreliable.
+        Only finiteness is asserted here; this is a documented limitation,
+        not a bug to fix in this task.
+    """
+    widths_hz = [4.0e6, 6.0e6, 7.0e6, 8.0e6, 9.0e6]
+    rows = []
+    for i, width_hz in enumerate(widths_hz):
+        rng = np.random.default_rng(300 + i)
+        n_ms = 1000
+        base = _base_tensor(rng, n_ms)
+        emitter = _add_band(base, center_hz=0.0, width_hz=width_hz,
+                            level_above_floor_db=25.0, duty=1.0)
+        result = extract_features_v2(emitter, None, FS)
+        names = list(result.names)
+        m = _g6_metrics(result, names)
+        centre = float(result.vector[names.index("g1_sb32_median")])
+        edge = float(result.vector[names.index("g1_sb00_median")])
+        rows.append((width_hz, m, centre, edge))
+
+    table = "\n".join(
+        f"  width={w/1e6:.0f}MHz occ6={m['occ_frac_6db']:.3f} "
+        f"persistent_bw={m['persistent_bw_hz']/1e6:.2f}MHz "
+        f"widest_cluster={m['widest_cluster_hz']/1e6:.2f}MHz "
+        f"level_p50={m['level_p50_db']:.1f}dB "
+        f"floor_delta={m['floor_delta_db']:.1f}dB "
+        f"frac_time={m['frac_time_occupied']:.2f} "
+        f"g1_centre={c:.1f}dB g1_edge={e:.1f}dB"
+        for w, m, c, e in rows
+    )
+
+    assert np.all(np.isfinite(result.vector)), f"non-finite feature at 9 MHz\n{table}"
+
+    for width_hz, m, centre, edge in rows:
+        if width_hz in (4.0e6, 6.0e6):
+            expected_occ = width_hz / 10.0e6
+            assert abs(m["occ_frac_6db"] - expected_occ) <= 0.05, (
+                f"width {width_hz/1e6} MHz occ6 {m['occ_frac_6db']} not within "
+                f"0.05 of {expected_occ}\n{table}"
+            )
+            assert abs(m["persistent_bw_hz"] - width_hz) <= 0.5e6, (
+                f"width {width_hz/1e6} MHz persistent_bw {m['persistent_bw_hz']} "
+                f"not within 0.5 MHz\n{table}"
+            )
+            assert abs(m["level_p50_db"] - 25.0) <= 2.0, (
+                f"width {width_hz/1e6} MHz level_p50 {m['level_p50_db']} not "
+                f"within 2 dB of 25\n{table}"
+            )
+        elif width_hz == 8.0e6:
+            # Boundary case: still reliably detected as PERSISTENT, but
+            # width/level readout is not held to the tight <=70% tolerance
+            # above -- that degradation is exactly what this test records.
+            assert m["frac_time_occupied"] >= 0.9, (
+                f"8 MHz (80% occ) not read as persistent: "
+                f"frac_time_occupied {m['frac_time_occupied']}\n{table}"
+            )
+            assert m["occ_frac_6db"] >= 0.3, (
+                f"8 MHz (80% occ) occ_frac_6db {m['occ_frac_6db']} below 0.3 "
+                f"floor-detection threshold\n{table}"
+            )
+        elif width_hz == 9.0e6:
+            # Known limit (S1.6 Q2): no behavioural assertion beyond
+            # finiteness -- see docstring and table above for the recorded
+            # degradation.
+            assert np.isfinite(m["occ_frac_6db"]) and np.isfinite(m["level_p50_db"]), (
+                f"9 MHz (90% occ) produced non-finite G6 output\n{table}"
+            )
+
+    print("\nG6 occupancy sweep (4/6/7/8/9 MHz, duty=1.0, +25dB):\n" + table)
+
+
+def test_g6_boundary_8mhz_gain_tilt_invariance():
+    """At the 80%-occupancy boundary (8 MHz / 10.005 MHz band), G6 gain
+    invariance still holds tightly, but tilt invariance does NOT: this is
+    part of the same S1.6 Q2 boundary degradation as
+    test_g6_fpv_occupancy_sweep_4_6_7_8_9mhz, not a separate bug. At 80%
+    occupancy the quietest-30%-of-in-band-bins reference set for the G6
+    deg-2 polyfit is itself partly emitter-contaminated, so a +-3 dB linear
+    tilt measurably shifts nfs_k and the derived Hz-valued readouts (a
+    swing of ~0.7 MHz persistent_bw_hz / ~0.3 MHz widest_cluster_hz /
+    ~0.4-0.5 MHz centroid_hz / ~2 dB level was measured here). The gain
+    check is asserted tightly since it must never regress; the tilt check
+    only records the swing (documented limit, not asserted tight)."""
+    rng = np.random.default_rng(310)
+    n_ms = 1000
+    base = _base_tensor(rng, n_ms)
+    emitter = _add_band(base, center_hz=0.0, width_hz=8.0e6,
+                        level_above_floor_db=25.0, duty=1.0)
+    r = extract_features_v2(emitter, None, FS)
+    names = list(r.names)
+    g6_names = names[G6_SLICE]
+
+    r_boost = extract_features_v2(emitter + 20.0, None, FS)
+    diff_boost = np.abs(r.vector[G6_SLICE].astype(np.float64) - r_boost.vector[G6_SLICE].astype(np.float64))
+    assert np.max(diff_boost) < 1e-3, f"8 MHz G6 not gain-invariant: max diff {np.max(diff_boost)}"
+
+    for tilt_db in (3.0, -3.0):
+        tilt = tilt_db * (_FULL_FREQS / _FULL_FREQS.max())
+        tilted = emitter + tilt[None, :].astype(np.float32)
+        r_tilt = extract_features_v2(tilted, None, FS)
+        diff_tilt = r.vector[G6_SLICE].astype(np.float64) - r_tilt.vector[G6_SLICE].astype(np.float64)
+        assert np.all(np.isfinite(diff_tilt)), (
+            f"8 MHz G6 tilt diff non-finite at {tilt_db} dB: "
+            f"{dict(zip(g6_names, diff_tilt))}"
+        )
+        print(f"\n8 MHz G6 tilt={tilt_db:+.0f}dB diff: {dict(zip(g6_names, diff_tilt))}")
+
+
 def test_noise_scale_self_normalisation():
     """S1.6 Q4: g5_flux_*, the per-sub-band (p90-p50) spread, and G1's p99
     column are self-normalised against the 32 quietest sub-bands. Design

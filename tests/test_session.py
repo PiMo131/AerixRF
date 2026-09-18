@@ -120,9 +120,12 @@ def test_session_json_layout(session):
         health = entry["capture_health"]
         for k in ("samples_deficit_recent", "readback_mismatch", "rssi_db_readback",
                   "max_refill_gap_ms", "stream_rate_ratio_recent", "stream_rate_elapsed_s",
-                  "samples_deficit"):
+                  "samples_deficit", "clip_fraction", "peak_abs_frac"):
             assert k in health, k
             assert health[k] is None, (k, health[k])
+        # clip_warning defaults honestly False (not None) -- a sim source never
+        # clips, but the key must still be present and boolean.
+        assert health["clip_warning"] is False
 
 
 def test_replay_matches_original(session):

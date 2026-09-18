@@ -50,6 +50,38 @@ log = logging.getLogger("aerix.rf.sdr.stream")
 _DEFAULT_QUEUE_MAX_S = 2.0
 _DEFAULT_CHUNK_SAMPLES_HINT = 131072   # only used to size the queue depth
 _RAW_UNITS_PER_SAMPLE = 2              # interleaved I,Q -> 2 raw elements/sample
+
+CLIP_WARNING_FRACTION = 1e-4           # clip_fraction above this trips clip_warning.
+                                        # At the default ANTSDR profile (12.288e6
+                                        # samples/window) that is >1229 clipped
+                                        # samples in one window -- not a single
+                                        # stray outlier, real sustained clipping.
+
+
+def raw_clip_stats(raw: np.ndarray, full_scale: float) -> tuple[int, float, int]:
+    """Clip/peak stats for one interleaved raw I,Q chunk (any signed integer dtype).
+
+    Returns ``(clip_count, peak_abs, sample_count)``:
+      * ``clip_count``: complex samples where ``|I| >= full_scale - 1`` or
+        ``|Q| >= full_scale - 1`` -- one raw code below the declared full scale,
+        since a symmetric two's-complement range has no positive value AT full
+        scale (int8 tops out at +127, not +128; ANTSDR's 12-bit-in-int16 tops
+        out at +2047, not +2048).
+      * ``peak_abs``: the single largest |I| or |Q| raw magnitude in this chunk.
+      * ``sample_count``: number of complex samples in this chunk (``raw.size // 2``).
+
+    A single vectorised pass (two ``np.abs`` + two comparisons) -- cheap enough
+    to run on every pushed chunk on the producer thread; see module docstring.
+    """
+    n = raw.size // _RAW_UNITS_PER_SAMPLE
+    if n == 0:
+        return 0, 0.0, 0
+    i = np.abs(raw[0::2].astype(np.float64, copy=False))
+    q = np.abs(raw[1::2].astype(np.float64, copy=False))
+    threshold = float(full_scale) - 1.0
+    clip_count = int(np.count_nonzero((i >= threshold) | (q >= threshold)))
+    peak_abs = float(max(float(i.max()), float(q.max())))
+    return clip_count, peak_abs, n
 _DEFAULT_RATE_WINDOW_S = 10.0          # ``stream_rate_ratio_recent`` trailing-window
                                         # width. Must be several multiples of a
                                         # realistic chunk cadence (~85ms at the
@@ -71,6 +103,12 @@ class _Chunk:
     dropped_before: Optional[int]  # samples known lost immediately before this
                                     # chunk; 0 = contiguous, None = unquantifiable
     device_time_ns: Optional[int] = None
+    raw_stats: Optional[tuple[int, float, int]] = None  # (clip_count, peak_abs,
+                                    # sample_count) on the RAW ints of this chunk,
+                                    # from raw_clip_stats(); None when the
+                                    # assembler has no raw_full_scale configured
+                                    # (this producer can't/doesn't report clip
+                                    # health) -- never a fabricated 0.
 
     def sample_count(self, raw_to_iq: Optional[Callable]) -> int:
         return self.raw.size if raw_to_iq is None else self.raw.size // _RAW_UNITS_PER_SAMPLE
@@ -101,12 +139,21 @@ class StreamAssembler:
                  channel_id: int = 0,
                  bandwidth_hz: Optional[float] = None,
                  still_active: Optional[Callable[[], bool]] = None,
-                 rate_window_s: float = _DEFAULT_RATE_WINDOW_S) -> None:
+                 rate_window_s: float = _DEFAULT_RATE_WINDOW_S,
+                 raw_full_scale: Optional[float] = None) -> None:
         self.sample_rate = float(sample_rate)
         self._raw_to_iq = raw_to_iq
         self.reports_drops = bool(reports_drops)
         self.channel_id = int(channel_id)
         self.bandwidth_hz = bandwidth_hz
+        # ``raw_full_scale``: the ADC's native full-scale magnitude (128.0 for
+        # HackRF's int8, 2048.0 for ANTSDR's 12-bit-in-int16) -- see
+        # ``raw_clip_stats``. When set, every pushed chunk gets clip/peak stats
+        # computed automatically (unless the caller already supplies
+        # ``raw_stats`` explicitly to ``push()``); when ``None`` (sim/file, or
+        # any producer that never configures it), every window's
+        # clip_fraction/peak_abs_frac/clip_warning are honestly ``None``/``False``.
+        self._raw_full_scale = raw_full_scale
         self._stopped = threading.Event()
         self._still_active = still_active or (lambda: not self._stopped.is_set())
 
@@ -147,7 +194,8 @@ class StreamAssembler:
 
     # --- producer side -------------------------------------------------------
     def push(self, chunk: np.ndarray, ts: float, center_freq_hz: float, *,
-              dropped_before: Optional[int] = 0, device_time_ns: Optional[int] = None) -> None:
+              dropped_before: Optional[int] = 0, device_time_ns: Optional[int] = None,
+              raw_stats: Optional[tuple[int, float, int]] = None) -> None:
         """Hand off one chunk. Called from the producer thread; must be cheap.
 
         ``chunk`` is a ``complex64`` ndarray if this assembler has no
@@ -156,11 +204,20 @@ class StreamAssembler:
         ``dropped_before``: samples known lost immediately before this chunk
         (``0`` = contiguous with the previous one), or ``None`` if the
         producer knows a gap occurred but cannot size it.
+        ``raw_stats``: ``(clip_count, peak_abs, sample_count)`` from
+        ``raw_clip_stats(chunk, full_scale)`` if the caller already computed
+        it; otherwise, when this assembler has a ``raw_full_scale`` and
+        ``chunk`` is raw ints (``raw_to_iq`` configured), it is computed here
+        automatically. ``None`` on both counts means this window's clip
+        health is honestly unknown, never a fabricated 0.
         """
         if chunk.size == 0:
             return
+        if raw_stats is None and self._raw_full_scale is not None and self._raw_to_iq is not None:
+            raw_stats = raw_clip_stats(chunk, self._raw_full_scale)
         item = _Chunk(raw=chunk, ts=ts, center_freq_hz=float(center_freq_hz),
-                      dropped_before=dropped_before, device_time_ns=device_time_ns)
+                      dropped_before=dropped_before, device_time_ns=device_time_ns,
+                      raw_stats=raw_stats)
         with self._lock:
             if self._first_push_ts is None:
                 self._first_push_ts = ts
@@ -232,6 +289,8 @@ class StreamAssembler:
                                    else 3.0 * n_samples / self.sample_rate + 1.0)
         want = n_samples if self._raw_to_iq is None else n_samples * _RAW_UNITS_PER_SAMPLE
         parts: list[np.ndarray] = []
+        piece_stats: list[Optional[tuple[int, float, int]]] = []  # one entry per
+                                # piece in ``parts``, from that piece's ``_Chunk.raw_stats``
         have = 0
         t_first: Optional[float] = None
         center: Optional[float] = None
@@ -256,6 +315,7 @@ class StreamAssembler:
 
         if left is not None:
             parts.append(left.raw)
+            piece_stats.append(left.raw_stats)
             have = left.raw.size
             # ``left.ts`` already IS the exact first-sample host time of this
             # leftover (by construction below), not a chunk-arrival time.
@@ -291,6 +351,7 @@ class StreamAssembler:
                 else:
                     known_gap += c.dropped_before
             parts.append(c.raw)
+            piece_stats.append(c.raw_stats)
             have += c.raw.size
             last_piece = c
             last_piece_start_ts = start_ts
@@ -299,15 +360,27 @@ class StreamAssembler:
         if buf.size > want:
             overflow = buf.size - want           # raw units spilling into the next window
             raw_per_sample = 1 if self._raw_to_iq is None else _RAW_UNITS_PER_SAMPLE
+            leftover_stats: Optional[tuple[int, float, int]] = None
             if last_piece is not None and last_piece_start_ts is not None:
                 consumed = last_piece.raw.size - overflow   # raw units of last_piece kept here
                 leftover_ts = last_piece_start_ts + (consumed / raw_per_sample) / self.sample_rate
+                # The last piece straddles this window boundary: its whole-chunk
+                # ``raw_stats`` (if any) belongs partly here, partly to the
+                # leftover carried into the next window. Re-split it exactly
+                # (cheap: it's the same data already in hand, one extra pass
+                # only on this boundary chunk) rather than double-counting it
+                # in both windows or discarding it from the leftover entirely.
+                if piece_stats and piece_stats[-1] is not None and self._raw_full_scale is not None:
+                    kept_raw = last_piece.raw[:consumed]
+                    tail_raw = last_piece.raw[consumed:]
+                    piece_stats[-1] = raw_clip_stats(kept_raw, self._raw_full_scale)
+                    leftover_stats = raw_clip_stats(tail_raw, self._raw_full_scale)
             else:
                 leftover_ts = t_first or time.time()
             with self._lock:
                 self._leftover = _Chunk(raw=buf[want:].copy(), ts=leftover_ts,
                                         center_freq_hz=center or 0.0, dropped_before=0,
-                                        device_time_ns=device_time_ns)
+                                        device_time_ns=device_time_ns, raw_stats=leftover_stats)
             buf = buf[:want]
 
         iq = self._raw_to_iq(buf) if self._raw_to_iq is not None else buf
@@ -400,6 +473,32 @@ class StreamAssembler:
             timing["clock_source"] = "device"
             timing["device_time_ns"] = int(device_time_ns)
 
+        # Clip/peak health: aggregate the per-piece ``raw_stats`` collected above
+        # (see ``raw_clip_stats``). Any piece with unknown stats (``None`` --
+        # e.g. this assembler has no ``raw_full_scale``) makes the WHOLE
+        # window's clip health honestly unknown rather than partially counted.
+        clip_count_sum = 0
+        peak_abs_max = 0.0
+        raw_n_sum = 0
+        stats_known = bool(piece_stats)
+        for ps in piece_stats:
+            if ps is None:
+                stats_known = False
+                continue
+            cc, pk, ns = ps
+            clip_count_sum += cc
+            if pk > peak_abs_max:
+                peak_abs_max = pk
+            raw_n_sum += ns
+        if stats_known and raw_n_sum > 0 and self._raw_full_scale is not None:
+            clip_fraction: Optional[float] = clip_count_sum / raw_n_sum
+            peak_abs_frac: Optional[float] = peak_abs_max / self._raw_full_scale
+            clip_warning = clip_fraction > CLIP_WARNING_FRACTION
+        else:
+            clip_fraction = None
+            peak_abs_frac = None
+            clip_warning = False
+
         info = {
             "captured_at": t_first if t_first is not None else time.time(),
             "center_freq_hz": center if center is not None else 0.0,
@@ -417,5 +516,8 @@ class StreamAssembler:
             "channel_id": self.channel_id,
             "bandwidth_hz": self.bandwidth_hz,
             "timing": timing,
+            "clip_fraction": clip_fraction,
+            "peak_abs_frac": peak_abs_frac,
+            "clip_warning": bool(clip_warning),
         }
         return iq, info

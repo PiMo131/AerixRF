@@ -5,13 +5,18 @@
       "drone_height": 141.0,
       "drone_lat": 51.446356038552615,
       "drone_lon": 7.267219064826881,
+      "evidence_quality": "clean",
+      "gps_time_ms": 1650542026258,
       "home_lat": 51.44628155403916,
       "home_lon": 7.267356574697869,
       "operator_lat": 51.44622998783754,
       "operator_lon": 7.2671044732677235,
+      "product_type": 58,
       "protocol": "ocusync2",
+      "semantic_flags": [],
       "sequence": 591,
-      "serial": "1WNBH3900201N1"
+      "serial": "1WNBH3900201N1",
+      "uuid": "1143635532171534336"
     }
   ],
   "mini2_sm": [
@@ -20,130 +25,214 @@
       "drone_height": 0.0,
       "drone_lat": 0.0,
       "drone_lon": 0.0,
+      "evidence_quality": "flagged",
+      "gps_time_ms": 1648558221652,
       "home_lat": 0.0,
       "home_lon": 0.0,
       "operator_lat": 51.44719828651242,
       "operator_lon": 7.266531515471938,
+      "product_type": 63,
       "protocol": "ocusync2",
+      "semantic_flags": [
+        "drone_coords_zero",
+        "home_coords_zero"
+      ],
       "sequence": 786,
-      "serial": "SysSecWasHere "
+      "serial": "SysSecWasHere ",
+      "uuid": ""
     },
     {
       "drone_altitude": 0.0,
       "drone_height": 0.0,
       "drone_lat": 0.0,
       "drone_lon": 0.0,
+      "evidence_quality": "flagged",
+      "gps_time_ms": 1648558226658,
       "home_lat": 0.0,
       "home_lon": 0.0,
       "operator_lat": 51.44719828651242,
       "operator_lon": 7.266531515471938,
+      "product_type": 63,
       "protocol": "ocusync2",
+      "semantic_flags": [
+        "drone_coords_zero",
+        "home_coords_zero"
+      ],
       "sequence": 787,
-      "serial": "SysSecWasHere "
+      "serial": "SysSecWasHere ",
+      "uuid": ""
     },
     {
       "drone_altitude": 0.0,
       "drone_height": 0.0,
       "drone_lat": 0.0,
       "drone_lon": 0.0,
+      "evidence_quality": "flagged",
+      "gps_time_ms": 1648558226658,
       "home_lat": 0.0,
       "home_lon": 0.0,
       "operator_lat": 51.44719828651242,
       "operator_lon": 7.266531515471938,
+      "product_type": 63,
       "protocol": "ocusync2",
+      "semantic_flags": [
+        "drone_coords_zero",
+        "home_coords_zero"
+      ],
       "sequence": 788,
-      "serial": "SysSecWasHere "
+      "serial": "SysSecWasHere ",
+      "uuid": ""
     },
     {
       "drone_altitude": 0.0,
       "drone_height": 0.0,
       "drone_lat": 0.0,
       "drone_lon": 0.0,
+      "evidence_quality": "flagged",
+      "gps_time_ms": 1648558226658,
       "home_lat": 0.0,
       "home_lon": 0.0,
       "operator_lat": 51.44719828651242,
       "operator_lon": 7.266531515471938,
+      "product_type": 63,
       "protocol": "ocusync2",
+      "semantic_flags": [
+        "drone_coords_zero",
+        "home_coords_zero",
+        "sequence_non_monotonic"
+      ],
       "sequence": 788,
-      "serial": "SysSecWasHere "
+      "serial": "SysSecWasHere ",
+      "uuid": ""
     },
     {
       "drone_altitude": 0.0,
       "drone_height": 0.0,
       "drone_lat": 0.0,
       "drone_lon": 0.0,
+      "evidence_quality": "flagged",
+      "gps_time_ms": 1648558226658,
       "home_lat": 0.0,
       "home_lon": 0.0,
       "operator_lat": 51.44719828651242,
       "operator_lon": 7.266531515471938,
+      "product_type": 63,
       "protocol": "ocusync2",
+      "semantic_flags": [
+        "drone_coords_zero",
+        "home_coords_zero"
+      ],
       "sequence": 789,
-      "serial": "SysSecWasHere "
+      "serial": "SysSecWasHere ",
+      "uuid": ""
     },
     {
       "drone_altitude": 0.0,
       "drone_height": 0.0,
       "drone_lat": 0.0,
       "drone_lon": 0.0,
+      "evidence_quality": "flagged",
+      "gps_time_ms": 1648558236636,
       "home_lat": 0.0,
       "home_lon": 0.0,
       "operator_lat": 51.44719828651242,
       "operator_lon": 7.266531515471938,
+      "product_type": 63,
       "protocol": "ocusync2",
+      "semantic_flags": [
+        "drone_coords_zero",
+        "home_coords_zero",
+        "sequence_non_monotonic"
+      ],
       "sequence": 800,
-      "serial": "SysSecWasHere "
+      "serial": "SysSecWasHere ",
+      "uuid": ""
     },
     {
       "drone_altitude": 0.0,
       "drone_height": 0.0,
       "drone_lat": 0.0,
       "drone_lon": 0.0,
+      "evidence_quality": "flagged",
+      "gps_time_ms": 1648558241642,
       "home_lat": 0.0,
       "home_lon": 0.0,
       "operator_lat": 51.44719828651242,
       "operator_lon": 7.266531515471938,
+      "product_type": 63,
       "protocol": "ocusync2",
+      "semantic_flags": [
+        "drone_coords_zero",
+        "home_coords_zero",
+        "sequence_non_monotonic"
+      ],
       "sequence": 804,
-      "serial": "SysSecWasHere "
+      "serial": "SysSecWasHere ",
+      "uuid": ""
     },
     {
       "drone_altitude": 0.0,
       "drone_height": 0.0,
       "drone_lat": 0.0,
       "drone_lon": 0.0,
+      "evidence_quality": "flagged",
+      "gps_time_ms": 1648558241642,
       "home_lat": 0.0,
       "home_lon": 0.0,
       "operator_lat": 51.44719828651242,
       "operator_lon": 7.266531515471938,
+      "product_type": 63,
       "protocol": "ocusync2",
+      "semantic_flags": [
+        "drone_coords_zero",
+        "home_coords_zero",
+        "sequence_non_monotonic"
+      ],
       "sequence": 804,
-      "serial": "SysSecWasHere "
+      "serial": "SysSecWasHere ",
+      "uuid": ""
     },
     {
       "drone_altitude": 0.0,
       "drone_height": 0.0,
       "drone_lat": 0.0,
       "drone_lon": 0.0,
+      "evidence_quality": "flagged",
+      "gps_time_ms": 1648558241642,
       "home_lat": 0.0,
       "home_lon": 0.0,
       "operator_lat": 51.44719828651242,
       "operator_lon": 7.266531515471938,
+      "product_type": 63,
       "protocol": "ocusync2",
+      "semantic_flags": [
+        "drone_coords_zero",
+        "home_coords_zero"
+      ],
       "sequence": 805,
-      "serial": "SysSecWasHere "
+      "serial": "SysSecWasHere ",
+      "uuid": ""
     },
     {
       "drone_altitude": 0.0,
       "drone_height": 0.0,
       "drone_lat": 0.0,
       "drone_lon": 0.0,
+      "evidence_quality": "flagged",
+      "gps_time_ms": 1648558241642,
       "home_lat": 0.0,
       "home_lon": 0.0,
       "operator_lat": 51.44719828651242,
       "operator_lon": 7.266531515471938,
+      "product_type": 63,
       "protocol": "ocusync2",
+      "semantic_flags": [
+        "drone_coords_zero",
+        "home_coords_zero"
+      ],
       "sequence": 806,
-      "serial": "SysSecWasHere "
+      "serial": "SysSecWasHere ",
+      "uuid": ""
     }
   ]
 }

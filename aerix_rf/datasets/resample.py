@@ -63,6 +63,32 @@ STOPBAND_DB = 60.0
 # MS/s, per D14/15 and the normalisation memo's S2 rule).
 _DECIMATE_HEADROOM = 1.25
 
+# Live-grade filter design (F5 live-latency task, architect brief 2026-09-18):
+# a much shorter Kaiser FIR than the dataset-grade design above, traded for
+# real-time throughput. 50 dB stopband (vs 60 dB) and a wider transition
+# band roughly halve `kaiserord`'s numtaps for the same passband edge at the
+# common ANTSDR rate (12.288 -> 15.36 MS/s, up=5): measured 135 taps
+# (dataset) vs 73 taps (live) -- see the F6 perf task's result packet.
+#
+# Round-trip correction (F6 perf task, 2026-09-18): the original value here
+# (1.0 MHz) was *narrower* than the dataset grade's ~1.68 MHz transition,
+# which made "live" grade design MORE taps than dataset for the ANTSDR
+# up=5 case (181 vs 135 measured) -- the opposite of this module's stated
+# intent and of the F5 docstring above. 2.5 MHz is wide enough to reliably
+# beat the dataset grade's tap count for every up-factor this module is
+# actually called with, while staying well clear of the +-4.995 MHz band
+# features_v2 actually reads (S1.1): the extra transition slack lands
+# between 6.0 and 8.5 MHz, outside the +-5.0 MHz feature band with margin.
+# Still not enough alone to hit a <=150 ms live-latency budget at HackRF's
+# 20 MS/s native rate (up=96 forces a much higher design rate and,
+# consequently, a much larger absolute numtaps regardless of transition/
+# stopband tuning within this safe range) -- see the F6 result packet;
+# that gap is a resample-architecture question (e.g. multi-stage/FFT-domain
+# resampling), not a live-grade constant, and needs DSP-specialist review.
+LIVE_STOPBAND_DB = 50.0
+LIVE_TRANSITION_HZ = 2.5e6
+_DATASET_TRANSITION_HZ = _CANONICAL_NYQUIST_HZ - _USABLE_HALF_BW_HZ
+
 
 def _window_field(beta: float) -> str:
     """Encode a Kaiser beta into the ``ResampleStage.window`` string so
@@ -108,9 +134,27 @@ def _design_lowpass(
     return numtaps, float(beta), cutoff_hz
 
 
-def _make_stage(op: str, up: int, down: int, in_rate_hz: float, mix_hz: float | None = None) -> ResampleStage:
+def _make_stage(
+    op: str,
+    up: int,
+    down: int,
+    in_rate_hz: float,
+    mix_hz: float | None = None,
+    grade: str = "dataset",
+) -> ResampleStage:
     design_rate_hz = in_rate_hz * up
-    numtaps, beta, cutoff_hz = _design_lowpass(design_rate_hz)
+    if grade == "live":
+        stopband_db = LIVE_STOPBAND_DB
+        transition_hz = LIVE_TRANSITION_HZ
+    elif grade == "dataset":
+        stopband_db = STOPBAND_DB
+        transition_hz = _DATASET_TRANSITION_HZ
+    else:
+        raise ValueError(f"unknown resample grade {grade!r}, expected 'dataset' or 'live'")
+    stopband_hz = _USABLE_HALF_BW_HZ + transition_hz
+    numtaps, beta, cutoff_hz = _design_lowpass(
+        design_rate_hz, stopband_hz=stopband_hz, stopband_db=stopband_db
+    )
     return ResampleStage(
         op=op,
         up=up,
@@ -119,7 +163,8 @@ def _make_stage(op: str, up: int, down: int, in_rate_hz: float, mix_hz: float | 
         numtaps=numtaps,
         window=_window_field(beta),
         cutoff_hz=cutoff_hz,
-        stopband_db=STOPBAND_DB,
+        stopband_db=stopband_db,
+        grade=grade,
     )
 
 
@@ -141,6 +186,7 @@ def plan_chain(
     in_rate_hz: float,
     out_rate_hz: float = CANONICAL_RATE_HZ,
     in_bw_hz: float | None = None,
+    grade: str = "dataset",
 ) -> list[ResampleStage]:
     """Plan the S2 resample chain from ``in_rate_hz`` to ``out_rate_hz``.
 
@@ -152,6 +198,12 @@ def plan_chain(
     resample chain itself (band-narrower-than-usable sources still resample
     to the universal grid; only the sidecar's ``usable_bw_hz``/
     ``band_deficit`` change -- see those helpers).
+
+    ``grade``: ``"dataset"`` (default, unchanged 60 dB stopband / ~1.68 MHz
+    transition Kaiser design used by dataset normalisation) or ``"live"``
+    (F5 live-latency task: a much shorter Kaiser FIR -- 50 dB stopband /
+    1.0 MHz transition -- for the real-time path). The two grades are never
+    mixed within a chain; every stage records its own ``grade``.
     """
 
     in_rate_hz = float(in_rate_hz)
@@ -165,7 +217,7 @@ def plan_chain(
     stages: list[ResampleStage] = []
     intermediate_rate_hz = in_rate_hz
     if decim > 1:
-        stages.append(_make_stage("decimate", up=1, down=decim, in_rate_hz=in_rate_hz))
+        stages.append(_make_stage("decimate", up=1, down=decim, in_rate_hz=in_rate_hz, grade=grade))
         intermediate_rate_hz = in_rate_hz / decim
 
     inter_int = int(round(intermediate_rate_hz))
@@ -173,7 +225,7 @@ def plan_chain(
     g = gcd(inter_int, out_int)
     up = out_int // g
     down = inter_int // g
-    stages.append(_make_stage("rational", up=up, down=down, in_rate_hz=intermediate_rate_hz))
+    stages.append(_make_stage("rational", up=up, down=down, in_rate_hz=intermediate_rate_hz, grade=grade))
     return stages
 
 

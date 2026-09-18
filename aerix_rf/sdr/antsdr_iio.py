@@ -202,6 +202,12 @@ def antsdr_iio_capabilities(*, firmware: str | None = None) -> ReceiverCapabilit
         supports_sweep=False,
         reference_inputs=("none",),
         firmware=firmware,
+        # No device timestamp and no overflow/drop counter of any kind: the
+        # IIO image exposes neither (measured 2026-09-18, see antsdr-specialist).
+        # loss_detection is unconditionally "inferred_rate_only" (stream.py) --
+        # a rate ratio, not an exact lost-sample count.
+        timestamp_quality="host_wallclock",
+        loss_counter_available=False,
     )
 
 
@@ -302,6 +308,7 @@ class AntsdrIIOSource(IQSource):
             self.sample_rate, raw_to_iq=_cs16_2048_to_iq, reports_drops=False,
             queue_max_s=QUEUE_MAX_S, chunk_samples_hint=self.buffer_samples,
             bandwidth_hz=self.rf_bandwidth, still_active=lambda: self._running,
+            raw_full_scale=IQ_FULL_SCALE,
         )
 
         self._running = False
@@ -524,6 +531,9 @@ class AntsdrIIOSource(IQSource):
                     "readback": dict(self.readback),
                     "readback_mismatch": self.readback_mismatch,
                     "rssi_db_readback": rssi_db_readback,
+                    "clip_fraction": info.get("clip_fraction"),
+                    "peak_abs_frac": info.get("peak_abs_frac"),
+                    "clip_warning": info.get("clip_warning", False),
                 },
             )
 

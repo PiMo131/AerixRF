@@ -73,6 +73,30 @@ class ReceiverCapabilities:
     reference_inputs: tuple[str, ...] = ("none",)  # e.g. "none" | "ext10m" | "pps"
     firmware: str | None = None
     driver_version: str | None = None
+    # Multi-receiver/TDOA gate (see docs/design/ -- Fable-reviewed requirement):
+    # a caller doing cross-receiver time correlation must be able to refuse to
+    # run rather than silently trust an untimestamped/uncounted stream.
+    timestamp_quality: str = "host_wallclock"
+    # "none"                       -- no usable time reference at all
+    # "host_wallclock"             -- only the host's own clock at receipt time
+    #                                  (network/USB/scheduling jitter, no device
+    #                                  timestamp); this is every backend today
+    #                                  except sim.
+    # "device_counter"             -- backend/device provides a monotonic sample
+    #                                  counter or exact synthetic timing (sim).
+    # "device_pps_disciplined"     -- device clock is disciplined to an external
+    #                                  PPS/10 MHz reference; not implemented by
+    #                                  any backend yet.
+    loss_counter_available: bool = False  # True: the backend reports an exact
+    # dropped/lost-sample count (not merely an inferred rate ratio) for every
+    # window -- see ``supports_drop_reporting`` for the general flag; this one
+    # specifically gates trusting the *counter* itself for multi-receiver work.
+
+    def supports_multi_receiver_timing(self) -> bool:
+        """True only if this backend's timestamps are precise enough to anchor
+        cross-receiver correlation (TDOA-style work): a device-side counter or
+        better. ``host_wallclock`` is NOT enough (see ``timestamp_quality``)."""
+        return self.timestamp_quality in ("device_counter", "device_pps_disciplined")
 
 
 @dataclass
@@ -143,6 +167,14 @@ class IQWindow:
             "readback_mismatch": self.metadata.get("readback_mismatch"),
             "rssi_db_readback": self.metadata.get("rssi_db_readback"),
             "max_refill_gap_ms": self.metadata.get("max_refill_gap_ms"),
+            # Manual-gain clipping diagnostics (see stream.py's raw_clip_stats).
+            # Honestly ``None``/``False`` on backends that never populate these
+            # keys (sim, file replay) -- a clipped dwell is worse than a
+            # dropped one (poisons both the decoder and features), so this is
+            # surfaced unconditionally, not only when clip_warning fires.
+            "clip_fraction": self.metadata.get("clip_fraction"),
+            "peak_abs_frac": self.metadata.get("peak_abs_frac"),
+            "clip_warning": bool(self.metadata.get("clip_warning", False)),
         }
 
 
@@ -162,7 +194,19 @@ _HACKRF_GAIN_STAGES = (
 
 def hackrf_capabilities(backend: str) -> ReceiverCapabilities:
     """HackRF capabilities, parameterised only by which host backend is talking to it
-    (libhackrf / hackrf_transfer / soapy) -- the radio itself is identical."""
+    (libhackrf / hackrf_transfer / soapy) -- the radio itself is identical.
+
+    ``loss_counter_available`` DOES vary by host backend, unlike everything
+    else here: it is the host driver that counts drops, not the radio.
+    libhackrf's transfer callback counts overflows/short reads exactly
+    (``LibHackRFSource`` / ``libhackrf.py``). The SoapySDR HackRF module
+    surfaces the same condition as a negative ``readStream()`` return, which
+    ``HackRFSource.windows()`` already counts into ``short_reads`` /
+    ``dropped_samples`` -- verified in this file, not assumed. Plain
+    ``hackrf_transfer`` has no such signal: a window is just short or not,
+    with no distinguishable overflow count.
+    """
+    loss_counter_available = backend in ("libhackrf", "soapy")
     return ReceiverCapabilities(
         receiver_type="hackrf",
         backend=backend,
@@ -179,6 +223,8 @@ def hackrf_capabilities(backend: str) -> ReceiverCapabilities:
         supports_drop_reporting=True,
         supports_sweep=True,
         reference_inputs=("none",),
+        timestamp_quality="host_wallclock",
+        loss_counter_available=loss_counter_available,
     )
 
 
@@ -227,6 +273,8 @@ def sim_capabilities() -> ReceiverCapabilities:
         supports_drop_reporting=False,  # sim never drops
         supports_sweep=False,
         reference_inputs=("none",),
+        timestamp_quality="device_counter",  # synthetic: exact, not host wall clock
+        loss_counter_available=True,          # exact (always zero) by construction
     )
 
 
@@ -431,6 +479,8 @@ class FileIQSource(IQSource):
             reference_inputs=("none",),
             firmware=self.meta.get("receiver_firmware"),
             driver_version=self.meta.get("receiver_driver"),
+            timestamp_quality="host_wallclock",  # replay carries only captured_at
+            loss_counter_available=(self.meta.get("loss_detection") == "exact"),
         )
 
     def tune(self, center_freq_hz: float) -> None:
@@ -589,7 +639,10 @@ class LibHackRFSource(IQSource):
                                      "stream_rate_ratio": info["stream_rate_ratio"],
                                      "loss_detection": info.get("loss_detection"),
                                      "lna_gain": self.cfg.lna_gain, "vga_gain": self.cfg.vga_gain,
-                                     "amp": self.cfg.amp})
+                                     "amp": self.cfg.amp,
+                                     "clip_fraction": info.get("clip_fraction"),
+                                     "peak_abs_frac": info.get("peak_abs_frac"),
+                                     "clip_warning": info.get("clip_warning", False)})
 
     def close(self) -> None:
         self.stream.close()

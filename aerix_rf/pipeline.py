@@ -143,6 +143,14 @@ class FrameResult:
                 "hypotheses_tried": int(getattr(a, "hypotheses_tried", 0)),
                 "chosen_center_offset_mhz": getattr(a, "chosen_center_offset_mhz", None),
                 "alt_centers_mhz": [round(h / 1e6, 3) for h in getattr(a, "alt_centers_hz", ())],
+                # Additive (2026-09-18): rest of frame.DroneIdFrame + post-CRC
+                # evidence-quality labels now on DroneIdResult. Old readers that
+                # don't know these keys are unaffected.
+                "product_type": getattr(res, "product_type", None),
+                "uuid": getattr(res, "uuid", None),
+                "gps_time_ms": getattr(res, "gps_time_ms", None),
+                "semantic_flags": list(getattr(res, "semantic_flags", []) or []),
+                "evidence_quality": getattr(res, "evidence_quality", None),
             })
         return out
 
@@ -156,6 +164,9 @@ class FrameResult:
             health = f"RATE({ratio:.2f})" if ratio is not None else "RATE(?)"
         if hb.get("gap_before_samples"):
             health += f" gap={hb['gap_before_samples'] / self.window.sample_rate * 1000:.0f}ms"
+        if hb.get("clip_warning"):
+            cf = hb.get("clip_fraction")
+            health += f" clip={cf * 100:.1f}%" if cf is not None else " clip=?"
         cad = f"{d.cadence_ms:.0f}ms" if d.cadence_ms else "-"
         dec = self.decode_level
         if self.decoded is not None:

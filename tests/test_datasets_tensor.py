@@ -10,6 +10,7 @@ import pytest
 from aerix_rf.datasets.tensor import (
     CANONICAL_FFT,
     CANONICAL_HOP,
+    canonical_products,
     canonical_stft,
     detector_frames,
     ml_tensor,
@@ -140,3 +141,56 @@ def test_ml_tensor_short_inputs_do_not_crash(n_ms):
     tensor = ml_tensor(iq, FS)
     assert tensor.shape[1] == CANONICAL_FFT
     assert tensor.shape[0] >= 0
+
+
+def test_canonical_products_matches_old_two_pass_path():
+    """F5 single-STFT fusion: canonical_products' (ml_tensor, detector_frames)
+    outputs must be bit-for-bit identical to the old two-pass composition
+    (a standalone ml_tensor() call plus a standalone canonical_stft() call
+    fed through detector_frames()) on a non-trivial synthetic 1 s window --
+    this is the "prepare path stays byte-identical" proof for F5."""
+    n = int(round(1.0 * FS))  # exactly 1.000 s -> 30000 STFT frames, non-aligned edge case avoided
+    rng = np.random.default_rng(7)
+    iq = ((rng.standard_normal(n) + 1j * rng.standard_normal(n)) * 0.1).astype(np.complex64)
+    # A tone to make sure the comparison isn't just noise-floor-trivial.
+    t = np.arange(n, dtype=np.float64) / FS
+    iq = (iq + 0.3 * np.exp(2j * np.pi * 2_000_000.0 * t)).astype(np.complex64)
+
+    old_tensor = ml_tensor(iq, FS)
+    old_stft = canonical_stft(iq, FS)
+    old_power_lin = (old_stft.real.astype(np.float64) ** 2 + old_stft.imag.astype(np.float64) ** 2)
+    old_det = detector_frames(old_power_lin, factor=6)
+
+    new_tensor, new_det = canonical_products(iq, FS)
+
+    assert new_tensor.shape == old_tensor.shape
+    assert np.array_equal(new_tensor, old_tensor)
+    assert new_det.shape == old_det.shape
+    assert np.array_equal(new_det, old_det)
+
+
+def test_canonical_products_detector_frames_exceed_ms_grid_on_non_multiple_window():
+    """A window whose STFT frame count isn't a multiple of frames_per_ms
+    (30) still yields whole trailing detector blocks (factor 6) beyond the
+    last full ms block -- exercises the leftover-tail branch."""
+    # 1005 hop-512 frames: 33 ms blocks (990 frames) but 167 detector blocks
+    # (1002 frames) -- 3 more detector frames than 33*5=165.
+    n = 1005 * CANONICAL_HOP
+    rng = np.random.default_rng(11)
+    iq = ((rng.standard_normal(n) + 1j * rng.standard_normal(n)) * 0.1).astype(np.complex64)
+
+    tensor, det = canonical_products(iq, FS)
+    assert tensor.shape[0] == 33
+    assert det.shape[0] == 167
+
+    old_stft = canonical_stft(iq, FS)
+    old_power_lin = (old_stft.real.astype(np.float64) ** 2 + old_stft.imag.astype(np.float64) ** 2)
+    old_det = detector_frames(old_power_lin, factor=6)
+    assert np.array_equal(det, old_det)
+
+
+def test_ml_tensor_still_equals_canonical_products_first_element():
+    n = int(round(0.3 * FS))
+    rng = np.random.default_rng(3)
+    iq = ((rng.standard_normal(n) + 1j * rng.standard_normal(n)) * 0.2).astype(np.complex64)
+    assert np.array_equal(ml_tensor(iq, FS), canonical_products(iq, FS)[0])

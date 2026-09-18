@@ -277,3 +277,8 @@ frozen), `aerix_rf/classify/train/data.py` + `train.py` (emit `model_features_ve
 `aerix_rf/classify/model.py` (F4), `aerix_rf/datasets/tensor.py` (no change expected; `usable_mask` reused),
 `bench/receiver_id_probe.py`, `bench/benchmark_features_v2.py` (new), `tests/test_features_v2.py` (new),
 `docs/design/dataset-normalization.md` (cross-link tiers).
+
+
+### §1.7 G6 occupancy limit — measured 2026-09-18
+
+Continuous band-centred emitter, +25 dB, duty 1.0 (synthetic): 4/6/7 MHz → occ_frac_6db 0.40/0.60/0.70, persistent_bw exact, level 25.0 dB, floor_delta 23.9 dB (4 MHz: −1.1, see test). 8 MHz → occ 0.318, persistent_bw 3.18 MHz, level 11.8 dB, floor_delta 1.4 dB; 9 MHz similar. The quietest-30 % reference set becomes emitter-contaminated above ~70 % occupancy and the collapse is abrupt, not graceful; gain invariance survives, tilt invariance does not. `frac_time_occupied ≥ 0.9` and `occ_frac_6db ≥ 0.3` still flag a persistent emitter at 8 MHz. Consequence: for analog FPV (6–8 MHz) G6 supports only "persistent wideband emitter present" (stage-1 morphology), never bandwidth/level estimates, until an occupancy-aware fallback is designed.

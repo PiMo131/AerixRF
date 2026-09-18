@@ -307,6 +307,53 @@ def test_encode_decode_none_on_corruption():
 
 
 # ---------------------------------------------------------------------------
+# Semantic (post-CRC) evidence-quality flags -- labels only, never filters.
+# ---------------------------------------------------------------------------
+
+def test_semantic_flags_gps_time_zero_is_flagged():
+    # pack_dji_frame defaults gps_time_ms=0 (never set by _FIELDS) -> implausible.
+    b = make_encoded_burst(_FIELDS, snr_db=None, seed=7)
+    res = decode(b.iq, b.sample_rate)
+    assert res is not None
+    assert res.gps_time_ms == 0
+    assert "gps_time_implausible" in res.semantic_flags
+    assert res.evidence_quality == "flagged"
+    # CRC24A-valid frame is still returned in full -- flags never gate a decode.
+    assert res.serial == _FIELDS["serial"]
+
+
+def test_semantic_flags_known_product_type_not_flagged():
+    fields = dict(_FIELDS, product_type=58, gps_time_ms=1650542026258)   # mavic_air_2 code
+    b = make_encoded_burst(fields, snr_db=None, seed=8)
+    res = decode(b.iq, b.sample_rate)
+    assert res is not None
+    assert res.product_type == 58
+    assert "product_type_unknown" not in res.semantic_flags
+    assert "gps_time_implausible" not in res.semantic_flags
+
+
+def test_semantic_flags_unknown_product_type_is_flagged():
+    fields = dict(_FIELDS, product_type=200, gps_time_ms=1650542026258)
+    b = make_encoded_burst(fields, snr_db=None, seed=9)
+    res = decode(b.iq, b.sample_rate)
+    assert res is not None
+    assert res.product_type == 200
+    assert "product_type_unknown" in res.semantic_flags
+    assert res.evidence_quality == "flagged"
+
+
+def test_semantic_flags_zero_coords_flagged_nonzero_clean():
+    fields = dict(_FIELDS, drone_lat=0.0, drone_lon=0.0, gps_time_ms=1650542026258,
+                 product_type=58)
+    b = make_encoded_burst(fields, snr_db=None, seed=10)
+    res = decode(b.iq, b.sample_rate)
+    assert res is not None
+    assert "drone_coords_zero" in res.semantic_flags
+    assert "operator_coords_zero" not in res.semantic_flags
+    assert "home_coords_zero" not in res.semantic_flags
+
+
+# ---------------------------------------------------------------------------
 # Window-level decoding: 1 s @ 20 MS/s HackRF-style captures, burst by burst
 # ---------------------------------------------------------------------------
 

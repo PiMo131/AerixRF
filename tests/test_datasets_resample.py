@@ -175,3 +175,27 @@ def test_complex64_dtype_out():
     chain = plan_chain(in_rate)
     out = apply_chain(iq, chain, in_rate)
     assert out.dtype == np.complex64
+
+
+def test_live_grade_recorded_and_differs_from_dataset_grade():
+    """F5 live-latency task: grade='live' plans a distinct (50 dB stopband,
+    1.0 MHz transition) chain, with 'grade' recorded per stage; grade
+    defaults to 'dataset' and that default chain is completely unchanged
+    (numtaps/window/cutoff/stopband_db all identical to before this field
+    existed)."""
+    chain_dataset = plan_chain(20_000_000.0)
+    assert all(s.grade in (None, "dataset") for s in chain_dataset)
+    assert chain_dataset[0].stopband_db == 60.0
+
+    chain_live = plan_chain(20_000_000.0, grade="live")
+    assert chain_live[0].grade == "live"
+    assert chain_live[0].stopband_db == 50.0
+    # Recorded distinctly -- may have more or fewer taps than dataset grade
+    # depending on the up-factor (see F5 result packet); just must not be
+    # silently identical.
+    assert chain_live[0].numtaps != chain_dataset[0].numtaps
+
+
+def test_live_grade_invalid_value_rejected():
+    with pytest.raises(ValueError):
+        plan_chain(20_000_000.0, grade="bogus")

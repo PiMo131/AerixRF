@@ -137,6 +137,26 @@ class DroneIdResult:
     home_lon: float | None = None
     sequence: int | None = None
     decode_iterations: int | None = None
+    # Additive (2026-09-18): the rest of frame.DroneIdFrame that parse_frame already
+    # extracts but this result did not previously expose. version/msg_type and the
+    # state0/state1 bits are NOT threaded through: frame.parse_frame/DroneIdFrame do
+    # not currently carry them (only validates msg_type==16/version==2 and discards),
+    # and extending that parse is out of this change's scope.
+    product_type: int | None = None
+    uuid: str | None = None
+    gps_time_ms: int | None = None
+    # Evidence-quality labels (rf-protocol-analyst design, see
+    # .claude/agent-memory/rf-protocol-analyst/protocol_droneid_evidence_gating.md):
+    # post-CRC semantic sanity checks. These NEVER gate/drop a CRC24A-valid frame;
+    # they only annotate it. `sequence_non_monotonic` is the one flag that needs
+    # more than a single frame -- it is filled in by decode_all across the
+    # CRC-valid results of one call, comparing each frame's sequence number to the
+    # previous CRC-valid frame in time order (delta != 1 -> flagged; covers both
+    # duplicates, delta 0, and gaps, delta > 1). A fresh decode_frame() call in
+    # isolation (e.g. in a unit test) never has a prior frame to compare against,
+    # so that flag is only ever added by decode_all.
+    semantic_flags: list[str] = field(default_factory=list)
+    evidence_quality: str = "clean"          # "clean" | "flagged" (derived from semantic_flags)
 
 
 @dataclass
@@ -936,6 +956,22 @@ def decode_all(iq: np.ndarray, sample_rate: float, *, max_bursts: int = 8,
         attempts.append(attempt)
 
     attempts.sort(key=lambda a: a.start_sample)
+
+    # Cross-frame evidence-quality check: sequence continuity across the CRC-valid
+    # results of *this* decode_all call, in time order. Only computable here (a
+    # lone decode_frame() call has no prior frame to compare against). A delta
+    # other than +1 -- a duplicate (0) or a gap (>1) -- flags the later frame;
+    # never the first CRC-valid frame in the window, and never drops anything.
+    prev_seq = None
+    for attempt in attempts:
+        res = attempt.result
+        if res is None or res.sequence is None:
+            continue
+        if prev_seq is not None and res.sequence - prev_seq != 1:
+            res.semantic_flags.append("sequence_non_monotonic")
+            res.evidence_quality = "flagged"
+        prev_seq = res.sequence
+
     return attempts
 
 
@@ -961,10 +997,63 @@ def decode(iq: np.ndarray, sample_rate: float) -> DroneIdResult | None:
     return None
 
 
+# --- Post-CRC evidence-quality labels ---------------------------------------
+# Never gate/drop a CRC24A-valid frame on these (rf-protocol-analyst design,
+# protocol_droneid_evidence_gating.md): they annotate telemetry plausibility only.
+#
+# GPS_TIME plausibility window: OFF_GPS_TIME is a ms-epoch u64; [2015-01-01,
+# 2035-01-01) brackets DJI DroneID's real deployment era with margin. Exact 0 is
+# also implausible (no fix) and is covered by the same bound check.
+GPS_TIME_MS_MIN = 1420070400000     # 2015-01-01T00:00:00Z
+GPS_TIME_MS_MAX = 2051222400000     # 2035-01-01T00:00:00Z
+
+# Known DJI product_type codes. proto17/dji_droneid (create_frame_bytes.m) documents
+# the *field* (u8, 0-255) but ships no name table. No broader DJI product-type
+# reference was available inside this task's packet/repo (open item for
+# rf-protocol-analyst / a device specialist to source a fuller table -- see the
+# unresolved-issues note in this change's handback). The two entries below are
+# the codes actually observed on the two real-hardware RUB-SysSec DroneID
+# captures used as this decoder's golden fixture (tests/test_droneid_rub_golden.py):
+# evidence level 5 (operator-provided test truth) for those two codes only.
+# Absence from this table is NOT evidence of an invalid/spoofed frame -- it only
+# means the code is not yet catalogued here (see `product_type_unknown` below).
+KNOWN_PRODUCT_TYPES: dict[int, str] = {
+    58: "mavic_air_2 (RUB-SysSec golden capture)",
+    63: "mini2_sm (RUB-SysSec golden capture; researcher-instrumented serial)",
+}
+
+
+def _coord_flags(name: str, lat: float, lon: float) -> list[str]:
+    if lat == 0.0 and lon == 0.0:
+        return [f"{name}_coords_zero"]
+    if not (-90.0 <= lat <= 90.0) or not (-180.0 <= lon <= 180.0):
+        return [f"{name}_coords_out_of_range"]
+    return []
+
+
+def _semantic_flags(parsed) -> list[str]:
+    """Post-CRC evidence-quality labels for one already-CRC-valid parsed frame.
+
+    Per-frame only; does not include `sequence_non_monotonic` (cross-frame,
+    added by :func:`decode_all`).
+    """
+    flags: list[str] = []
+    flags += _coord_flags("drone", parsed.drone_lat, parsed.drone_lon)
+    flags += _coord_flags("operator", parsed.operator_lat, parsed.operator_lon)
+    flags += _coord_flags("home", parsed.home_lat, parsed.home_lon)
+    if not (GPS_TIME_MS_MIN <= parsed.gps_time_ms < GPS_TIME_MS_MAX):
+        flags.append("gps_time_implausible")
+    if parsed.product_type not in KNOWN_PRODUCT_TYPES:
+        flags.append("product_type_unknown")
+    return flags
+
+
 def decode_frame(demod: DroneIdDemod, iterations: int = 8) -> DroneIdResult | None:
     """Back end: de-rate-match + Turbo decode + CRC + field parse of a demod result.
 
     Returns a populated :class:`DroneIdResult` when CRC24A validates, else None.
+    CRC24A validity alone determines whether a result is returned; the semantic
+    checks below only set ``semantic_flags``/``evidence_quality`` on it.
     """
     from . import turbo
     from . import frame as _frame
@@ -976,6 +1065,7 @@ def decode_frame(demod: DroneIdDemod, iterations: int = 8) -> DroneIdResult | No
     parsed = _frame.parse_frame(frame_bytes)
     if parsed is None:
         return None
+    flags = _semantic_flags(parsed)
     return DroneIdResult(
         serial=parsed.serial,
         drone_lat=parsed.drone_lat,
@@ -989,6 +1079,11 @@ def decode_frame(demod: DroneIdDemod, iterations: int = 8) -> DroneIdResult | No
         home_lon=parsed.home_lon,
         sequence=parsed.sequence,
         decode_iterations=meta["iterations"],
+        product_type=parsed.product_type,
+        uuid=parsed.uuid,
+        gps_time_ms=parsed.gps_time_ms,
+        semantic_flags=flags,
+        evidence_quality="flagged" if flags else "clean",
     )
 
 

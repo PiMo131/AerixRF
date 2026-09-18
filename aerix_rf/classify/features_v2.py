@@ -759,8 +759,9 @@ def features_v2_from_iq(iq: np.ndarray, fs: float = CANONICAL_FS) -> FeaturesV2:
             f"{CANONICAL_FS!r} Hz representation, got fs={fs!r}"
         )
     iq = np.asarray(iq)
-    tensor_dbfs = _tensor.ml_tensor(iq, fs)
-    stft = _tensor.canonical_stft(iq, fs)
-    power_lin = (stft.real.astype(np.float64) ** 2 + stft.imag.astype(np.float64) ** 2)
-    detector_frames_lin = _tensor.detector_frames(power_lin, factor=6)
+    # F5 live-latency task: single-STFT path -- derives both the ML tensor
+    # and the detector frames from one pass of the FFT (module docstring of
+    # ``datasets/tensor.py``), bit-for-bit equal to the old two-call
+    # (ml_tensor + canonical_stft/detector_frames) composition.
+    tensor_dbfs, detector_frames_lin = _tensor.canonical_products(iq, fs)
     return extract_features_v2(tensor_dbfs, detector_frames_lin, fs_hz=fs)

@@ -4,6 +4,10 @@ Small, approved-in-principle items discovered during work. Each needs a bounded 
 and independent review before it is "done". Evidence-wording rules apply.
 
 ## Decoder / protocol
+- [ ] Blocker-robustness fix (failure split shows hypothesis SELECTION is the cause: forced true centre decodes 119/120):
+      an attempted ZC4-only ±100 kHz refinement REGRESSED real-IQ decodes and was reverted 2026-09-18. Re-attempt only
+      with a reliable local-search scorer (actual zc6/demod score, STO search), keep "break only on level ≥ B" and
+      a 60 kHz DC-fallback dedup; acceptance = RUB golden identical + `B_wb_blocker` knee ≤ 12 dB. Route via rf-dsp-specialist.
 - [ ] Unreproduced one-off failure (2026-09-18) of `test_twelve_mhz_band_not_droneid_shaped` +
       `test_centre_hypotheses_band_peel` during a full-file run that overlapped a concurrent edit of the
       test file; 35 reruns × 16 seeds green, assertions hold with >1 MHz margin. Diagnostic messages added.
@@ -36,13 +40,23 @@ and independent review before it is "done". Evidence-wording rules apply.
       canonical 15.36 — must yield identical CRC-valid frames. **Session is not on this machine.**
 
 ## Classifier / datasets
+- [ ] G6 spectral floor: measured exact at ≤7 MHz continuous (70 %), collapses abruptly at 8 MHz (occ 0.70→0.32,
+      level 25→11.8 dB, tilt-invariance lost). Analog FPV (6–8 MHz) straddles the edge ⇒ G6 readouts for FPV are
+      morphology-only. Fix options: adaptive quiet-bin fraction, occupancy-aware fallback, or wider dwell. (tests in
+      `tests/test_features_v2.py::test_g6_fpv_*`)
+- [x] (Fable) Rename the current benchmark output a *pipeline-integrity check*; run the M2 synthetic at 8 MHz continuous
+      (analog FPV 6–8 MHz in a 10 MHz dwell = 60–80 % occupancy, at the spectral-floor limit). Frame analog FPV as an
+      emitter class (stage 1–2), never protocol evidence.
+- [ ] (Fable) Same-receiver positives protocol needs controls: ≥3 distances; RC/phone ON with aircraft OFF (confuser);
+      Wi-Fi co-channel active during ON; per-window clip fraction + drop estimate logged.
 - [ ] Tier-D outlier session `a_iq_default` (quiet band, raised+flattened floor): live read-back shows LO/gain/mode
       correct and the afternoon soak sees intermediate Wi-Fi load ⇒ ambient traffic varies by hour (scene), but
       the floor-shape change is unexplained. Hypothesis: the "U-shaped" floor of Wi-Fi-saturated sessions is
       Wi-Fi-induced (p10-over-time absorbs persistent Wi-Fi), not the receiver's. Resolve with read-back state
       recorded per session and an ON/OFF-scheduled capture. Until then: never mix sessions across hours as one
       "background" group without a session-level receiver-state table.
-- [ ] Live `features_v2` path costs ≈2.6 s per 1 s window (12.288 MS/s): `features_v2_from_iq` runs two full STFTs
+- [ ] (progress 2026-09-18: 2.4 s → 1.76 s at 12.288 MS/s, 0.68 s at 15.36; the 5/4 live resample is the remaining hog — needs a profile)
+      Live `features_v2` path costs ≈2.6 s per 1 s window (12.288 MS/s): `features_v2_from_iq` runs two full STFTs
       (`ml_tensor` + unchunked `canonical_stft` for detector frames) and the 5/4 live resample uses the
       4145-tap dataset-grade FIR (~1.1 s). Target ≤150 ms: single STFT feeding both reductions, and a
       short live-grade resampler (or run the canonical STFT at the native rate with bin remapping). Until
@@ -62,6 +76,9 @@ and independent review before it is "done". Evidence-wording rules apply.
 - [ ] Locate data hosts for CageDroneRF and UAVSig.
 
 ## Receiver / sessions
+- [ ] (Fable 2026-09-18) Add `timestamp_quality` and `loss_counter_available` to `ReceiverCapabilities`; multi-receiver
+      code must refuse to run where they are absent. Treat the IIO ceiling as this phase's constant, not architectural.
+- [ ] (Fable) Event-gated raw retention: cs16 at 12.288 MS/s ≈ 177 GB/h; decide disk/retention budget with user.
 - [ ] `samples_deficit` can go negative on a loss-free run (−665 k samples over 60 s ≈ device clock 0.09 %
       fast relative to host wall clock). Decide: keep signed (honest) but document; consider estimating the
       clock offset from the first N seconds and reporting `deficit_vs_measured_rate`. (2026-09-18 live check:

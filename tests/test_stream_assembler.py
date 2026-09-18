@@ -373,6 +373,87 @@ def test_cumulative_ratio_and_deficit_at_95pct_rate_over_10min(monkeypatch):
     assert abs(deficit_frac - 0.05) <= 0.01, last
 
 
+# --- clip/peak health (manual-gain overload detection) ---------------------
+#
+# ``raw_full_scale`` (128.0 for HackRF int8, 2048.0 for ANTSDR's 12-bit-in-
+# int16) makes the assembler compute clip_count/peak_abs on every pushed raw
+# chunk automatically (see ``raw_clip_stats``). Threshold is ``full_scale - 1``
+# (127 for HackRF, 2047 for ANTSDR) since a symmetric two's-complement range
+# has no positive code AT full scale.
+
+def test_clip_stats_no_clipping_reads_zero_and_no_warning():
+    asm = StreamAssembler(SR, raw_to_iq=_raw_to_iq_i16, raw_full_scale=2048.0)
+    n = 1000
+    raw = np.zeros(n * 2, dtype=np.int16)
+    raw[:] = 100   # well below the 2047 clip threshold
+    asm.push(raw, time.time(), 2440e6, dropped_before=0)
+    iq, info = asm.read_window(n, timeout_s=1.0)
+    assert iq.size == n
+    assert info["clip_fraction"] == 0.0
+    assert info["clip_warning"] is False
+    assert info["peak_abs_frac"] == pytest.approx(100 / 2048.0)
+
+
+def test_clip_stats_fraction_and_warning_at_point_one_percent():
+    asm = StreamAssembler(SR, raw_to_iq=_raw_to_iq_i16, raw_full_scale=2048.0)
+    n = 10000
+    raw = np.zeros(n * 2, dtype=np.int16)
+    # 10 of 10000 complex samples (0.1%) have a clipped I value.
+    raw[0:20:2] = 2047
+    asm.push(raw, time.time(), 2440e6, dropped_before=0)
+    iq, info = asm.read_window(n, timeout_s=1.0)
+    assert iq.size == n
+    assert info["clip_fraction"] == pytest.approx(0.001)
+    assert info["clip_warning"] is True
+    assert info["peak_abs_frac"] == pytest.approx(2047 / 2048.0)
+
+
+def test_clip_stats_none_when_raw_full_scale_not_configured():
+    # Same producer path as ``test_hackrf_producer_path_preserves_documented_info_keys``
+    # but WITHOUT ``raw_full_scale`` -- the honest default for a producer that
+    # can't/doesn't report clip health (never a fabricated 0.0/False).
+    from aerix_rf.sdr.libhackrf import _cs8_to_iq
+
+    asm = StreamAssembler(SR, raw_to_iq=_cs8_to_iq, reports_drops=True)
+    raw = np.array([127, 0, -127, 0, 30, 40], dtype=np.int8)
+    asm.push(raw, time.time(), 2440e6, dropped_before=0)
+    iq, info = asm.read_window(3, timeout_s=1.0)
+    assert info["clip_fraction"] is None
+    assert info["peak_abs_frac"] is None
+    assert info["clip_warning"] is False
+
+
+def test_clip_stats_hackrf_int8_path_uses_127_threshold():
+    from aerix_rf.sdr.libhackrf import _cs8_to_iq
+
+    asm = StreamAssembler(SR, raw_to_iq=_cs8_to_iq, reports_drops=True, raw_full_scale=128.0)
+    # 3 samples: two clipped (|I| or |Q| == 127), one not (126 stays under threshold).
+    raw = np.array([127, 0, -10, -127, 30, 126], dtype=np.int8)
+    asm.push(raw, time.time(), 2440e6, dropped_before=0)
+    iq, info = asm.read_window(3, timeout_s=1.0)
+    assert iq.size == 3
+    assert info["clip_fraction"] == pytest.approx(2 / 3)
+    assert info["clip_warning"] is True
+    assert info["peak_abs_frac"] == pytest.approx(127 / 128.0)
+
+
+def test_clip_stats_split_across_window_boundary_not_double_counted():
+    # One chunk straddles the window boundary (like ragged-chunk assembly
+    # above): the clip stats must be re-split exactly, not double-counted in
+    # both windows nor dropped from the leftover.
+    asm = StreamAssembler(SR, raw_to_iq=_raw_to_iq_i16, raw_full_scale=2048.0)
+    # 6 raw int16 samples (3 complex): sample 0 clean, sample 1 clipped (I),
+    # sample 2 clean. Window size 2 -> first window gets samples 0-1 (1 clip),
+    # leftover carries sample 2 (0 clips) into the next window.
+    raw = np.array([10, 20, 2047, 5, 8, 9], dtype=np.int16)
+    asm.push(raw, time.time(), 2440e6, dropped_before=0)
+    iq1, info1 = asm.read_window(2, timeout_s=1.0)
+    assert info1["clip_fraction"] == pytest.approx(0.5)   # 1 of 2 samples
+    asm.push(np.array([1, 1], dtype=np.int16), time.time(), 2440e6, dropped_before=0)
+    iq2, info2 = asm.read_window(2, timeout_s=1.0)
+    assert info2["clip_fraction"] == 0.0   # leftover sample + new clean sample
+
+
 def test_hackrf_producer_path_preserves_documented_info_keys():
     from aerix_rf.sdr.libhackrf import _cs8_to_iq
 

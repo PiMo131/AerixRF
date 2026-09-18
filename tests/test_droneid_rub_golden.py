@@ -37,13 +37,15 @@ SHA256 = {
 
 FIXTURE_PATH = Path(__file__).parent / "fixtures" / "rub_droneid_expected.json"
 
-# Fields carried on aerix_rf.decode.droneid.DroneIdResult (parse_frame's fuller
-# DroneIdFrame -- product_type/uuid/gps_time/state bits/velocity/yaw -- is not
-# threaded through DroneIdResult/decode_all today; only these are checked here).
+# Fields carried on aerix_rf.decode.droneid.DroneIdResult. parse_frame's fuller
+# DroneIdFrame also has velocity/yaw and state0/state1, which are not threaded
+# through DroneIdResult/decode_all (frame.py's DroneIdFrame/parse_frame were not
+# extended to carry state bits in this change; see the handback for that gap).
 STABLE_FIELDS = (
     "serial", "drone_lat", "drone_lon", "operator_lat", "operator_lon",
     "protocol", "drone_height", "drone_altitude", "home_lat", "home_lon",
-    "sequence",
+    "sequence", "product_type", "uuid", "gps_time_ms", "semantic_flags",
+    "evidence_quality",
 )
 
 pytestmark = pytest.mark.skipif(
@@ -85,6 +87,12 @@ def test_mavic_air_2_single_frame():
     assert r.sequence == 591
     assert round(r.drone_lat, 5) == round(51.446356, 5)
     assert round(r.drone_lon, 5) == round(7.267219, 5)
+    # Real GPS-locked frame: no semantic flags at all (evidence-quality label,
+    # never a filter -- the frame is kept either way; see
+    # protocol_droneid_evidence_gating.md).
+    assert r.product_type == 58
+    assert r.semantic_flags == []
+    assert r.evidence_quality == "clean"
 
 
 def test_mini2_sm_ten_frames():
@@ -103,11 +111,25 @@ def test_mini2_sm_ten_frames():
     assert op_lats == {round(51.447198, 5)}
     assert op_lons == {round(7.266532, 5)}
 
+    # duplicates/gaps -> sequence_non_monotonic on the later of the pair (indices
+    # 3, 5, 6, 7 of the list above: 788 dup, 800 gap, 804 gap, 804 dup); never on
+    # the first frame in the window.
+    seq_flagged = ["sequence_non_monotonic" in a.result.semantic_flags for a in good]
+    assert seq_flagged == [False, False, False, True, False, True, True, True, False, False]
+
     for a in good:
         r = a.result
         assert r.serial == "SysSecWasHere "
         assert r.drone_lat == 0.0
         assert r.drone_lon == 0.0
+        # RUB README: this capture has no GPS lock -- drone (and the
+        # GPS-fix-derived home point) position is exact-zero and flagged as
+        # such, but the operator/app position (phone GPS) is real and clean.
+        assert r.product_type == 63
+        assert "drone_coords_zero" in r.semantic_flags
+        assert "home_coords_zero" in r.semantic_flags
+        assert "operator_coords_zero" not in r.semantic_flags
+        assert r.evidence_quality == "flagged"
 
 
 def test_frame_fields_match_frozen_fixture():

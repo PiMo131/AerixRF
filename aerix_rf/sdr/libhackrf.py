@@ -34,13 +34,16 @@ log = logging.getLogger("aerix.rf.libhackrf")
 HACKRF_SUCCESS = 0
 _TRANSFER_BYTES = 262144          # libhackrf's default RX transfer size
 _QUEUE_MAX_S = 2.0                # seconds of buffered stream before we start dropping
+_FULL_SCALE = 128.0               # HackRF's native int8 full scale (see _cs8_to_iq);
+                                   # also the clip-detection threshold base -- see
+                                   # stream.py's raw_clip_stats (clips at +-127).
 
 
 def _cs8_to_iq(raw: np.ndarray) -> np.ndarray:
     """int8 interleaved I,Q (HackRF's native transfer format) -> complex64, +-1."""
     raw = raw.astype(np.float32)
     iq = raw[0::2] + 1j * raw[1::2]
-    return (iq / 128.0).astype(np.complex64)
+    return (iq / _FULL_SCALE).astype(np.complex64)
 
 
 class _hackrf_transfer(ctypes.Structure):
@@ -137,6 +140,7 @@ class HackRFStream:
             self.sample_rate, raw_to_iq=_cs8_to_iq, reports_drops=True,
             queue_max_s=_QUEUE_MAX_S, chunk_samples_hint=_TRANSFER_BYTES // 2,
             still_active=lambda: self.is_streaming(),
+            raw_full_scale=_FULL_SCALE,
         )
         self._cb = _RX_CB(self._rx_callback)   # keep a reference: libhackrf holds the pointer
 

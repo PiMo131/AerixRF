@@ -56,6 +56,28 @@ LATER                            2R2T / timestamps / UHD-style firmware, protoco
   unlock) are user-approval gates, never a builder decision.
 - Do not commit datasets, IQ, PDFs, secrets. Manifests/loaders/scripts/small fixtures only.
 
+**Planning-gate outcome (Fable review, 2026-09-18 evening)**
+
+Closed with evidence — do not reopen: canonical 15.36 MS/s with live ANTSDR 12.288 MS/s (exact 5/4);
+cs16 on ANTSDR / cs8 on HackRF; classifier features on the 10 MHz HackRF∩ANTSDR band; receiver-ID
+probe as a mandatory control; benchmark framed as a pipeline-integrity check with no PD claim.
+
+Open questions for the user (answers change the next phase):
+1. Which aircraft/link generations are available for A4 and positives (O2 decodable; O3/O4 not)?
+2. Is multi-receiver / TDOA in scope? (Decides whether the IIO image's lack of timestamps matters.)
+3. Permission (a) to boot an alternative image from a second SD card (non-persistent); (b) for the
+   persistent 2R2T U-Boot change — two separate answers.
+4. Field-box disk and acceptable hours of raw cs16 retention (≈177 GB/h at 12.288 MS/s ⇒ event-gated).
+5. Field-box compute budget: is ~2.6 s/window live Stage-2 acceptable, or v1 until v2 is optimised?
+6. 2.4 vs 5.8 GHz priority for the positives campaign.
+7. Are the 2026-09-04 HackRF sessions retrievable (Tier-C blocker)?
+8. Positives protocol controls: ≥3 distances; RC/phone ON with aircraft OFF; Wi-Fi co-channel active
+   during ON; interleaved ON/OFF within one session with logged times.
+
+Specialist work running in parallel with the questions: AD9361 BIST silent-loss measurement per rate;
+per-window clip fraction in sessions; decoder failure split (detection vs sync) before any redesign;
+analog-FPV (8 MHz continuous) test of the spectral floor.
+
 **Measured E200 facts that shape the design** (details and evidence grades in
 `research/briefs/antsdr-e200.md`): stock PlutoSDR-compatible IIO image, one RX exposed,
 12-bit-in-int16 samples (`iq_full_scale` 2048), **sustained RX ceiling ≈ 59 MB/s ≈ 14.8 MS/s

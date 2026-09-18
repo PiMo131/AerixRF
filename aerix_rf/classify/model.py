@@ -282,7 +282,14 @@ def _extract_features_v2_live(iq: np.ndarray, sample_rate: float) -> tuple[np.nd
 
     fs = float(sample_rate)
     if abs(fs - _fv2.CANONICAL_FS) > 1.0:
-        chain = _resample.plan_chain(fs, _fv2.CANONICAL_FS)
+        # F6 perf task (2026-09-18): this was silently planning the
+        # dataset-grade (60 dB stopband / ~1.68 MHz transition) chain --
+        # the live-grade design (`grade="live"`, resample.py) existed but
+        # was never requested here, so the live path always paid the
+        # slower, offline-quality filter cost. Measured ~1.0 s at 12.288
+        # MS/s before this fix; resample dominates the live path's latency
+        # (see F6 result packet).
+        chain = _resample.plan_chain(fs, _fv2.CANONICAL_FS, grade="live")
         iq = _resample.apply_chain(iq, chain, fs)
         fs = _fv2.CANONICAL_FS
     feats = _fv2.features_v2_from_iq(iq, fs=fs)

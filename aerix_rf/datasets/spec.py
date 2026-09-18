@@ -212,6 +212,12 @@ class ResampleStage(_Strict):
     window: Optional[str] = None
     cutoff_hz: Optional[float] = None
     stopband_db: Optional[float] = None
+    # Filter design grade (F5 live-latency task): "dataset" (default, the
+    # original 60 dB / narrow-transition Kaiser design) or "live" (shorter
+    # FIR for the real-time path). Recorded for provenance only -- apply_chain
+    # regenerates taps from numtaps/window/cutoff_hz/stopband_db regardless
+    # of this field.
+    grade: Optional[str] = None
 
 
 class SourceInfo(_Strict):
