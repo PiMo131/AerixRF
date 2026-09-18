@@ -9,3 +9,4 @@ sessions/
 *.cs8
 *.npz
 research/library/
+*.zip
