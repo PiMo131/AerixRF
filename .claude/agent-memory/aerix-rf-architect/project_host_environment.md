@@ -9,4 +9,6 @@ Dev host (Debian 13, 24 cores, 62 GB, 1.8 TB NVMe at `/`, ~1.7 TB free on 2026-0
 
 **Why:** These blocked/shaped the ANTSDR discovery in the first session.
 
+Tooling pitfall: `pgrep -f <pattern>` from the Bash tool matches the tool's own `bash -c` wrapper (its command line contains the pattern) — count processes with `ps -eo args | grep -E '^[^ ]*python'` style anchors instead, or you will "find" orphans that are your own shell.
+
 **How to apply:** Re-verify before relying on it (user may have granted sudo/dialout since). When a task needs root, produce an exact command list for the user instead of retrying. Dataset root is `~/rf-datasets/` (see [[antsdr-primary-pivot]]).

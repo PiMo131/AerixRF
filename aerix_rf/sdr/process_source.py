@@ -205,6 +205,7 @@ class ProcessIQSource(IQSource):
 
         self._running = True
         self._stopping = False
+        self._closed = False
         self._producer_lost = False
         self._host_dropped_total = 0
         self._host_overrun_events_total = 0
@@ -212,6 +213,23 @@ class ProcessIQSource(IQSource):
         self._meta_epoch_seen = -1
         self._readback: dict = {}
         self._readback_lock = threading.Lock()
+
+        # Fetch the producer's readback synchronously, once, right here --
+        # before the reader thread (and therefore before the first window)
+        # exists -- instead of relying solely on the reader thread's
+        # epoch-triggered refresh (_read_loop). That refresh only fires once
+        # a ring chunk with a *new* meta_epoch has actually been read, so
+        # without this call every window up to that point (including
+        # possibly the first one written to a session) would carry an empty
+        # ``readback`` dict, and Session.write_iq's "record the FIRST
+        # window's readback" logic would capture that empty snapshot instead
+        # of the real one. By the time producer_alive() above returned True,
+        # the producer has already opened its device and merged the real
+        # readback into its state (see producer_main.run(): readback merge
+        # happens before ring.heartbeat(STATE_RUNNING)), so this is not a
+        # race against producer startup -- only against our own reader
+        # thread's first observed epoch, which this pre-empts.
+        self._fetch_readback(0)
 
         self._reader_thread = threading.Thread(
             target=self._read_loop, name="process-source-reader", daemon=True,
@@ -303,19 +321,32 @@ class ProcessIQSource(IQSource):
             )
 
     def close(self) -> None:
+        """Idempotent teardown: send ``stop``, join the reader, then -- in a
+        ``finally`` -- always terminate/SIGKILL the producer and unlink the
+        ring, even if the control request or the reader join raised. Without
+        this ``finally``, an unexpected exception here (e.g. a control-socket
+        error that isn't a plain ``ControlChannelError``) would skip
+        ``_cleanup()`` entirely and leave the producer subprocess running as
+        an orphan holding the ring open (see live-capture evidence, T7c
+        fix)."""
+        if self._closed:
+            return
+        self._closed = True
         self._stopping = True
-        if self._ctrl is not None:
-            try:
-                self._ctrl.request("stop", timeout=1.0)
-            except ControlChannelError:
-                pass
-        self._running = False
-        if hasattr(self, "_asm"):
-            self._asm.mark_stopped()
-        reader = getattr(self, "_reader_thread", None)
-        if reader is not None:
-            reader.join(timeout=2.0)
-        self._cleanup(unlink=True)
+        try:
+            if self._ctrl is not None:
+                try:
+                    self._ctrl.request("stop", timeout=1.0)
+                except ControlChannelError:
+                    pass
+            self._running = False
+            if hasattr(self, "_asm"):
+                self._asm.mark_stopped()
+            reader = getattr(self, "_reader_thread", None)
+            if reader is not None:
+                reader.join(timeout=2.0)
+        finally:
+            self._cleanup(unlink=True)
 
     # --- internals ---------------------------------------------------------
     def _fetch_readback(self, epoch: int) -> None:
@@ -323,11 +354,14 @@ class ProcessIQSource(IQSource):
             return
         try:
             resp = self._ctrl.request("get_readback", epoch=epoch)
-        except ControlChannelError:
+        except ControlChannelError as exc:
+            log.warning("readback fetch (epoch=%s) failed: %s", epoch, exc)
             return
         if resp.get("ok"):
             with self._readback_lock:
                 self._readback = dict(resp.get("readback") or {})
+        else:
+            log.warning("readback fetch (epoch=%s) rejected by producer: %r", epoch, resp)
 
     def _read_loop(self) -> None:
         try:

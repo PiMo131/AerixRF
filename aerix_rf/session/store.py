@@ -416,8 +416,27 @@ class Session:
         for k, v in (extra or {}).items():
             if k == "test":
                 raise ValueError("finalize() must not overwrite the test-condition block")
+            if k == "receiver_readback":
+                # Only overwrite with a real (non-empty) readback dict -- e.g.
+                # a caller that pre-computed it from the FIRST window
+                # (--no-iq means write_iq(), the other place this key is set,
+                # never runs at all) -- never stomp an already-recorded value
+                # with None/{} just because this particular call has nothing
+                # new to say.
+                if isinstance(v, dict) and v:
+                    self.meta[k] = dict(v)
+                continue
             self.meta[k] = v
-        self.meta["stream_end_reason"] = getattr(source, "stream_end_reason", None)
+        # `source` (if given) is authoritative for stream_end_reason -- but
+        # only when it is actually given: a caller that already computed the
+        # correct value itself (e.g. the CLI, which must read this off the
+        # source BEFORE calling source.close(), since close() unconditionally
+        # marks the source "stopping" and would otherwise make every run
+        # -- completed or not -- read back as "user_stop") and passed it via
+        # `extra` should not have that value silently discarded just because
+        # it didn't also pass `source=`.
+        if source is not None or "stream_end_reason" not in self.meta:
+            self.meta["stream_end_reason"] = getattr(source, "stream_end_reason", None)
         self._flush()
 
     # --- readers -----------------------------------------------------------

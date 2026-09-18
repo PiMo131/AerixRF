@@ -345,6 +345,7 @@ def _run_locked(args, *, record_all: bool) -> int:
     """Shared body of `lock` and `capture`: stream one channel through the pipeline
     into a session directory."""
     from .sdr.capture import make_source
+    from .sdr.process_source import ProducerLostError
     from .session.store import Session
     from .session.report import write_summary
     from .dsp import spectrogram
@@ -403,8 +404,25 @@ def _run_locked(args, *, record_all: bool) -> int:
         for d in fr.decode_records():
             session.log_decode(d)
 
+    # Captured before source.close() runs (in the `finally` below): close()
+    # unconditionally marks the source as "stopping", so a ProcessIQSource's
+    # own `stream_end_reason` property would read back as "user_stop" for
+    # every run, completed or not, if read only after close(). Reading it
+    # here -- right where the `for` loop actually stops, one way or another
+    # -- is the only place the distinction between "ran to completion" and
+    # "the user (or a producer failure) cut it short" still exists.
+    # Recorded off the FIRST window regardless of whether it (or any later
+    # window) is ever written to disk -- `--no-iq` means Session.write_iq()
+    # (the other place this is recorded) never runs at all, but the
+    # requested-vs-actual device config is still worth having in session.json.
+    receiver_readback = None
+    stream_end_reason = None
     try:
         for win in source.windows():
+            if receiver_readback is None:
+                rb = win.metadata.get("readback")
+                if isinstance(rb, dict) and rb:
+                    receiver_readback = dict(rb)
             fr = process_window(win, cfg, decode=not args.no_decode)
             n_windows += 1
             n_plaus += int(fr.plausible)
@@ -433,9 +451,28 @@ def _run_locked(args, *, record_all: bool) -> int:
 
             if time.time() >= t_end:
                 break
+        # Loop ended on its own (seconds elapsed, or the generator returned)
+        # rather than via KeyboardInterrupt below -- ask the source, if it
+        # has an opinion (only ProcessIQSource does today; every other
+        # backend's getattr default of None means "no opinion", not "ok").
+        stream_end_reason = getattr(source, "stream_end_reason", None)
     except KeyboardInterrupt:
         print("\nstopped by user", flush=True)
+        stream_end_reason = "user_stop"
+    except ProducerLostError as exc:
+        # The acquisition producer process died mid-stream (not via our own
+        # source.close() below, which hasn't run yet) -- read its own
+        # classification (device_lost vs. producer_lost) now, before close()
+        # unconditionally marks the source "stopping".
+        print(f"\nacquisition producer lost: {exc}", file=sys.stderr, flush=True)
+        stream_end_reason = getattr(source, "stream_end_reason", None) or "producer_lost"
     finally:
+        # Every exit path above -- natural end, seconds elapsed, Ctrl-C, or a
+        # lost producer -- must still close() the source here before
+        # finalisation: it stops/kills the producer subprocess and unlinks
+        # its shared-memory ring (see ProcessIQSource.close()), so a run that
+        # completes normally never leaves an orphaned producer holding the
+        # ring open for the next capture to collide with.
         source.close()
         writer.shutdown(wait=True)
         for f in pending:
@@ -443,7 +480,9 @@ def _run_locked(args, *, record_all: bool) -> int:
             if exc is not None:
                 print(f"error while writing session data: {exc!r}", file=sys.stderr)
         session.finalize({"windows": n_windows, "plausible": n_plaus, "crc_valid_decodes": n_crc,
-                          "iq_bytes": iq_bytes, "iq_capped": iq_capped})
+                          "iq_bytes": iq_bytes, "iq_capped": iq_capped,
+                          "stream_end_reason": stream_end_reason,
+                          "receiver_readback": receiver_readback})
         path = write_summary(session)
         print(f"\n{n_windows} windows, {n_plaus} plausible, {n_crc} CRC-valid decodes")
         print(f"report: {path}")

@@ -11,6 +11,7 @@ producer process or a leaked ``/dev/shm`` segment.
 from __future__ import annotations
 
 import itertools
+import json
 import os
 
 import pytest
@@ -135,3 +136,70 @@ def test_clean_close_leaves_no_shm_residue():
         src.close()
 
     assert ring_name not in os.listdir("/dev/shm")
+
+
+# --- T7c fix regression: drive the SAME CLI function `capture` runs ----------
+#
+# Reproduces the live-capture evidence: a `ProcessIQSource` run through
+# `aerix_rf.cli._run_locked` (not constructed and closed directly, as every
+# test above does) must still (a) actually terminate the producer subprocess
+# and unlink its ring on a normal, non-interrupted finish, and (b) end up
+# with `stream_end_reason == "completed"` and a real `receiver_readback` in
+# session.json -- even with `--no-iq`, which never calls Session.write_iq()
+# (the only place `receiver_readback` used to get recorded).
+
+class _Args:
+    """Minimal argparse.Namespace stand-in: only the attributes `_run_locked`
+    (and its `_cfg_from`/`_test_meta` helpers) actually read."""
+
+    def __init__(self, session_root, **overrides) -> None:
+        self.session_root = str(session_root)
+        self.label = "t7c_regression"
+        self.notes = ""
+        self.seconds = 0.3
+        self.no_iq = True
+        self.no_decode = False
+        self.max_gb = 1.0
+        self.json = False
+        self.png_all = False
+        self.backend = "synthetic"  # irrelevant: make_source is monkeypatched below
+        self.center_mhz = 2437.0
+        self.sim = False
+        for k, v in overrides.items():
+            setattr(self, k, v)
+
+
+def test_cli_run_locked_closes_producer_and_records_readback(tmp_path, monkeypatch):
+    created: list[ProcessIQSource] = []
+
+    def _fake_make_source(cfg, prefer=None):
+        src = ProcessIQSource(
+            source_type="synthetic", sample_rate=SAMPLE_RATE,
+            center_freq_hz=cfg.center_freq_mhz * 1e6, chunk_samples=CHUNK_SAMPLES,
+            window_seconds=0.1,
+        )
+        created.append(src)
+        return src
+
+    import aerix_rf.sdr.capture as capture_mod
+    monkeypatch.setattr(capture_mod, "make_source", _fake_make_source)
+
+    from aerix_rf.cli import _run_locked
+
+    args = _Args(tmp_path)
+    rc = _run_locked(args, record_all=True)
+    assert rc == 0
+
+    assert len(created) == 1
+    src = created[0]
+    assert src._proc.poll() is not None, "producer subprocess must not survive a normal run"
+    assert not any(name.startswith("aerix-ring-") for name in os.listdir("/dev/shm")), (
+        "ring must be unlinked -- an orphaned ring would evict the next capture"
+    )
+
+    sessions = list(tmp_path.iterdir())
+    assert len(sessions) == 1
+    session_json = json.loads((sessions[0] / "session.json").read_text())
+    assert session_json["stream_end_reason"] == "completed"
+    assert isinstance(session_json.get("receiver_readback"), dict)
+    assert session_json["receiver_readback"]
