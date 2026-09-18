@@ -100,6 +100,24 @@ def _window_field(beta: float) -> str:
 
 _WINDOW_RE = re.compile(r"kaiser\(beta=([^)]+)\)")
 
+# F6 perf task: firwin taps depend only on (numtaps, cutoff_hz, beta,
+# design_rate_hz) -- all recorded/derivable stage parameters, never on the
+# IQ data itself -- so the same live-grade stage design (e.g. the fixed
+# 12.288 -> 15.36 MS/s ANTSDR up=5 case) redesigns identical taps on every
+# `apply_chain` call. Cached by that 4-tuple key; unbounded but keyed on a
+# small, low-cardinality set of (rate, chain) combinations actually seen in
+# one process, matching `_WIN_CACHE`'s existing precedent in tensor.py.
+_TAPS_CACHE: dict[tuple[int, float, float, float], np.ndarray] = {}
+
+
+def _firwin_cached(numtaps: int, cutoff_hz: float, beta: float, design_rate_hz: float) -> np.ndarray:
+    key = (numtaps, cutoff_hz, beta, design_rate_hz)
+    taps = _TAPS_CACHE.get(key)
+    if taps is None:
+        taps = firwin(numtaps, cutoff_hz, window=("kaiser", beta), fs=design_rate_hz)
+        _TAPS_CACHE[key] = taps
+    return taps
+
 
 def _parse_window_beta(window: str) -> float:
     m = _WINDOW_RE.match(window or "")
@@ -239,7 +257,17 @@ def apply_chain(iq: np.ndarray, chain: list[ResampleStage], in_rate_hz: float) -
     Returns complex64.
     """
 
-    x = np.asarray(iq, dtype=np.complex128)
+    # F6 perf task: "live" grade chains keep complex64 through resample_poly
+    # (avoids two full-array float64 promotions -- input cast and mix's
+    # `t`/exp temporaries -- for a real-time path that only ever accepts
+    # complex64 IQ). Dataset-grade chains are unchanged (complex128
+    # throughout) to preserve dataset-normalisation bit-exactness. Chains
+    # never mix grades (module docstring), so checking any stage is
+    # equivalent to checking all of them.
+    is_live = any(getattr(stage, "grade", None) == "live" for stage in chain)
+    compute_dtype = np.complex64 if is_live else np.complex128
+
+    x = np.asarray(iq, dtype=compute_dtype)
     current_rate_hz = float(in_rate_hz)
     for stage in chain:
         if stage.op == "identity":
@@ -247,13 +275,15 @@ def apply_chain(iq: np.ndarray, chain: list[ResampleStage], in_rate_hz: float) -
         if stage.op == "mix":
             n = x.shape[-1]
             t = np.arange(n, dtype=np.float64) / current_rate_hz
-            x = x * np.exp(-2j * np.pi * float(stage.mix_hz) * t)
+            x = (x * np.exp(-2j * np.pi * float(stage.mix_hz) * t)).astype(compute_dtype)
             continue
         up = int(stage.up or 1)
         down = int(stage.down or 1)
         design_rate_hz = current_rate_hz * up
         beta = _parse_window_beta(stage.window)
-        taps = firwin(int(stage.numtaps), float(stage.cutoff_hz), window=("kaiser", beta), fs=design_rate_hz)
+        taps = _firwin_cached(int(stage.numtaps), float(stage.cutoff_hz), beta, design_rate_hz)
+        if is_live:
+            taps = taps.astype(np.float32)
         x = resample_poly(x, up, down, window=taps)
         current_rate_hz = current_rate_hz * up / down
     return x.astype(np.complex64)

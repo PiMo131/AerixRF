@@ -252,6 +252,10 @@ prints serial + position), `cap` = capture health (`ok` or `INCOMPLETE(-n)`; the
 
 ## Status
 
+- **2026-09-18 (late) — silent loss measured.** AD9361 BIST tone through the production buffering, 600 s per run:
+  12.288 and 13.44 MS/s gap-free (0 discontinuities in 7,031 / 7,690 buffers); 15.36 MS/s broken (ratio 0.50);
+  in-process (GIL) contention catastrophic (ratio 0.41) while 12 separate busy processes cause zero loss — the
+  fix is a producer process, not a quiet host. 13.44 is now a validated named profile; 12.288 stays default. Details: `research/briefs/antsdr-e200.md` §14.
 - **2026-09-18 (evening) — soak and benchmark honesty.** Clean 10-minute ANTSDR soak on an idle host:
   600/600 windows, no loss (the earlier −5 % was CPU contention from concurrent test runs). Sessions now
   record device **read-back** state (`receiver_readback`, `readback_mismatch`) and typed loss fields.

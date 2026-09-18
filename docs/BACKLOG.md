@@ -55,7 +55,7 @@ and independent review before it is "done". Evidence-wording rules apply.
       Wi-Fi-induced (p10-over-time absorbs persistent Wi-Fi), not the receiver's. Resolve with read-back state
       recorded per session and an ON/OFF-scheduled capture. Until then: never mix sessions across hours as one
       "background" group without a session-level receiver-state table.
-- [ ] (progress 2026-09-18: 2.4 s → 1.76 s at 12.288 MS/s, 0.68 s at 15.36; the 5/4 live resample is the remaining hog — needs a profile)
+- [ ] (progress 2026-09-18: 2.4 → 1.21 s at 12.288 MS/s, 0.65 s at 15.36 after complex64 live resample, larger FFT chunks, cached taps; profiled floor ≈0.3 s without a compiled STFT/power kernel or dropping percentile-heavy groups — architecture decision pending user compute budget)
       Live `features_v2` path costs ≈2.6 s per 1 s window (12.288 MS/s): `features_v2_from_iq` runs two full STFTs
       (`ml_tensor` + unchunked `canonical_stft` for detector frames) and the 5/4 live resample uses the
       4145-tap dataset-grade FIR (~1.1 s). Target ≤150 ms: single STFT feeding both reductions, and a
@@ -76,6 +76,10 @@ and independent review before it is "done". Evidence-wording rules apply.
 - [ ] Locate data hosts for CageDroneRF and UAVSig.
 
 ## Receiver / sessions
+- [ ] **T7 producer process** (from §14.1: in-process GIL contention is THE loss mechanism; OS contention causes none):
+      run the libiio producer in its own OS process with a shared-memory ring + per-chunk header; design in
+      `docs/design/antsdr-backend.md` (hardware-architect, 2026-09-18). Acceptance: BIST-verified zero gaps with a
+      deliberately slow consumer and under pytest-style load.
 - [ ] (Fable 2026-09-18) Add `timestamp_quality` and `loss_counter_available` to `ReceiverCapabilities`; multi-receiver
       code must refuse to run where they are absent. Treat the IIO ceiling as this phase's constant, not architectural.
 - [ ] (Fable) Event-gated raw retention: cs16 at 12.288 MS/s ≈ 177 GB/h; decide disk/retention budget with user.

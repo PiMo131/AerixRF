@@ -163,3 +163,54 @@ adjacent band was peeled, or add a fine +-100 kHz centre refinement before demod
 Caveats: the forced probe mixes to the known true centre, so it is an upper bound on achievable
 performance, not a proposed algorithm; a real receiver still has to estimate that centre. Single synthetic
 blocker geometry (+20 dB, +4.5…+8.5 MHz, time-coincident); no stored-IQ or live confirmation yet.
+
+## § Scorer design (2026-09-18)
+
+Follow-up to § Failure split. Today's first attempt (break-only-on-B + 60 kHz DC dedup + a +-100/50 kHz
+grid scored by a single-shift **ZC4** correlation) regressed real IQ (RUB mavic 0/1, mini2 5/10) and was
+reverted: ZC4 is not frequency-selective (shift ambiguity keeps it at 0.84-0.97 for a wrong centre), so as
+a *comparator* it nudged already-correct centres, including DC, 50-100 kHz off. The scorer, not the search,
+was the defect. **zc6** (equalized sym-6 confirm, after STO/integer-CFO search) is the selective metric:
+~0.9 at the true centre, 0.01-0.03 at a 60 kHz error.
+
+Prototype (scratchpad `centre_scorer.py`/`extra.py`, monkeypatching `_centre_hypotheses` only; 40 windows
+per point, bench generator; RUB via `decode_all(iq, 50e6, budget_s=None, max_bursts=32)`):
+
+| variant | clean 4/5/6 dB | RUB mavic/mini2 | wb 10/12/14 dB | extra demods/window |
+|---|---|---|---|---|
+| baseline | 35/38/37 | 1 / 10 | 18/19/21 | 0 |
+| (a) rank all peel hypotheses by full sync (zc6, zc4 tiebreak) | 35/38/37 | 1 / 10 | 26/30/27 | 1.2-1.3 |
+| (b) = (a) + zc6-gated +-100..400 kHz refinement | 35/38/37 | 1 / 10 | **40/39/40** | 1.0-1.6 clean, 2.5-3.2 wb |
+| (c) de-bias `_grow_band` next to peeled bins | **1/0/0** | 1 / 10 | 31/39/40 | 0 |
+| (a)+(c) | 35/38/37 | 1 / 10 | 31/39/40 | 2.9 clean, 1.1 wb |
+
+(b) also gives wb 39/40 at 6 dB and 39/40 at 8 dB, i.e. >=0.975 across 6-14 dB, so `snr50_final_db`
+lands below the grid's low end instead of 15.4. Baseline wb is non-monotonic (33/40 at 6 dB, 16/40 at
+8 dB) - the reason `snr50_final` uses the *last* crossing.
+
+**Rejected: (c) standalone.** Reconstructing the centre from the untruncated edge plus the nominal
+9.015 MHz width destroys the clean arm (1/120). The synthetic 9.015 MHz bands it emits near DC are
+consistent with displacing the mandatory 0.0 fallback through `PEEL_DEDUP_HZ`; not separately
+instrumented. It only looks safe when (a) re-ranks behind it, and then it is strictly worse than (b).
+
+**Recommended: (b) with a ZC4 precondition** ("bg"; measured identical to (b) on every arm above).
+Per candidate slice: evaluate each peel hypothesis through the *existing* `_demodulate`; accept
+immediately at `zc6 >= CENTRE_ACCEPT_ZC6 = 0.75` (this keeps clean/RUB on exactly the baseline path,
+one hypothesis, one demod); otherwise take the argmax of `(zc6, zc4)`; if that best has
+`zc6 < CENTRE_REFINE_ZC6 = 0.35` **and** `zc4 >= correlation_threshold * ZC_GATE_FRACTION` (something
+DroneID-shaped did correlate), evaluate `best +- 100..400 kHz` and take the overall argmax. Grid step is
+tied to the integer-CFO capture range: worst-case residual 50 kHz < `K*15 kHz = 60 kHz`, so the existing
++-4-bin search closes the gap - do not raise the step above `2*K*15 kHz`.
+
+Cost: clean/RUB unchanged (0.185 vs 0.187 s/window at 4 dB) once the winning hypothesis's demod is cached
+rather than recomputed; wb 0.067 -> 0.164 s/window (prototype, one wasted duplicate demod ~35 ms). The
+`<=1.5x` runtime acceptance criterion above should become an absolute bound: mean <= 250 ms/window with
+zero `budget_s` exhaustions. Noise+blocker windows cost nothing here only because `_segment_envelope`
+yields 0 candidates (the pre-existing long-window gap); the ZC4 precondition is what bounds the
+refinement on a crowded real window, and that remains unmeasured.
+
+New failure modes: argmax-of-N over hypotheses is a max statistic, so at <=4 dB a noise-driven
+hypothesis can outrank the true one - never accept a best below `ZC6_CONFIRM_THRESHOLD`, fall back to
+peel order. The +-400 kHz span assumes edge-truncation bias stays within that; a blocker overlapping more
+of the band needs a different fix, not a wider grid. zc6 is an OFDM-structure match, not identity: it
+selects a centre, it does not raise the evidence level. Level C stays CRC-gated.

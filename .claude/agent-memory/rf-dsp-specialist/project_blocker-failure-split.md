@@ -25,6 +25,6 @@ into per-subband envelope/hypothesis ordering or into the FIR/CFO chain.
 **How to apply:** Do not redesign the channel-select FIR or the CFO estimator for adjacent-blocker
 robustness — the headroom is already there. Fix hypothesis generation/ordering first (break only on level
 "B"; shrink the DC-fallback dedup to ~60 kHz; de-bias the band-edge estimate next to a peeled neighbour).
-Remember the forced probe used ground truth, so it is an upper bound, not an algorithm. Single synthetic
+Remember the forced probe used ground truth, so it is an upper bound, not an algorithm. Resolved 2026-09-18 by [[centre-hypothesis-scorer]] — do NOT pursue the de-bias suggestion below, it was measured and rejected. Single synthetic
 blocker geometry, no stored-IQ/live confirmation — evidence level 1-2 only. See
 [[decode-snr-bench]] and docs/design/decoder-blocker-robustness.md "§ Failure split (2026-09-18)".

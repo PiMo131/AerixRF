@@ -64,17 +64,37 @@ CANONICAL_HOP = 512
 # sample of an all-zero synthetic test array).
 _EPS = 1e-12
 
-# Streaming chunk size for ml_tensor: milliseconds of output processed per
-# iteration. 40 ms * 30 frames/ms = 1200 STFT frames in flight at once
-# (~9.8 MB complex64 for the frame view/window-multiply temporary). Measured
-# (tracemalloc) peak for a full 1.000 s canonical window at this chunk size
-# is ~70 MB -- comfortably under the ~120 MB budget, including scipy.fft's
-# internal temporaries and the block-mean/output arrays. Chunk-size-vs-peak
-# is close to linear (measured ~35 MB at 20 ms, ~166 MB at 100 ms), so this
-# is a deliberate, tunable trade against per-chunk Python/FFT-call overhead.
-_CHUNK_MS = 40
+# Streaming chunk size for canonical_products/ml_tensor: milliseconds of
+# output processed per iteration. Raised from 40 to 58 ms (F6 perf task) to
+# cut the number of FFT dispatches (and Python-level chunk-loop overhead)
+# per 1.000 s canonical window from 25 to 18, while keeping tracemalloc peak
+# for the *full* canonical_products call (ml-tensor branch AND detector
+# branch both live, the realistic worst case -- ml_tensor's _skip_detector
+# path alone peaks far lower) under the ~120 MB budget: measured 117.5 MB at
+# 58 ms vs 123.0/120.7 MB at 59/60 ms (see tests/test_datasets_tensor.py's
+# peak-memory assertion). A uniform "<=6 chunks per 1 s window" (>=~167 ms
+# chunks) was also requested by the F6 brief but is not reachable within the
+# 120 MB budget for the detector-branch-included call: 6 chunks measures
+# ~310 MB (the detector branch's `_reduce_detector` re-materialises a
+# complex64-then-float64 power array on top of the chunk's own complex128
+# spectrum -- see that function). Reconciling this would mean changing the
+# STFT's arithmetic precision, which is explicitly out of scope for this
+# task (would risk the bit-exactness parity tests) -- flagged for the
+# architect/DSP specialist rather than silently traded away here.
+_CHUNK_MS = 58
 
 _WIN_CACHE: dict[int, np.ndarray] = {}
+
+# F6 perf task: canonical_products' chunk loop calls scipy.fft.fft once per
+# chunk (already a single batched call over all of the chunk's frames, not
+# per-frame) on a modest number of rows (<=58 ms * frames_per_ms, a few
+# thousand rows at most). `workers=-1` spins up (and tears down) a
+# min(os.cpu_count(), rows)-sized thread pool on every one of those calls;
+# for this row count that per-call pool churn measured as a net loss vs a
+# small fixed worker count. Threading choice never changes the FFT's
+# numeric result (deterministic regardless of worker count), so this is
+# perf-only and does not affect any bit-exactness parity test.
+_FFT_WORKERS = 4
 
 
 def _hann(fft_size: int) -> np.ndarray:
@@ -102,7 +122,12 @@ def _frame_slice(
     end_needed = start_sample + (n_frames - 1) * hop + fft_size
     avail = iq.shape[-1]
     if end_needed <= avail:
-        seg = np.asarray(iq[..., start_sample:end_needed], dtype=np.complex64)
+        seg = iq[..., start_sample:end_needed]
+        # F6 perf task: skip the redundant cast (and its full-segment copy)
+        # when the input is already complex64 -- a plain view/slice suffices
+        # and `sliding_window_view` below works on any dtype.
+        if seg.dtype != np.complex64:
+            seg = np.asarray(seg, dtype=np.complex64)
     else:
         pad = end_needed - avail
         head = np.asarray(iq[..., start_sample:avail], dtype=np.complex64)
@@ -260,7 +285,7 @@ def canonical_products(
         start_frame = ms_done * frames_per_ms
         n_frames_chunk = g * frames_per_ms
         frames = _frame_slice(iq, start_frame, n_frames_chunk)
-        spec = sfft.fft(frames * win, axis=1, workers=-1)
+        spec = sfft.fft(frames * win, axis=1, workers=_FFT_WORKERS)
         spec = _fftshift_axis1(spec)
         spec /= coherent_gain
 
@@ -282,7 +307,7 @@ def canonical_products(
         leftover_start = n_ms * frames_per_ms
         n_frames_leftover = leftover_det * detector_factor
         frames = _frame_slice(iq, leftover_start, n_frames_leftover)
-        spec = sfft.fft(frames * win, axis=1, workers=-1)
+        spec = sfft.fft(frames * win, axis=1, workers=_FFT_WORKERS)
         spec = _fftshift_axis1(spec)
         spec /= coherent_gain
         _reduce_detector(spec, leftover_det, det_out, det_done)

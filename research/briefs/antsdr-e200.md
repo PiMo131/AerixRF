@@ -242,3 +242,41 @@ timing-sensitive code refuses to run here. Caveat: BIST bypasses the analog fron
 clipping/AGC are NOT exercised by this test — `clip_fraction` covers that separately.
 
 **Architect addendum (2026-09-18):** the "load" row measured IN-PROCESS GIL contention (analysis threads in the same Python process as the producer), which is exactly the production backend's structure, but NOT genuine multi-core OS contention — that remains unmeasured (an external-subprocess load run was killed by host low-memory protection). The earlier 600 s soak under concurrent pytest suites showed ≈5 % loss, so both mechanisms exist. Decision: 12.288 MS/s stays the default (exact 5/4 canonical ratio, integer STFT timing); 13.44 MS/s is a validated named profile; 15.36 is unusable on this image; deployment rule stands (nothing heavy on the field box; keep the DSP consumer light or move the producer out of the GIL). Caveat: BIST bypasses the analog front end — clipping/AGC are covered by `clip_fraction`, not by this test.
+
+## 14.1 OS-level contention (2026-09-18)
+
+Follow-up to §14's open item: is the CPU-contention risk the Python GIL (same-process, fixable) or
+genuine multi-core OS scheduling pressure (host-level, deployment-only)? All runs 12.288 MS/s, 300 s,
+BIST tone, idle-vs-loaded host (24-core/62GB), separate-process load (`multiprocessing`-style
+`subprocess.Popen`, not threads), same producer/consumer-thread script as §14 (`bist_loss.py`).
+
+| Run | Load | Buffers | Throughput ratio | Jump events (boundary/interior) | Long refills | Consumer queue_drops | Peak RSS |
+|---|---|---|---|---|---|---|---|
+| (a) baseline | idle | 3515/3516 | 0.9998 | 0 / 0 | 0 | 0 | 248 MB |
+| (b) external load | 12 procs, nice 0, unpinned | 3515/3516 | 0.9998 | 0 / 0 | 0 | 638 | 325 MB |
+| (c) external load | 12 procs, nice +10, unpinned | 3515/3516 | 0.9998 | 0 / 0 | 0 | 226 | 316 MB |
+
+(d) (producer pinned to 2 reserved cores, load restricted off those cores) was not run: the gating
+condition — "(b) shows loss" — did not occur, so it was skipped per the task's own conditional.
+
+**Interpretation:** genuine multi-core OS contention from separate processes, even saturating 12 of 24
+cores at nice 0, does **not** perturb the producer thread's `refill()/read()` timing at 12.288 MS/s —
+buffer count, throughput ratio, and BIST phase continuity are all identical to idle. The only casualty
+is our *own diagnostic's* analysis consumer thread (`queue_drops` rises), because that thread competes
+for this process's GIL/CPU share, not because of the external load itself. This is the opposite
+mechanism from §14's in-process GIL-contention run (0.412 ratio, catastrophic interior jumps) and from
+the ~5% loss seen under concurrent pytest suites in the same repo — both of those shared the *producer's
+own process/GIL* with the expensive consumer. A separate OS process, however CPU-heavy, does not do
+that: the kernel scheduler keeps servicing the producer thread's blocking `refill()` call regardless of
+what unrelated processes are doing, at this rate/buffer size on this 24-core host.
+
+**Practical conclusion:** the production risk identified in §14 is GIL/same-process contention, not
+"the machine." Running AERIX's DSP/consumer stage as a **separate OS process** from the ANTSDR
+acquisition producer (e.g. multiprocessing with a shared-memory or socket handoff, not threads) removes
+the silent-loss risk demonstrated in §14, even under heavy host-wide load — this is a concrete,
+implementable mitigation, not just a deployment rule. The "field box runs nothing else heavy" rule from
+§14 can be relaxed to "field box runs nothing else *in the same process as the producer thread*";
+unrelated host load remains a secondary risk only insofar as it could exhaust total CPU capacity for
+*all* processes including the producer's own process at very high load — untested at saturation levels
+above 12/24 cores, and not tested at rates above 12.288 MS/s under load. `bist_tone` confirmed reset to
+`0 0 0 0` and ambient RSSI 96.75 dB confirmed after all runs.
