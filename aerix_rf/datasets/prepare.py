@@ -118,6 +118,58 @@ class PrepareStats:
     tensor_shape_example: Optional[tuple] = None
 
 
+def _receiver_group(dataset_id: str, rec) -> ReceiverGroup:
+    """Build this window's `ReceiverGroup`. Third-party datasets (no
+    `rec.extra["receiver"]`, e.g. Zenodo/RUB-SysSec) get the previous
+    generic third-party placeholder unchanged. `AerixSessionAdapter`
+    recordings carry a `rec.extra["receiver"]` dict (session.json's own
+    gain/backend/firmware/bandwidth/readback state) that is mapped onto the
+    real fields here instead -- see
+    docs/design/features-and-benchmark.md S5#1."""
+
+    receiver_extra = rec.extra.get("receiver") if isinstance(rec.extra, dict) else None
+    if not receiver_extra:
+        return ReceiverGroup(
+            receiver=ReceiverDevice(
+                type="third_party_dataset",
+                backend=dataset_id,
+                firmware=None,
+                driver=None,
+                antenna=None,
+            ),
+            gain=GainInfo(mode=GainMode.UNKNOWN, changed_within_window=False),
+            dc_offset_corrected=None,
+            quadrature_corrected=None,
+            clock=ClockInfo(source=None, pps_locked=None),
+        )
+
+    gain_mode_raw = receiver_extra.get("gain_mode")
+    try:
+        gain_mode = GainMode(gain_mode_raw)
+    except ValueError:
+        gain_mode = GainMode.UNKNOWN
+
+    return ReceiverGroup(
+        receiver=ReceiverDevice(
+            type=receiver_extra.get("type"),
+            backend=receiver_extra.get("backend"),
+            firmware=receiver_extra.get("firmware"),
+            driver=None,
+            antenna=None,
+            rf_bandwidth_hz=receiver_extra.get("rf_bandwidth_hz"),
+        ),
+        gain=GainInfo(
+            mode=gain_mode,
+            db=receiver_extra.get("gain_db"),
+            changed_within_window=False,
+        ),
+        dc_offset_corrected=None,
+        quadrature_corrected=None,
+        clock=ClockInfo(source=receiver_extra.get("clock"), pps_locked=None),
+        readback=receiver_extra.get("readback"),
+    )
+
+
 def _uid(source_sha256_: str, source_file: str, slice_spec: str, window_index: int) -> str:
     key = "|".join([source_sha256_, source_file, slice_spec, str(window_index), _CONFIG_SHA256])
     return hashlib.sha256(key.encode("utf-8")).hexdigest()[:16]
@@ -177,6 +229,7 @@ def prepare_dataset(
         )
 
         labels = adapter.labels(rec)
+        health_extra: dict = (rec.extra.get("health") if isinstance(rec.extra, dict) else None) or {}
 
         for window_index, (start, iq_window, short) in enumerate(
             iter_windows(canonical_iq, CANONICAL_RATE_HZ, window_s=1.0, grid_ms=1)
@@ -224,6 +277,9 @@ def prepare_dataset(
                     usable_bw_hz=usable_bw_hz,
                     band_deficit=band_deficit,
                     short_window=short,
+                    window_deficit_frac=health_extra.get("window_deficit_frac"),
+                    session_deficit_frac=health_extra.get("session_deficit_frac"),
+                    capture_complete=health_extra.get("capture_complete"),
                 ),
                 source=SourceInfo(
                     original_rate_hz=in_rate_hz,
@@ -234,19 +290,7 @@ def prepare_dataset(
                     iq_format_source=iq_format_source,
                     resample_chain=chain,
                 ),
-                receiver=ReceiverGroup(
-                    receiver=ReceiverDevice(
-                        type="third_party_dataset",
-                        backend=dataset_id,
-                        firmware=None,
-                        driver=None,
-                        antenna=None,
-                    ),
-                    gain=GainInfo(mode=GainMode.UNKNOWN, changed_within_window=False),
-                    dc_offset_corrected=None,
-                    quadrature_corrected=None,
-                    clock=ClockInfo(source=None, pps_locked=None),
-                ),
+                receiver=_receiver_group(dataset_id, rec),
                 levels=LevelsGroup(
                     noise_floor_dbfs=noise_floor_dbfs,
                     rssi_dbfs=None,

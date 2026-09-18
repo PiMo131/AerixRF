@@ -182,8 +182,22 @@ class SignalInfo(_Strict):
     usable_bw_hz: float
     band_deficit: bool = False
     short_window: bool = False
+    # Capture-health telemetry (docs/design/features-and-benchmark.md S5#5):
+    # `window_deficit_frac` is this window's own (expected - delivered) /
+    # expected sample fraction; `session_deficit_frac` is the same ratio
+    # accumulated over the session's files up to and including this one.
+    # Both are `None` when the source recording carries no per-file
+    # expected/received sample counts to compute them from (e.g. an old
+    # session whose only capture-health signal was a noisy per-window
+    # `stream_rate_ratio`, or a third-party dataset with no capture-health
+    # concept at all) -- never fabricated from an unrelated proxy.
+    window_deficit_frac: Optional[float] = None
+    session_deficit_frac: Optional[float] = None
+    capture_complete: Optional[bool] = None
 
     _validate_center_freq_hz = field_validator("center_freq_hz")(_reject_non_finite)
+    _validate_window_deficit_frac = field_validator("window_deficit_frac")(_reject_non_finite)
+    _validate_session_deficit_frac = field_validator("session_deficit_frac")(_reject_non_finite)
 
 
 class ResampleStage(_Strict):
@@ -222,6 +236,14 @@ class ReceiverDevice(_Strict):
     firmware: Optional[str] = None
     driver: Optional[str] = None
     antenna: Optional[str] = None
+    # Declared/configured RF front-end bandwidth (session.json
+    # `bandwidth_hz`), distinct from `SignalInfo.bandwidth_hz` (the
+    # canonical window's own sample-rate-implied bandwidth) and
+    # `SourceInfo.original_bw_hz` (the captured signal's declared
+    # bandwidth) -- this is the receiver chain's own filter setting.
+    rf_bandwidth_hz: Optional[float] = None
+
+    _validate_rf_bandwidth_hz = field_validator("rf_bandwidth_hz")(_reject_non_finite)
 
 
 class GainInfo(_Strict):
@@ -236,12 +258,35 @@ class ClockInfo(_Strict):
     pps_locked: Optional[bool] = None
 
 
+def _reject_non_finite_dict_values(
+    v: Optional[dict[str, float | str]]
+) -> Optional[dict[str, float | str]]:
+    """Same rule as `_reject_non_finite`, applied to each float-valued entry
+    of a readback dict: NaN/+-inf are never legal, `None` is fine (whole
+    dict absent), and string entries are left alone."""
+
+    if v is not None:
+        for key, val in v.items():
+            if isinstance(val, float) and not math.isfinite(val):
+                raise ValueError(f"non-finite value not allowed for readback[{key!r}]: {val!r}")
+    return v
+
+
 class ReceiverGroup(_Strict):
     receiver: ReceiverDevice
     gain: GainInfo
     dc_offset_corrected: Optional[bool] = None
     quadrature_corrected: Optional[bool] = None
     clock: ClockInfo
+    # Raw device READ-BACK state (as opposed to the commanded/declared
+    # values above) when the receiver backend reports one, e.g.
+    # `hardwaregain_db`, `gain_control_mode`, `rf_bandwidth_hz`,
+    # `sampling_frequency_hz`, `rf_port`, `rx_lo_hz` for an IIO/AD9361
+    # backend. `None` means the source never recorded a readback, not that
+    # readback and commanded state agree.
+    readback: Optional[dict[str, float | str]] = None
+
+    _validate_readback = field_validator("readback")(_reject_non_finite_dict_values)
 
 
 class LevelsGroup(_Strict):

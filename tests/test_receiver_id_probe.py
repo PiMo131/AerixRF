@@ -71,12 +71,16 @@ def _write_window(
     noise_std: float,
     emitter_class: EmitterClass,
     rng: np.random.Generator,
-    rate_warning: bool = False,
+    rate_deficit: bool = False,
 ) -> None:
     """Write one synthetic `<uid>.tensor.npy` + index row. The only thing
     that differs between the two fake receivers is `noise_std` (a pure
     per-bin noise-scale confound, S1.6 Q4) -- both draw from the same
-    floor level and the same (absent) signal."""
+    floor level and the same (absent) signal. `rate_deficit=True` writes a
+    session-level `stream_rate_ratio=` below the S5.5 exclusion threshold
+    (0.95) in `notes`, matching the current `_rate_deficit_reason` fallback
+    path (the retired `rate_warning=True` string-match is no longer read by
+    the probe)."""
     tensor = (-70.0 + rng.normal(0.0, noise_std, size=(N_MS, 1024))).astype(np.float32)
     uid = f"{dataset_id}_{device_id}_{run_id}_{idx}"
     prepared_dir = root / dataset_id / "prepared"
@@ -122,9 +126,19 @@ def _write_window(
             split=Split.UNASSIGNED,
             created_at=datetime.now(timezone.utc).isoformat(),
         ),
-        notes="rate_warning=True" if rate_warning else None,
+        notes="stream_rate_ratio=0.80" if rate_deficit else None,
     )
     append(sidecar, root=root)
+
+
+# Runs (groups) and windows per run per receiver. S5.4 added a per-fold
+# guard (>=2 train groups, >=5 rows of every class on both sides of the
+# split) that the old 3 runs x 4 windows corpus cannot satisfy once
+# StratifiedGroupKFold (n_splits=min(5, n_groups)) has to place >=5
+# same-class rows in every fold's test split: 6 groups x 6 windows = 36
+# rows/class gives every 1-2 group test fold >=6 rows of its class.
+N_RUNS = 6
+N_WINDOWS = 6
 
 
 def _build_two_receiver_corpus(root: Path, *, shared_label: bool) -> tuple[str, str]:
@@ -137,31 +151,32 @@ def _build_two_receiver_corpus(root: Path, *, shared_label: bool) -> tuple[str, 
     rng_a = np.random.default_rng(1)
     rng_b = np.random.default_rng(2)
 
-    for run in range(3):
-        for i in range(4):
+    for run in range(N_RUNS):
+        for i in range(N_WINDOWS):
             _write_window(root, ds_a, "devA", f"runA{run}", i, noise_std=0.2,
                            emitter_class=EmitterClass.BACKGROUND, rng=rng_a)
 
     b_label = EmitterClass.BACKGROUND if shared_label else EmitterClass.DRONE_LINK
-    for run in range(3):
-        for i in range(4):
+    for run in range(N_RUNS):
+        for i in range(N_WINDOWS):
             _write_window(root, ds_b, "devB", f"runB{run}", i, noise_std=1.0,
                            emitter_class=b_label, rng=rng_b)
 
-    # One rate_warning window in each receiver, that must be excluded.
+    # One rate-deficient session in each receiver (session-level
+    # stream_rate_ratio < 0.95, S5.5), that must be excluded.
     _write_window(root, ds_a, "devA", "runA_bad", 0, noise_std=0.2,
-                  emitter_class=EmitterClass.BACKGROUND, rng=rng_a, rate_warning=True)
+                  emitter_class=EmitterClass.BACKGROUND, rng=rng_a, rate_deficit=True)
     _write_window(root, ds_b, "devB", "runB_bad", 0, noise_std=1.0,
-                  emitter_class=b_label, rng=rng_b, rate_warning=True)
+                  emitter_class=b_label, rng=rng_b, rate_deficit=True)
     return ds_a, ds_b
 
 
 def test_load_rows_excludes_rate_warning(tmp_path: Path):
     ds_a, ds_b = _build_two_receiver_corpus(tmp_path, shared_label=True)
     rows, skipped = rip.load_rows([ds_a, ds_b], root=tmp_path)
-    assert len(rows) == 24  # 2 receivers * 3 runs * 4 windows, bad ones excluded
-    assert skipped.get(f"{ds_a}:rate_warning") == 1
-    assert skipped.get(f"{ds_b}:rate_warning") == 1
+    assert len(rows) == 2 * N_RUNS * N_WINDOWS  # 2 receivers, bad sessions excluded
+    assert skipped.get(f"{ds_a}:session_rate_ratio_lt_0.95") == 1
+    assert skipped.get(f"{ds_b}:session_rate_ratio_lt_0.95") == 1
     # G3 slice is excluded from the usable feature vector entirely.
     assert rows[0].vector.shape == (len(rip.USABLE_FEATURE_NAMES),)
     assert rip.G3_SLICE.stop - rip.G3_SLICE.start == 12

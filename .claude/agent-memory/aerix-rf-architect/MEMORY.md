@@ -6,3 +6,4 @@
 - [Canonical decisions](project_canonical_decisions.md) — 15.36 canonical; ANTSDR live 12.288 cs16/2048 rf_bw 10 MHz; decode knee 8–9 dB; features over common 10 MHz
 - [A4 acceptance progress](project_a4_progress.md) — live E200 session+replay works (2026-09-18); DJI CRC decode on ANTSDR still needs a drone powered nearby
 - [No IQ on tmpfs](feedback_no_iq_on_tmpfs.md) — /tmp is 32 GB RAM tmpfs; session roots go on NVMe; no captures during heavy test runs
+- [Benchmark lesson](project_benchmark_lesson.md) — chamber-vs-ambient confound; probe PASS withdrawn; need same-session ON/OFF drone positives + read-back device state

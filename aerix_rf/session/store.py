@@ -338,6 +338,16 @@ class Session:
             "channel_id": int(window.channel_id),
             "timing": dict(window.timing) if window.timing else {},
         }
+        # Receiver config readback (currently only antsdr_iio populates
+        # window.metadata["readback"] -- see docs/design/antsdr-backend.md):
+        # the REQUESTED config alone is not proof the device was actually in
+        # that state, so a readback-capable backend's first window's readback
+        # is recorded once at the top level, and every file records whether
+        # ITS window's readback matched the requested config at capture time.
+        if "readback_mismatch" in window.metadata:
+            entry["readback_mismatch"] = bool(window.metadata["readback_mismatch"])
+        if not self.files and isinstance(window.metadata.get("readback"), dict):
+            self.meta["receiver_readback"] = dict(window.metadata["readback"])
         self.files.append(entry)
         self.meta.setdefault("counts", {})["iq_windows"] = len(self.files)
         self._flush()

@@ -369,6 +369,8 @@ Stage-1/2/3 pipeline on the 24-core dev host. Ground truth = one-second windows 
 | probe_k32_4m | 60 s | on | 32 × 4 M | 59 / ~57 s streaming | ≈12.29 MS/s (0 %) | idle host |
 | a_iq_default | 300 s | on | 8 × 1 M | 300 / 301.5 s incl. setup | ≈12.29 MS/s (0 %) | idle host |
 | b_noiq_default | 300 s | off (`--no-iq`) | 8 × 1 M | 300 / 301.4 s incl. setup | ≈12.29 MS/s (0 %) | idle host |
+| soak600_default_noiq | 600 s | off | 8 × 1 M | **600 / 601.5 s incl. setup** | ≈12.29 MS/s (0 %) | idle host — A4 soak criterion met (ground truth) |
+| soak600_k32_4m_iq | 600 s | on (cs16, 40 GB cap) | 32 × 4 M | **599 / 601.5 s incl. setup** | ≈12.29 MS/s (0 %) | idle host — larger device buffers also clean; run (c) superseded |
 | c_iq_k32_4m | 300 s planned | on | 32 × 4 M | aborted at 65 s | — | host tmpfs ran out of space (session root was on /tmp); rerun owed |
 | bare libiio loop (no DSP) | 25 s | — | 8 × 1 M | — | 12.297 MS/s (ratio 1.0007) | `rx_throughput_test2.py` |
 

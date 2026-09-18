@@ -4,3 +4,4 @@
 - [Dataset normalization pipeline](project_dataset-normalization.md) — Workstream D preprocessing design + verified DroneRF/Zenodo/RUB on-disk formats and the leakage traps.
 - [Decode SNR bench pitfalls](project_decode-snr-bench.md) — the non-monotonic decode curve, snr50_final_db, and the argmax(psd) blocker weakness.
 - [Stage-2 features_v2 + first benchmark](project_features-v2-benchmark.md) — 292-D absolute-Hz features on the 10 MHz common band, receiver-ID probe thresholds, and why the benchmark is PFA-only.
+- [First benchmark results (2026-09-18)](project_first-benchmark-results.md) — the chamber-vs-ambient shortcut, the fac0aacf receiver-state outlier, and why below-chance BA is not a pass.

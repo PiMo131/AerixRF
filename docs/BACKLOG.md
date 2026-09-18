@@ -36,12 +36,18 @@ and independent review before it is "done". Evidence-wording rules apply.
       canonical 15.36 — must yield identical CRC-valid frames. **Session is not on this machine.**
 
 ## Classifier / datasets
+- [ ] Tier-D outlier session `a_iq_default` (quiet band, raised+flattened floor): live read-back shows LO/gain/mode
+      correct and the afternoon soak sees intermediate Wi-Fi load ⇒ ambient traffic varies by hour (scene), but
+      the floor-shape change is unexplained. Hypothesis: the "U-shaped" floor of Wi-Fi-saturated sessions is
+      Wi-Fi-induced (p10-over-time absorbs persistent Wi-Fi), not the receiver's. Resolve with read-back state
+      recorded per session and an ON/OFF-scheduled capture. Until then: never mix sessions across hours as one
+      "background" group without a session-level receiver-state table.
 - [ ] Live `features_v2` path costs ≈2.6 s per 1 s window (12.288 MS/s): `features_v2_from_iq` runs two full STFTs
       (`ml_tensor` + unchunked `canonical_stft` for detector frames) and the 5/4 live resample uses the
       4145-tap dataset-grade FIR (~1.1 s). Target ≤150 ms: single STFT feeding both reductions, and a
       short live-grade resampler (or run the canonical STFT at the native rate with bin remapping). Until
       then `AERIX_RF_FEATURES=v1` default; v2 opt-in. (F4, 2026-09-18)
-- [ ] Dataset folder naming: downloads sit under display names (`RUB-DroneSecurity/`, `ZenodoDroneRFVideo2020/`)
+- [x] (done) Dataset folder naming: downloads sit under display names (`RUB-DroneSecurity/`, `ZenodoDroneRFVideo2020/`)
       while `prepare` writes under manifest `dataset_id` (`rub_dronesecurity/`). Decision 2026-09-18: `dataset_id`
       is canonical — librarian to move/symlink `original/` dirs and update `manifests/datasets.json` paths.
 - [ ] `classify/train/data.py::_dronerf_label` maps DJI Phantom 3 to `dji_ocusync`; Phantom 3 is
@@ -52,14 +58,17 @@ and independent review before it is "done". Evidence-wording rules apply.
 - [ ] Zenodo 4264467 is 120 MS/s (2.4 GHz, 1.0 s/file) and 200 MS/s (5.8 GHz, 0.5 s/file) int16 — add
       120→(÷6)→20→96/125 and 200→(÷10)→20→96/125 chains + tests to `datasets/resample.py`; the 0.5 s
       files yield short windows (`short_window` flag).
-- [ ] Retire duplicate manifest entry `dji_droneid_iq_rub_syssec` in favour of `rub_dronesecurity`.
+- [x] Retire duplicate manifest entry `dji_droneid_iq_rub_syssec` in favour of `rub_dronesecurity`.
 - [ ] Locate data hosts for CageDroneRF and UAVSig.
 
 ## Receiver / sessions
+- [x] (done 2026-09-18) Device read-back state recorded per session (`receiver_readback`, per-file
+      `readback_mismatch`); typed `window_deficit_frac`/`session_deficit_frac` in sidecars.
+- [x] (done 2026-09-18) Clean 10-min soak: 600/600 windows, idle host, default buffers, no IQ.
 - [ ] `antsdr_iio`: demote the per-50-refill INFO log to DEBUG; `max inter-refill gap` always prints 0.000 s
       (counter bug — should be ≈0.085 s at 1 M-sample buffers). Hardware sweep 2026-09-18: 2.4/5.8 GHz
       baselines finite, live differential scan correct (no candidates in a stable environment).
-- [ ] `RetuneWelchSweep.step_hz` fallback uses `capabilities.max_instantaneous_bw_hz` (analog max) — decision
+- [x] (done 2026-09-18) `RetuneWelchSweep.step_hz` fallback uses `capabilities.max_instantaneous_bw_hz` (analog max) — decision
       2026-09-18: derive step from the live source's actual sample rate × usable fraction (ANTSDR default
       10 MHz; sim 20 MS/s → 12 MHz) and cap by capabilities; fix `cli.py` baseline floor print to `nanmedian`.
       Do together with the first hardware `baseline --backend antsdr_iio` run.
@@ -73,12 +82,12 @@ and independent review before it is "done". Evidence-wording rules apply.
       `hackrf_set_baseband_filter_bandwidth`, call explicitly after `hackrf_set_sample_rate`, expose
       `baseband_filter_bw_hz`, record it in `IQWindow.bandwidth_hz`. See `research/briefs/hackrf.md`.
       Bench-verify with a CW tone when a HackRF is attached (filter corner, `stream_rate_ratio` ≥ 0.99).
-- [ ] On stream stop, the partially assembled last window is discarded silently (pre-existing, preserved
+- [x] (tail_discarded_samples added) On stream stop, the partially assembled last window is discarded silently (pre-existing, preserved
       by T2). Decision 2026-09-18: keep discarding (sub-window IQ cannot run the 1 s pipeline) but
       expose `tail_discarded_samples` in session health. Revisit for long ANTSDR captures.
-- [ ] `CS16_DEFAULT_FULL_SCALE = 32767.0`: decide whether cs16 should *require* an explicit
+- [x] (done 2026-09-18: cs16 requires explicit full scale) `CS16_DEFAULT_FULL_SCALE = 32767.0`: decide whether cs16 should *require* an explicit
       `iq_full_scale` (ANTSDR = 2048) to avoid a silent 24 dB RSSI error.
-- [ ] Backend-neutral sweep (`scan`/`baseline` currently shell out to `hackrf_sweep`) — design task T5.
+- [x] Backend-neutral sweep — done 2026-09-18 (T5), hardware-verified 2.4/5.8 GHz baselines + live scan.
 - [ ] ADC full-scale confirmation at saturation on the E200 (needs a bench CW source).
 - [ ] DroneID dwell schedule for narrow windows: candidate centres 2414.5/2429.5/2444.5/2459.5 MHz
       (+ unresolved others, 5.8 GHz unresolved), ≥2 × 640 ms per dwell. See

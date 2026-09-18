@@ -252,6 +252,15 @@ prints serial + position), `cap` = capture health (`ok` or `INCOMPLETE(-n)`; the
 
 ## Status
 
+- **2026-09-18 (evening) — soak and benchmark honesty.** Clean 10-minute ANTSDR soak on an idle host:
+  600/600 windows, no loss (the earlier −5 % was CPU contention from concurrent test runs). Sessions now
+  record device **read-back** state (`receiver_readback`, `readback_mismatch`) and typed loss fields.
+  First cross-receiver benchmark ran and *falsified* a naive classifier: with anechoic public positives vs
+  one room's Wi-Fi-saturated negatives it learned "quiet band = drone" (PFA≈1.0 on a quieter session);
+  the receiver-ID probe's first PASS was a fold artefact and is withdrawn (now StratifiedGroupKFold with
+  guards and an INCONCLUSIVE verdict). No PD or cross-receiver claim is supported yet — see
+  `docs/design/features-and-benchmark.md` §5. Highest-value next data: a DJI aircraft captured by the E200
+  with interleaved ON/OFF intervals in one session.
 - **2026-09-18 (later) — ANTSDR path live-verified.** `aerix-rf capture --backend antsdr_iio` runs the
   full pipeline on the E200 at 12.288 MS/s cs16; 300 s captures with and without IQ writing delivered
   300/300 windows (no loss on an idle host); replay is bit-exact. An earlier −5 % over 10 min coincided

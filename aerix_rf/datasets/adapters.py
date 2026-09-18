@@ -456,6 +456,25 @@ class AerixSessionAdapter:
             "gain_db": (meta.get("gains") or {}).get("gain_db"),
             "clock": "host_wallclock",
         }
+        # Session-level READ-BACK device state, when the backend records
+        # one (not yet emitted by any session in the current corpus --
+        # forward-compatible key, see docs/design/features-and-benchmark.md
+        # S5#1). A per-file `receiver_readback` (checked below) wins over
+        # this session-level one when both are present.
+        session_readback = meta.get("receiver_readback")
+
+        # Cumulative (expected, received) sample totals across this
+        # session's files, in `files[]` order, used to compute
+        # `session_deficit_frac` as-of each file -- see the per-file loop
+        # below. Only files with a `capture_health` that carries explicit
+        # `expected_samples` + (`received_samples` or
+        # `dropped_or_missing_samples`) contribute; a legacy session whose
+        # only capture-health signal is a noisy per-window
+        # `stream_rate_ratio` never contributes here, and
+        # `session_deficit_frac` stays `None` for every one of its windows.
+        cum_expected = 0
+        cum_received = 0
+        cum_any = False
 
         for entry in meta.get("files") or []:
             rel = entry.get("file")
@@ -512,10 +531,50 @@ class AerixSessionAdapter:
             ratio = capture_health.get("stream_rate_ratio")
             if ratio is not None:
                 note_parts.append(f"stream_rate_ratio={ratio}")
-            if capture_health.get("rate_warning"):
-                note_parts.append("rate_warning=True")
+            # `rate_warning=...` is deliberately no longer added here: it is
+            # now the typed `signal.window_deficit_frac` /
+            # `signal.capture_complete` sidecar fields below, not a free-text
+            # note (docs/design/features-and-benchmark.md S5#5).
 
             channel_id = entry.get("channel_id")
+
+            # window_deficit_frac: this file's own (expected - delivered) /
+            # expected sample fraction. `None` when the file's
+            # capture_health does not carry explicit expected/received
+            # counts (old sessions only logged a noisy per-window
+            # `stream_rate_ratio` -- never treated as a deficit fraction).
+            expected = capture_health.get("expected_samples")
+            received = capture_health.get("received_samples")
+            if received is None and capture_health.get("dropped_or_missing_samples") is not None:
+                if expected is not None:
+                    received = expected - capture_health["dropped_or_missing_samples"]
+            window_deficit_frac: Optional[float] = None
+            if expected is not None and received is not None and expected > 0:
+                window_deficit_frac = (expected - received) / expected
+                cum_expected += expected
+                cum_received += received
+                cum_any = True
+
+            # session_deficit_frac: same ratio, cumulative over this
+            # session's files up to and including this one. Stays `None`
+            # until at least one file with usable expected/received counts
+            # has been seen; a purely legacy session (no file ever carries
+            # them) leaves this `None` for every window rather than
+            # deriving a number from the noisy per-window ratio.
+            session_deficit_frac: Optional[float] = None
+            if cum_any and cum_expected > 0:
+                session_deficit_frac = (cum_expected - cum_received) / cum_expected
+
+            capture_complete = capture_health.get("capture_complete")
+            if capture_complete is not None:
+                capture_complete = bool(capture_complete)
+
+            file_readback = entry.get("receiver_readback")
+            readback = file_readback if file_readback is not None else session_readback
+
+            file_receiver_extra = dict(receiver_extra)
+            file_receiver_extra["rf_bandwidth_hz"] = bw_hz
+            file_receiver_extra["readback"] = readback
 
             yield RecordingMeta(
                 dataset_id=self.dataset_id,
@@ -535,7 +594,12 @@ class AerixSessionAdapter:
                     "iq_full_scale_source": "session_metadata",
                     "test": test_block,
                     "session_label": session_label,
-                    "receiver": receiver_extra,
+                    "receiver": file_receiver_extra,
+                    "health": {
+                        "window_deficit_frac": window_deficit_frac,
+                        "session_deficit_frac": session_deficit_frac,
+                        "capture_complete": capture_complete,
+                    },
                 },
             )
 

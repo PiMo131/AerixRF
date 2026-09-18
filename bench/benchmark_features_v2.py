@@ -57,6 +57,8 @@ import numpy as np
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from aerix_rf.classify.features_v2 import (  # noqa: E402
+    BIN_HI,
+    BIN_LO,
     FEATURES_V2_DIM,
     FEATURES_VERSION,
     extract_features_v2,
@@ -96,8 +98,90 @@ def _group_key(sc: WindowSidecar) -> GroupKey:
     return (sc.identity.dataset_id, sc.identity.device_id, sc.identity.run_id)
 
 
-def _has_rate_warning(sc: WindowSidecar) -> bool:
-    return bool(sc.notes) and "rate_warning=True" in sc.notes
+# --------------------------------------------------------------------------
+# S5.5 sample-rate-deficit exclusion (replaces the old `rate_warning=True`
+# string-match, which false-positived on a trailing-window rate estimate --
+# see bench/receiver_id_probe.py, same rule, duplicated here so each script
+# stays independently runnable).
+# --------------------------------------------------------------------------
+
+SESSION_RATE_RATIO_MIN = 0.95
+_RATE_RATIO_RE = re.compile(r"stream_rate_ratio=([0-9.]+)")
+
+
+def _rate_ratio_from_notes(sc: WindowSidecar) -> float | None:
+    if not sc.notes:
+        return None
+    m = _RATE_RATIO_RE.search(sc.notes)
+    return float(m.group(1)) if m else None
+
+
+def _typed_deficits(sc: WindowSidecar) -> tuple[float | None, float | None]:
+    """``(window_deficit_frac, session samples_deficit)`` from typed sidecar
+    fields if present (forward-compat with a builder adding
+    ``receiver.window_deficit_frac`` / ``receiver.samples_deficit``); else
+    ``(None, None)`` -- callers fall back to the ``notes`` rule below."""
+    recv = getattr(sc, "receiver", None)
+    if recv is None:
+        return None, None
+    return getattr(recv, "window_deficit_frac", None), getattr(recv, "samples_deficit", None)
+
+
+def _session_rate_ratio_medians(dataset_id: str, root: Path) -> dict[str, float]:
+    """Pre-scan pass (no tensor load): per-``run_id`` (session) median
+    ``stream_rate_ratio`` parsed from ``notes`` (S5.5)."""
+    ratios: dict[str, list[float]] = defaultdict(list)
+    for sc in iter_dataset(dataset_id, root=root):
+        r = _rate_ratio_from_notes(sc)
+        if r is not None:
+            ratios[sc.identity.run_id].append(r)
+    return {run_id: float(np.median(vals)) for run_id, vals in ratios.items() if vals}
+
+
+def _rate_deficit_reason(sc: WindowSidecar, session_ratio_medians: dict[str, float]) -> str | None:
+    """Exclusion reason string, or ``None`` to keep the row. Prefers typed
+    ``receiver.window_deficit_frac`` / ``receiver.samples_deficit`` if
+    present (window > 1e-3 or session > 1e-2 excludes); else falls back to
+    the session-level (``run_id``) median ``stream_rate_ratio`` from
+    ``notes`` (< 0.95 excludes -- a real session-wide deficit, not a
+    spurious per-window rate estimate)."""
+    window_d, session_d = _typed_deficits(sc)
+    if window_d is not None or session_d is not None:
+        if window_d is not None and window_d > 1e-3:
+            return "window_samples_deficit"
+        if session_d is not None and session_d > 1e-2:
+            return "session_samples_deficit"
+        return None
+    median = session_ratio_medians.get(sc.identity.run_id)
+    if median is not None and median < SESSION_RATE_RATIO_MIN:
+        return "session_rate_ratio_lt_0.95"
+    return None
+
+
+# S5.1 receiver-state diagnostic (diagnostic only, never a feature): outer
+# vs inner in-band bins on the time-median PSD, and the time-p99 of the
+# in-band frame mean.
+_EDGE_FRAC = 0.10
+
+
+def _receiver_state(tensor: np.ndarray) -> tuple[float, float, float]:
+    """Per-window ``(median_dbfs, time_p99_dbfs, edge_minus_centre_db)``
+    over the in-band bins ``[BIN_LO, BIN_HI]`` -- the design doc S5.1
+    signature that distinguishes a front-end/receiver-state change
+    (elevated + flattened floor) from a scene change (AP on/off)."""
+    band = tensor[:, BIN_LO:BIN_HI + 1].astype(np.float64)
+    n_bins = band.shape[1]
+    median_dbfs = float(np.median(band))
+    frame_mean_dbfs = band.mean(axis=1)
+    time_p99_dbfs = float(np.percentile(frame_mean_dbfs, 99))
+    n_edge = max(1, int(round(n_bins * _EDGE_FRAC)))
+    time_median_psd = np.median(band, axis=0)
+    edge = np.concatenate([time_median_psd[:n_edge], time_median_psd[-n_edge:]])
+    centre_lo = n_bins // 2 - n_edge // 2
+    centre_hi = centre_lo + n_edge
+    centre = time_median_psd[centre_lo:centre_hi]
+    edge_minus_centre_db = float(edge.mean() - centre.mean())
+    return median_dbfs, time_p99_dbfs, edge_minus_centre_db
 
 
 @dataclass
@@ -111,6 +195,7 @@ class Row:
     vector: np.ndarray       # full FEATURES_V2_DIM, zero-filled where invalid
     valid_mask: np.ndarray   # bool [FEATURES_V2_DIM]
     valid_fraction: float
+    receiver_state: tuple[float, float, float] = (float("nan"), float("nan"), float("nan"))
 
 
 @dataclass
@@ -133,14 +218,16 @@ def load_rows(
     rows: list[Row] = []
     skipped: dict = defaultdict(int)
     meta = DatasetMeta()
+    session_ratio_medians = _session_rate_ratio_medians(dataset_id, root)
     for sc in iter_dataset(dataset_id, root=root):
         meta.n_seen += 1
         if limit is not None and meta.n_used >= limit:
             break
         meta.preproc_versions.add(sc.bookkeeping.preproc_version)
         meta.code_versions.add(sc.bookkeeping.code_version)
-        if _has_rate_warning(sc):
-            skipped[f"{dataset_id}:rate_warning"] += 1
+        deficit_reason = _rate_deficit_reason(sc, session_ratio_medians)
+        if deficit_reason is not None:
+            skipped[f"{dataset_id}:{deficit_reason}"] += 1
             continue
         tensor_path = root / dataset_id / "prepared" / f"{sc.identity.uid}.tensor.npy"
         if not tensor_path.exists():
@@ -163,6 +250,7 @@ def load_rows(
                 vector=feats.vector,
                 valid_mask=feats.valid_mask,
                 valid_fraction=float(np.mean(feats.valid_mask)),
+                receiver_state=_receiver_state(tensor),
             )
         )
         meta.n_used += 1
@@ -282,6 +370,9 @@ class TierResult:
     table: list[dict] = field(default_factory=list)
     summary: dict = field(default_factory=dict)
     notes: list[str] = field(default_factory=list)
+    # Tier D only (S5.1 diagnostics): per-session mean
+    # (median_dbfs, time_p99_dbfs, edge_minus_centre_db).
+    session_state: dict = field(default_factory=dict)
 
 
 # --------------------------------------------------------------------------
@@ -443,6 +534,22 @@ def run_tier_d(antsdr_rows: list[Row], public_pos_rows: list[Row]) -> TierResult
     table: list[dict] = []
     pfa_lr, pfa_gb, fah_lr, fah_gb = [], [], [], []
 
+    # S5.1 receiver-state diagnostic table: per-session means, so an outlier
+    # session (front-end/AGC state change, not a scene change) is visible
+    # next to its PFA in the report rather than requiring a separate pass.
+    session_state: dict = {}
+    by_session: dict[GroupKey, list[Row]] = defaultdict(list)
+    for r in antsdr_rows:
+        by_session[r.group].append(r)
+    for s, srows in by_session.items():
+        states = np.array([r.receiver_state for r in srows], dtype=np.float64)
+        session_state[s] = {
+            "median_dbfs": float(np.mean(states[:, 0])),
+            "time_p99_dbfs": float(np.mean(states[:, 1])),
+            "edge_minus_centre_db": float(np.mean(states[:, 2])),
+            "n": len(srows),
+        }
+
     for s in sessions:
         train_neg = [r for r in antsdr_rows if r.group != s]
         test_neg = [r for r in antsdr_rows if r.group == s]
@@ -481,7 +588,10 @@ def run_tier_d(antsdr_rows: list[Row], public_pos_rows: list[Row]) -> TierResult
         "default classifier decision threshold) rather than a separate dev split for operating"
         "-threshold selection -- documented deviation, time-boxed for this pass.",
     ]
-    return TierResult(name=name, ran=True, columns_used=int(columns.sum()), table=table, summary=summary, notes=notes)
+    return TierResult(
+        name=name, ran=True, columns_used=int(columns.sum()), table=table, summary=summary,
+        notes=notes, session_state=session_state,
+    )
 
 
 # --------------------------------------------------------------------------
@@ -599,6 +709,23 @@ def render_tier_d(res: TierResult) -> list[str]:
     lines.append(f"- FA/hour (logreg): {_fmt_stats(res.summary['fa_per_hour_logreg'])}")
     lines.append(f"- FA/hour (gboost): {_fmt_stats(res.summary['fa_per_hour_gboost'])}")
     lines.append("")
+    if res.session_state:
+        lines.append(
+            "Session receiver-state diagnostics (S5.1; in-band bins, diagnostic only, never a "
+            "model feature) -- an outlier session here (elevated + flattened floor) is a "
+            "front-end/AGC state change, not a scene change, and should be read next to its PFA "
+            "above:"
+        )
+        lines.append("")
+        lines.append("| session | n windows | median in-band dBFS | time-p99 dBFS | edge-minus-centre dB |")
+        lines.append("|---|---|---|---|---|")
+        for s in sorted(res.session_state):
+            st = res.session_state[s]
+            lines.append(
+                f"| {'/'.join(s)} | {st['n']} | {st['median_dbfs']:.1f} | {st['time_p99_dbfs']:.1f} | "
+                f"{st['edge_minus_centre_db']:.1f} |"
+            )
+        lines.append("")
     for n in res.notes:
         lines.append(f"Note: {n}")
     lines.append("")

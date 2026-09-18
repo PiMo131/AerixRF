@@ -132,6 +132,108 @@ def test_round_trip_via_plain_dict():
     assert restored == sc
 
 
+def test_round_trip_receiver_gain_readback_and_health_fields():
+    """docs/design/features-and-benchmark.md S5#1/#5: gain.db/mode,
+    receiver.receiver.rf_bandwidth_hz, receiver.readback, and the three
+    signal-group capture-health fields all survive a JSON round trip."""
+
+    sc = _make_sidecar(
+        signal=SignalInfo(
+            sample_rate_hz=15.36e6,
+            duration_s=1.0,
+            n_samples=15_360_000,
+            center_freq_hz=2.437e9,
+            bandwidth_hz=15.36e6,
+            usable_bw_hz=10e6,
+            band_deficit=True,
+            window_deficit_frac=0.01,
+            session_deficit_frac=0.005,
+            capture_complete=False,
+        ),
+        receiver=ReceiverGroup(
+            receiver=ReceiverDevice(
+                type="antsdr",
+                backend="AntsdrIIOSource",
+                firmware="v0.34-dirty",
+                rf_bandwidth_hz=10e6,
+            ),
+            gain=GainInfo(mode=GainMode.MANUAL, db=40.0),
+            clock=ClockInfo(),
+            readback={
+                "hardwaregain_db": 39.75,
+                "gain_control_mode": "manual",
+                "rf_bandwidth_hz": 1.0e7,
+                "sampling_frequency_hz": 1.2288e7,
+                "rf_port": "A_BALANCED",
+                "rx_lo_hz": 2.437e9,
+            },
+        ),
+    )
+    dumped = sc.model_dump_json()
+    restored = WindowSidecar.model_validate_json(dumped)
+    assert restored == sc
+    assert restored.signal.window_deficit_frac == pytest.approx(0.01)
+    assert restored.signal.session_deficit_frac == pytest.approx(0.005)
+    assert restored.signal.capture_complete is False
+    assert restored.receiver.receiver.rf_bandwidth_hz == pytest.approx(10e6)
+    assert restored.receiver.gain.mode == GainMode.MANUAL
+    assert restored.receiver.gain.db == pytest.approx(40.0)
+    assert restored.receiver.readback["hardwaregain_db"] == pytest.approx(39.75)
+    assert restored.receiver.readback["gain_control_mode"] == "manual"
+
+
+def test_health_and_readback_fields_default_none():
+    sc = _make_sidecar()
+    assert sc.signal.window_deficit_frac is None
+    assert sc.signal.session_deficit_frac is None
+    assert sc.signal.capture_complete is None
+    assert sc.receiver.receiver.rf_bandwidth_hz is None
+    assert sc.receiver.readback is None
+
+
+@pytest.mark.parametrize("bad", [float("nan"), float("inf"), float("-inf")])
+def test_signal_window_deficit_frac_rejects_non_finite(bad):
+    with pytest.raises(ValidationError):
+        SignalInfo(
+            sample_rate_hz=15.36e6,
+            duration_s=1.0,
+            n_samples=15_360_000,
+            bandwidth_hz=15.36e6,
+            usable_bw_hz=15.36e6,
+            window_deficit_frac=bad,
+        )
+
+
+@pytest.mark.parametrize("bad", [float("nan"), float("inf"), float("-inf")])
+def test_signal_session_deficit_frac_rejects_non_finite(bad):
+    with pytest.raises(ValidationError):
+        SignalInfo(
+            sample_rate_hz=15.36e6,
+            duration_s=1.0,
+            n_samples=15_360_000,
+            bandwidth_hz=15.36e6,
+            usable_bw_hz=15.36e6,
+            session_deficit_frac=bad,
+        )
+
+
+@pytest.mark.parametrize("bad", [float("nan"), float("inf"), float("-inf")])
+def test_receiver_device_rf_bandwidth_hz_rejects_non_finite(bad):
+    with pytest.raises(ValidationError):
+        ReceiverDevice(rf_bandwidth_hz=bad)
+
+
+@pytest.mark.parametrize("bad", [float("nan"), float("inf"), float("-inf")])
+def test_receiver_group_readback_rejects_non_finite(bad):
+    with pytest.raises(ValidationError):
+        ReceiverGroup(
+            receiver=ReceiverDevice(),
+            gain=GainInfo(mode=GainMode.UNKNOWN),
+            clock=ClockInfo(),
+            readback={"hardwaregain_db": bad},
+        )
+
+
 # --------------------------------------------------------------------------
 # Rejection: missing fields, unknown enums, extra keys
 # --------------------------------------------------------------------------

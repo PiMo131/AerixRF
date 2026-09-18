@@ -36,6 +36,7 @@ from aerix_rf.datasets.spec import (
     Activity,
     EmitterClass,
     EvidenceLevel,
+    GainMode,
     LabelSource,
     LabelsGroup,
     LinkFamily,
@@ -321,11 +322,18 @@ _HACKRF_SESSION_RATE_HZ = 20_000_000.0
 
 
 def _write_antsdr_session(root: Path, dataset_id: str, session_name: str, *, label: str,
-                           test_block: dict, n_files: int = 2) -> str:
+                           test_block: dict, n_files: int = 2,
+                           capture_health_overrides: Optional[list] = None) -> str:
     """A tiny hand-built schema-2 ANTSDR session dir (cs16 @ 12.288 MS/s,
     full scale 2048.0, 10 MHz declared bandwidth -- deliberately narrower
     than the 12 MHz canonical usable width, so ``band_deficit`` must come
-    out True). Returns the session_id."""
+    out True). Returns the session_id.
+
+    ``capture_health_overrides`` (optional): a list of length ``n_files``,
+    each entry either ``None`` (keep the default full-rate capture_health)
+    or a dict that replaces the default ``capture_health`` for that file
+    entirely -- used by the receiver-metadata/capture-health tests below.
+    """
 
     session_id = f"sid-{session_name}"
     sdir = root / dataset_id / "original" / session_name
@@ -338,6 +346,13 @@ def _write_antsdr_session(root: Path, dataset_id: str, session_name: str, *, lab
         raw = to_cs16(iq, full_scale=2048.0)
         rel = f"iq/capture_{i:04d}.cs16"
         (sdir / rel).write_bytes(raw)
+        default_health = {
+            "expected_samples": n, "received_samples": n,
+            "stream_rate_ratio": 1.0325, "rate_warning": False,
+            "capture_complete": True, "source_backend": "antsdr",
+        }
+        override = capture_health_overrides[i] if capture_health_overrides else None
+        capture_health = override if override is not None else default_health
         files.append({
             "file": rel,
             "sha256": "deadbeef",
@@ -349,11 +364,7 @@ def _write_antsdr_session(root: Path, dataset_id: str, session_name: str, *, lab
             "complete": True,
             "receiver_type": "antsdr",
             "gain_db": 40.0,
-            "capture_health": {
-                "expected_samples": n, "received_samples": n,
-                "stream_rate_ratio": 1.0325, "rate_warning": False,
-                "capture_complete": True, "source_backend": "antsdr",
-            },
+            "capture_health": capture_health,
             "iq_format": "cs16",
             "iq_full_scale": 2048.0,
             "bandwidth_hz": 10_000_000.0,
@@ -549,6 +560,137 @@ def test_aerix_session_adapter_prepare_upsamples_to_canonical(tmp_path):
         assert chain[0].up == 5
         assert chain[0].down == 4
         assert sc.labels.scene.emitter_class == EmitterClass.BACKGROUND
+
+
+def test_aerix_session_adapter_receiver_gain_and_health_new_session(tmp_path):
+    """docs/design/features-and-benchmark.md S5#1/#5, new-format session:
+    sidecar receiver.gain.{mode,db}, receiver.receiver.{backend,firmware,
+    rf_bandwidth_hz} and signal.{window,session}_deficit_frac /
+    capture_complete are all filled from session.json, not left at their
+    generic third-party-dataset placeholder."""
+
+    dataset_id = "aerix_test_health"
+    n = int(_ANTSDR_SESSION_RATE_HZ * 1.0)
+    overrides = [
+        {  # 12,288,000 expected / 12,165,120 received -> 0.01 deficit
+            "expected_samples": n, "received_samples": 12_165_120,
+            "stream_rate_ratio": 0.99, "rate_warning": True,
+            "capture_complete": False, "source_backend": "antsdr",
+        },
+        {  # second file: fully delivered
+            "expected_samples": n, "received_samples": n,
+            "stream_rate_ratio": 1.0, "rate_warning": False,
+            "capture_complete": True, "source_backend": "antsdr",
+        },
+    ]
+    _write_antsdr_session(
+        tmp_path, dataset_id, "2026-09-18_000001_soak_check",
+        label="soak_check", test_block={}, capture_health_overrides=overrides,
+    )
+    adapter = AerixSessionAdapter(dataset_id=dataset_id)
+    stats = prepare_dataset(dataset_id=dataset_id, adapter=adapter, root=tmp_path,
+                             limit=2, write_iq=False, write_tensor=True)
+    assert stats.windows == 2
+
+    rows = sorted(iter_dataset(dataset_id, root=tmp_path), key=lambda sc: sc.identity.recording_id)
+
+    sc0 = rows[0]
+    assert sc0.receiver.gain.mode == GainMode.MANUAL
+    assert sc0.receiver.gain.db == pytest.approx(40.0)
+    assert sc0.receiver.receiver.backend == "AntsdrIIOSource"
+    assert sc0.receiver.receiver.firmware == "v0.34-dirty"
+    assert sc0.receiver.receiver.rf_bandwidth_hz == pytest.approx(10e6)
+    assert sc0.signal.window_deficit_frac == pytest.approx(0.01)
+    assert sc0.signal.session_deficit_frac == pytest.approx(0.01)
+    assert sc0.signal.capture_complete is False
+
+    sc1 = rows[1]
+    # Cumulative across both files: (2n - (12_165_120 + n)) / 2n == 0.005
+    assert sc1.signal.window_deficit_frac == pytest.approx(0.0)
+    assert sc1.signal.session_deficit_frac == pytest.approx(0.005)
+    assert sc1.signal.capture_complete is True
+    # gain/backend fields are session-wide, same on every window
+    assert sc1.receiver.gain.db == pytest.approx(40.0)
+
+
+def test_aerix_session_adapter_legacy_stream_rate_ratio_only_health_is_none(tmp_path):
+    """An old session whose only capture-health signal is a noisy
+    per-window ``stream_rate_ratio`` (no expected_samples/received_samples)
+    must leave both deficit fields ``None`` -- never derived from the noisy
+    ratio."""
+
+    dataset_id = "aerix_test_legacy_health"
+    overrides = [
+        {"stream_rate_ratio": 0.87, "rate_warning": True},
+        {"stream_rate_ratio": 1.04, "rate_warning": False},
+    ]
+    _write_antsdr_session(
+        tmp_path, dataset_id, "2026-09-18_000002_soak_check",
+        label="soak_check", test_block={}, capture_health_overrides=overrides,
+    )
+    adapter = AerixSessionAdapter(dataset_id=dataset_id)
+    recs = list(adapter.iter_recordings(tmp_path))
+    assert len(recs) == 2
+    for rec in recs:
+        assert rec.extra["health"]["window_deficit_frac"] is None
+        assert rec.extra["health"]["session_deficit_frac"] is None
+        assert rec.extra["health"]["capture_complete"] is None
+        # notes must no longer contain a free-text rate_warning marker
+        assert "rate_warning" not in (rec.notes or "")
+        assert "stream_rate_ratio=" in (rec.notes or "")
+
+
+def test_aerix_session_adapter_schema1_receiver_and_health_fields_unknown(tmp_path):
+    """A minimal schema-1 session.json (no gains/capture_health/bandwidth_hz
+    keys at all) must leave the new receiver/health fields at their
+    genuinely-unknown defaults, never a guessed value."""
+
+    dataset_id = "aerix_test_schema1_health"
+    session_name = "2024-01-01_000000_baseline_run"
+    sdir = tmp_path / dataset_id / "original" / session_name
+    (sdir / "iq").mkdir(parents=True)
+    n = int(_HACKRF_SESSION_RATE_HZ * 1.0)
+    t = np.arange(n, dtype=np.float64) / _HACKRF_SESSION_RATE_HZ
+    iq = (0.4 * np.exp(2j * np.pi * 2.0e6 * t)).astype(np.complex64)
+    (sdir / "iq" / "capture_0001.cs8").write_bytes(to_cs8(iq))
+    meta = {
+        "schema_version": 1,
+        "session_id": "legacy-hackrf-2",
+        "label": "baseline_run",
+        "files": [{
+            "file": "iq/capture_0001.cs8",
+            "sample_count": n,
+            "sample_rate": _HACKRF_SESSION_RATE_HZ,
+            "center_freq_hz": 2440e6,
+            "receiver_type": "hackrf",
+            "receiver_serial": "OLD-2",
+        }],
+        "test": {},
+        "counts": {},
+    }
+    (sdir / "session.json").write_text(json.dumps(meta), encoding="utf-8")
+
+    adapter = AerixSessionAdapter(dataset_id=dataset_id)
+    rec = next(adapter.iter_recordings(tmp_path))
+    assert rec.extra["health"] == {
+        "window_deficit_frac": None, "session_deficit_frac": None, "capture_complete": None,
+    }
+    assert rec.extra["receiver"]["gain_db"] is None
+    assert rec.extra["receiver"]["gain_mode"] is None
+    assert rec.extra["receiver"]["readback"] is None
+    # No session-level bandwidth_hz -> falls back to the file's own rate.
+    assert rec.extra["receiver"]["rf_bandwidth_hz"] == pytest.approx(_HACKRF_SESSION_RATE_HZ)
+
+    stats = prepare_dataset(dataset_id=dataset_id, adapter=adapter, root=tmp_path,
+                             limit=1, write_iq=False, write_tensor=True)
+    assert stats.windows == 1
+    sc = next(iter_dataset(dataset_id, root=tmp_path))
+    assert sc.receiver.gain.mode == GainMode.UNKNOWN
+    assert sc.receiver.gain.db is None
+    assert sc.receiver.readback is None
+    assert sc.signal.window_deficit_frac is None
+    assert sc.signal.session_deficit_frac is None
+    assert sc.signal.capture_complete is None
 
 
 # ---------------------------------------------------------------------------

@@ -255,6 +255,101 @@ def test_capabilities(monkeypatch):
         src.close()
 
 
+# --- readback -------------------------------------------------------------------
+
+def test_readback_populated_and_parsed_matches_requested(monkeypatch):
+    src = _make_source(monkeypatch, gain_db=40.0, center_freq_hz=2440e6)
+    try:
+        rb = src.readback
+        assert rb["hardwaregain_db"] == pytest.approx(40.0)
+        assert rb["gain_control_mode"] == "manual"
+        assert rb["rf_bandwidth_hz"] == pytest.approx(10.0e6)
+        assert rb["sampling_frequency_hz"] == pytest.approx(12.288e6)
+        assert rb["rx_lo_hz"] == pytest.approx(2440e6)
+        assert rb["fw_version"] == "v0.36"
+        assert rb["hw_model"] == "ANTSDR E200"
+        assert src.readback_mismatch is False
+        win = next(src.windows())
+        assert win.metadata["readback"] == rb
+        assert win.metadata["readback_mismatch"] is False
+        assert "rssi_db_readback" in win.metadata   # None: fake never sets rssi
+        assert win.metadata["rssi_db_readback"] is None
+    finally:
+        src.close()
+
+
+def test_readback_mismatch_flagged_and_warned(monkeypatch, caplog):
+    import logging
+    src = _make_source(monkeypatch, gain_db=40.0)
+    try:
+        # Simulate the device actually being in a different gain state than
+        # requested (the exact scenario this feature exists to catch).
+        src._rx_ctrl.attrs["hardwaregain"].value = "55.000000 dB"
+        with caplog.at_level(logging.WARNING, logger="aerix.rf.sdr.antsdr_iio"):
+            src._refresh_readback()
+        assert src.readback_mismatch is True
+        assert src.readback["hardwaregain_db"] == pytest.approx(55.0)
+        assert any("readback mismatch" in r.message for r in caplog.records)
+        win = next(src.windows())
+        assert win.metadata["readback_mismatch"] is True
+    finally:
+        src.close()
+
+
+def test_readback_refreshed_on_tune(monkeypatch):
+    src = _make_source(monkeypatch, center_freq_hz=2440e6)
+    try:
+        assert src.readback["rx_lo_hz"] == pytest.approx(2440e6)
+        src.tune(2450e6)
+        assert src.readback["rx_lo_hz"] == pytest.approx(2450e6)
+        assert src.readback_mismatch is False
+    finally:
+        src.close()
+
+
+def test_readback_missing_attr_treated_as_unparseable_and_mismatched(monkeypatch):
+    """A firmware that doesn't expose an attr (fake read raises) must surface
+    as None, not a fabricated 0.0 -- and count as a mismatch, since an
+    unverifiable value can't be trusted to match the request."""
+    src = _make_source(monkeypatch)
+    try:
+        monkeypatch.setattr(src, "_attr_value", lambda chan, name: None)
+        src._refresh_readback()
+        assert src.readback["hardwaregain_db"] is None
+        assert src.readback["rx_lo_hz"] is None
+        assert src.readback_mismatch is True
+    finally:
+        src.close()
+
+
+def test_rssi_read_disabled_when_slow(monkeypatch, caplog):
+    """If the first rssi attr read exceeds the budget, per-window rssi
+    readback is permanently disabled for this source (documented cost
+    bailout) rather than silently eating into window cadence forever."""
+    import logging
+    src = _make_source(monkeypatch)
+    try:
+        orig_attr_value = src._attr_value
+
+        def slow_attr_value(chan, name):
+            if name == "rssi":
+                time.sleep(antsdr_iio.RSSI_READ_BUDGET_MS / 1000.0 + 0.01)
+            return orig_attr_value(chan, name)
+
+        monkeypatch.setattr(src, "_attr_value", slow_attr_value)
+        with caplog.at_level(logging.WARNING, logger="aerix.rf.sdr.antsdr_iio"):
+            first = src._read_rssi_if_cheap()
+        assert src._rssi_enabled is False
+        assert any("disabling per-window rssi readback" in r.message for r in caplog.records)
+        # Once disabled, subsequent calls must not pay the slow-read cost again.
+        t0 = time.time()
+        second = src._read_rssi_if_cheap()
+        assert (time.time() - t0) < (antsdr_iio.RSSI_READ_BUDGET_MS / 1000.0)
+        assert second is None
+    finally:
+        src.close()
+
+
 # --- tune ----------------------------------------------------------------------
 
 def test_tune_updates_lo_and_flushes(monkeypatch):

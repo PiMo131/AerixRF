@@ -194,7 +194,69 @@ and falls back to rules rather than feeding wrong-shape vectors.
 *Accept:* existing fallback tests still pass; a bundle with no version string -> rules + flag; a v2 bundle
 -> ML path; live and training vectors byte-identical on the same window.
 
-## 5. Open items
+## 5. First results and interpretation (2026-09-18)
+
+rf-dsp-specialist reading of `bench/out/benchmark_features_v2.md` and `bench/out/receiver_id_probe*.md`.
+All numbers below recomputed from the prepared ANTSDR corpus (571 rows, all 6 sessions, G3 masked).
+
+**5.1 Tier-D PFA = 1.0 on session `fac0aacf` is a receiver-state change, not a neighbour's AP.**
+Per-session in-band (bins 179-845) means over windows - median dBFS / time-p99 dBFS / passband
+edge-minus-centre: the 5 other sessions -81.2..-83.7 / -56..-60 / +7..+9.5 dB (U-shaped, identical across
+sessions); `fac0aacf` -78.6 / -73.6 / +1..+3 dB (shallow monotone tilt). Three facts must be explained together: the floor is ~5 dB higher, the band is *empty* (p99 only ~5 dB
+above the median, i.e. no emitter at all), and the **shape** of the noise floor changed. A scene change
+(AP off) cannot change floor shape; a scalar gain change cannot flatten it. The joint signature -
+elevated, flattened floor with zero external energy - points at the front end: default `rx_rf_bandwidth`
+/ gain-mode (AGC) / antenna-port state of the `a_iq_default` path, i.e. the "same antenna and gain" premise
+is falsified by the data. Sidecar `receiver.gain` is `mode=unknown, db=None` for every session, so this
+cannot be confirmed from metadata - itself the gap to close.
+
+**5.2 What separates it (top-10, standardized mean difference `fac0aacf` vs the rest).**
+`g4_widest_cluster_bw_hz` (9.7e4 vs 9.85e6 Hz, smd -19.6), `g1_sb2x-3x_p90` (2.7 vs 23-25 dB, smd -13..-16),
+`g2_occ_frac_10db` (0.005 vs 0.959), `g2_occ_frac_6db` (0.018 vs 0.989), `g5_sb2x_p90_p50` (0.4 vs 12).
+Every one is a **scene-occupancy** feature, not a level or time-dynamics feature: the per-bin floor
+subtraction did its job on the 5 dB offset. 208 of 290 columns separate the session perfectly
+(single-feature AUC 0.000 or 1.000) - a domain change, not drift.
+
+**5.3 Mechanism of PFA = 1.0.** In the other 5 sessions Wi-Fi ch 6 (2437 MHz, 20 MHz wide) saturates the
+whole 10 MHz dwell >95 % of the time at +24 dB. Zenodo positives are anechoic: quiet band plus one
+emitter. The learned boundary is therefore **"saturated band = background, quiet band = drone"** - a
+chamber-vs-ambient discriminator, not a drone detector. `fac0aacf` is a quiet ANTSDR band, so every window
+lands on the positive side. PFA = 1.0 falsifies the classifier, not the session; it is the most useful
+number in the run. It is amplified by 5.5: `rate_warning` removed 121/122, 56/60 and 54/59 windows of the
+Wi-Fi-rich sessions, leaving `fac0aacf` as 298/338 = 88 % of the whole ANTSDR class.
+
+**5.4 Receiver-ID probe BA 0.434 is an evaluation artefact, not evidence of no leakage.** `GroupKFold`
+balances folds by *size*: fold 0 = the 298 `fac0aacf` rows alone, fold 1 = 20 rows - 90 % of pooled
+out-of-fold predictions come from folds with **zero Zenodo test rows**, so they cannot contribute to the
+Zenodo recall term, while that term rests on 16 rows in 3 folds trained on 9-14 Zenodo vs 328-333 ANTSDR.
+A constant predictor scores BA exactly 0.5, so BA < 0.5 requires an *anti-correlated* boundary on held-out
+groups: it measures session-level domain shift, not device fingerprint, and `margin <= +0.10 -> PASS`
+turned a broken evaluation into a green light. Fixes: `StratifiedGroupKFold`; a per-fold guard (>=2 groups
+and >=5 rows of each class in train and test, else drop the fold and say so); `class_weight="balanced"`
+plus majority-group subsampling to <=4x; report per-fold confusion and per-class recall, not only pooled
+BA; and a verdict level **INCONCLUSIVE** for BA below chance or any guard trip - PASS must require an
+*informative* probe.
+
+**5.5 `rate_warning` exclusion.** The flag came from a trailing-window rate estimate; per-session cumulative
+ratios on loss-free runs span 0.67-1.27, so it is a false-positive generator. For existing sidecars exclude
+rows only from sessions with a real deficit (`soak10min_b`, ~5 %) - that restores 233 rows and rebalances
+the ANTSDR negative pool. Going forward replace the `notes` string with a typed `samples_deficit` =
+`(expected - delivered)/expected` from a monotone sample counter, stored per window *and* cumulatively per
+session; exclusion becomes `window.samples_deficit > 1e-3 or session.samples_deficit > 1e-2`.
+
+**5.6 What the benchmark can and cannot claim.** It can claim that `features_v2` extraction is stable over
+571 real ANTSDR ambient windows and 18 public positives, that recall on anechoic public positives is high
+(Tier A median 1.000, Tier B 2 groups), and that the current Stage-2 boundary produces zero false alarms on
+five Wi-Fi-saturated ANTSDR ambient sessions and 3600 FA/h on one quiet-band session. It **cannot** claim
+any detection probability for the deployed system, any cross-receiver transfer (the label-matched probe is
+still not runnable, and the unrestricted probe is now known to be uninformative), or that Tier-A recall
+reflects anything other than an anechoic-vs-Wi-Fi-ambient contrast; no number here is evidence above
+level 2. **Single highest-value acquisition: ANTSDR-captured drone positives with an interleaved ON/OFF
+schedule inside one session** - same room, same receiver state, operator-logged transmit intervals - so
+positives and background share both scene and front-end state and the chamber-vs-ambient shortcut dies.
+Record `gain.mode`, `gain.db`, `rx_rf_bandwidth` and antenna port per capture while doing it.
+
+## 6. Open items
 
 * `[USER]` ANTSDR-captured **drone positives** with operator truth — the single highest-value capture we
   can make. Without them Tier D is PFA-only and no PD claim exists for our receiver.
@@ -208,7 +270,7 @@ and falls back to rules rather than feeding wrong-shape vectors.
 * Zenodo Fs is now confirmed 120 MS/s (2.44 GHz) / 200 MS/s (5.8 GHz) in the manifest — the older
   "~60 MS/s" inference in the normalisation memo is superseded.
 
-## 6. Files likely affected
+## 7. Files likely affected
 
 `aerix_rf/classify/features_v2.py` (new), `aerix_rf/classify/train/features.py` (kept as `features_v1`,
 frozen), `aerix_rf/classify/train/data.py` + `train.py` (emit `model_features_version`),

@@ -398,6 +398,37 @@ def test_write_iq_cs16_without_full_scale_raises(tmp_path):
         s.write_iq(w, iq_format="cs16")
 
 
+def test_write_iq_records_receiver_readback_and_per_file_mismatch(tmp_path):
+    """A readback-capable backend (antsdr_iio) stamps window.metadata with
+    "readback"/"readback_mismatch"; Session.write_iq must record the FIRST
+    window's readback once at the top level (receiver_readback) and each
+    file's own readback_mismatch, so a session with a flagged mismatch is
+    diagnosable after the fact (see antsdr_iio module docstring)."""
+    cfg = Config(sample_rate=SR, window_s=DUR, sim=True)
+    s = Session.create(tmp_path, "readback test", cfg=cfg,
+                       receiver={"receiver_type": "antsdr", "iq_format": "cs16",
+                                "iq_full_scale": 2048.0})
+    rb1 = {"hardwaregain_db": 40.0, "gain_control_mode": "manual",
+           "rf_bandwidth_hz": 10.0e6, "sampling_frequency_hz": 12.288e6,
+           "rx_lo_hz": 2440e6, "fw_version": "v0.36"}
+    w1 = _window(6, 1_700_000_500.0, 2440e6)
+    w1.metadata["readback"] = rb1
+    w1.metadata["readback_mismatch"] = False
+    s.write_iq(w1, iq_format="cs16", iq_full_scale=2048.0)
+
+    rb2 = dict(rb1, hardwaregain_db=55.0)
+    w2 = _window(7, 1_700_000_501.0, 2440e6)
+    w2.metadata["readback"] = rb2
+    w2.metadata["readback_mismatch"] = True
+    s.write_iq(w2, iq_format="cs16", iq_full_scale=2048.0)
+    s.finalize()
+
+    meta = json.loads((s.path / "session.json").read_text())
+    assert meta["receiver_readback"] == rb1        # from the FIRST window only
+    assert meta["files"][0]["readback_mismatch"] is False
+    assert meta["files"][1]["readback_mismatch"] is True
+
+
 def test_write_iq_cs8_keeps_default_full_scale(tmp_path):
     """cs8 is unaffected by the cs16 required-full-scale rule -- default 128.0 holds."""
     cfg = Config(sample_rate=SR, window_s=DUR, sim=True)
