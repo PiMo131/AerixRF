@@ -122,10 +122,31 @@ def test_baseline_differencing_ranks_new_tone_top():
     assert abs(cands[0].center_mhz - 2452.0) <= 1.0
 
 
-def test_retune_welch_sweep_step_hz_falls_back_to_capabilities():
+def test_retune_welch_sweep_step_hz_derives_from_actual_sample_rate():
+    """No explicit step_hz, no rf_bandwidth/bandwidth_hz attribute: derive from the
+    source's ACTUAL live sample_rate (20 MHz default) * DEFAULT_USABLE_FRACTION
+    (0.6) -> 12 MHz, NOT the capabilities ceiling directly."""
+    src = _MultiToneSource([2440.0], window_s=0.01, bw_hz=20e6)  # ceiling well above 12 MHz
+    sweep = RetuneWelchSweep(src)
+    assert sweep.step_hz == pytest.approx(12e6)
+
+
+def test_retune_welch_sweep_step_hz_capped_by_capabilities():
+    """Fraction-derived step_hz (12 MHz) must never exceed the backend's own
+    advertised capabilities.max_instantaneous_bw_hz ceiling (here 10 MHz)."""
     src = _MultiToneSource([2440.0], window_s=0.01, bw_hz=10e6)
-    sweep = RetuneWelchSweep(src)   # no explicit step_hz -> capabilities.max_instantaneous_bw_hz
+    sweep = RetuneWelchSweep(src)
     assert sweep.step_hz == pytest.approx(10e6)
+
+
+def test_retune_welch_sweep_step_hz_not_capability_ceiling_alone():
+    """Regression: a source whose capabilities advertise a big ceiling (e.g. sim's
+    100 MHz) must not become one oversized step when the source's actual live
+    sample rate is much smaller -- that left most of the grid NaN."""
+    src = _MultiToneSource([2440.0], window_s=0.01, bw_hz=100e6)
+    sweep = RetuneWelchSweep(src)
+    assert sweep.step_hz == pytest.approx(12e6)
+    assert sweep.step_hz != pytest.approx(100e6)
 
 
 def test_hackrf_sweep_source_is_a_thin_wrapper(monkeypatch):

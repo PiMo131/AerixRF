@@ -93,6 +93,12 @@ class FrameResult:
             "class_source": c.source,
             "class_abstained": bool(getattr(c, "abstained", False)),
             "model_sample_rate_mismatch": bool(getattr(c, "sample_rate_mismatch", False)),
+            "features_version": getattr(c, "features_version", None),
+            "model_features_mismatch": bool(getattr(c, "model_features_mismatch", False)),
+            "features_valid_fraction": (
+                None if getattr(c, "features_valid_fraction", None) is None
+                else round(c.features_valid_fraction, 3)
+            ),
             "decode_level": self.decode_level,
             "decode_state": self.decode_level,             # alias read by session.report
             "decode_attempts": len(self.attempts),
@@ -171,7 +177,8 @@ def process_window(win: IQWindow, cfg: Config, *, decode: bool = True,
 
     spec = spectrogram.compute(win.iq, win.sample_rate, cfg.fft_size)
     det = energy.detect(spec, center_mhz, cfg.snr_threshold_db, cfg.occupied_bw_ref_mhz, cfg.gain_db)
-    cls = classify_model.classify_window(spec, det, center_mhz)
+    cls = classify_model.classify_window(spec, det, center_mhz,
+                                         iq=win.iq, sample_rate=win.sample_rate)
     plausible = det.score >= cfg.score_threshold
 
     attempts: list[Any] = []

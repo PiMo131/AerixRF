@@ -36,6 +36,11 @@ and independent review before it is "done". Evidence-wording rules apply.
       canonical 15.36 — must yield identical CRC-valid frames. **Session is not on this machine.**
 
 ## Classifier / datasets
+- [ ] Live `features_v2` path costs ≈2.6 s per 1 s window (12.288 MS/s): `features_v2_from_iq` runs two full STFTs
+      (`ml_tensor` + unchunked `canonical_stft` for detector frames) and the 5/4 live resample uses the
+      4145-tap dataset-grade FIR (~1.1 s). Target ≤150 ms: single STFT feeding both reductions, and a
+      short live-grade resampler (or run the canonical STFT at the native rate with bin remapping). Until
+      then `AERIX_RF_FEATURES=v1` default; v2 opt-in. (F4, 2026-09-18)
 - [ ] Dataset folder naming: downloads sit under display names (`RUB-DroneSecurity/`, `ZenodoDroneRFVideo2020/`)
       while `prepare` writes under manifest `dataset_id` (`rub_dronesecurity/`). Decision 2026-09-18: `dataset_id`
       is canonical — librarian to move/symlink `original/` dirs and update `manifests/datasets.json` paths.
@@ -51,6 +56,9 @@ and independent review before it is "done". Evidence-wording rules apply.
 - [ ] Locate data hosts for CageDroneRF and UAVSig.
 
 ## Receiver / sessions
+- [ ] `antsdr_iio`: demote the per-50-refill INFO log to DEBUG; `max inter-refill gap` always prints 0.000 s
+      (counter bug — should be ≈0.085 s at 1 M-sample buffers). Hardware sweep 2026-09-18: 2.4/5.8 GHz
+      baselines finite, live differential scan correct (no candidates in a stable environment).
 - [ ] `RetuneWelchSweep.step_hz` fallback uses `capabilities.max_instantaneous_bw_hz` (analog max) — decision
       2026-09-18: derive step from the live source's actual sample rate × usable fraction (ANTSDR default
       10 MHz; sim 20 MS/s → 12 MHz) and cap by capabilities; fix `cli.py` baseline floor print to `nanmedian`.

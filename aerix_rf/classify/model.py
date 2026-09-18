@@ -41,6 +41,8 @@ import os
 from dataclasses import dataclass
 from pathlib import Path
 
+import numpy as np
+
 from ..detect.energy import Detection
 
 log = logging.getLogger("aerix.rf.classify")
@@ -51,6 +53,21 @@ _PKG_ROOT = Path(__file__).resolve().parents[2]      # .../aerix-rf
 DEFAULT_MODEL_PATH = _PKG_ROOT / "models" / "signature.joblib"
 
 STAGE2_CLASSES = ("dji_ocusync", "wifi_uas", "analog_fpv", "other_uas", "non_uas", "unknown")
+
+# features_v2 wiring (docs/design/features-and-benchmark.md S4 F4). The live
+# pipeline's active feature extractor is selected by $AERIX_RF_FEATURES ("v1"
+# | "v2"), read fresh (not cached) so tests can flip it per-case, mirroring
+# ``_model_path``. Default is "v1": measured on this host, the v2 path (an
+# extra canonical STFT/tensor + resample for non-canonical live rates) costs
+# ~1.4-3.3 s on a 1 s window -- far past any 1 Hz-loop budget -- so v2 must
+# stay opt-in until that cost is addressed (see the F4 result packet).
+FEATURES_V1 = "features_v1"      # aerix_rf.classify.train.features (frozen)
+FEATURES_V2 = "features_v2"      # aerix_rf.classify.features_v2
+
+
+def active_features_version() -> str:
+    """The live pipeline's active Stage-2 feature extractor, from $AERIX_RF_FEATURES."""
+    return FEATURES_V2 if os.environ.get("AERIX_RF_FEATURES", "v1").strip().lower() == "v2" else FEATURES_V1
 
 # Below this predicted-class probability the ML path abstains ("unknown").
 ABSTAIN_THRESHOLD = 0.5
@@ -89,6 +106,9 @@ class Classification:
     model_label: str | None = None       # raw model label before canonicalisation
     abstained: bool = False              # ML confidence < ABSTAIN_THRESHOLD -> "unknown"
     sample_rate_mismatch: bool = False   # model trained at another rate: advisory only
+    features_version: str | None = None       # active live extractor ("features_v1"/"features_v2")
+    model_features_mismatch: bool = False     # bundle's features_version != active: rule fallback used
+    features_valid_fraction: float | None = None  # share of unmasked features_v2 dims (v2 path only)
 
 
 def canonical_label(label: str) -> str:
@@ -248,9 +268,92 @@ def classify_spectrogram(spec, center_freq_mhz: float = 0.0,
         return _rule_fallback(spec, center_freq_mhz, det)
 
 
-def classify_window(spec, det: Detection, center_freq_mhz: float) -> Classification:
-    """Live-loop entry: ML if a bundle is available, else the rules on ``det``."""
-    return classify_spectrogram(spec, center_freq_mhz, det=det)
+def _extract_features_v2_live(iq: np.ndarray, sample_rate: float) -> tuple[np.ndarray, np.ndarray, float]:
+    """Raw live IQ at the capture rate -> ``features_v2`` vector.
+
+    Resamples to the canonical 15.36 MS/s grid first (ANTSDR 12.288 MS/s,
+    HackRF 20 MS/s are both non-canonical) via ``datasets.resample`` --
+    ``features_v2`` is only defined on the canonical tensor and must never
+    silently score a non-canonical spectrogram (design doc S4 F4). Imports
+    are lazy so the default (v1) live path never pays for this module.
+    """
+    from ..datasets import resample as _resample
+    from . import features_v2 as _fv2
+
+    fs = float(sample_rate)
+    if abs(fs - _fv2.CANONICAL_FS) > 1.0:
+        chain = _resample.plan_chain(fs, _fv2.CANONICAL_FS)
+        iq = _resample.apply_chain(iq, chain, fs)
+        fs = _fv2.CANONICAL_FS
+    feats = _fv2.features_v2_from_iq(iq, fs=fs)
+    frac = float(np.mean(feats.valid_mask)) if feats.valid_mask is not None else 1.0
+    return feats.vector, feats.valid_mask, frac
+
+
+def classify_window(spec, det: Detection, center_freq_mhz: float, *,
+                    iq: np.ndarray | None = None,
+                    sample_rate: float | None = None) -> Classification:
+    """Live-loop entry: ML if a bundle is available, else the rules on ``det``.
+
+    ``iq``/``sample_rate`` (the raw window, as held by the pipeline) are
+    optional and only consulted when the active extractor is
+    ``features_v2`` (S4 F4): the v1 path never needs them. A bundle whose
+    declared ``features_version`` does not match the pipeline's active
+    extractor is never scored -- ``Classification.model_features_mismatch``
+    is set and the rule-based classifier is used instead, exactly like an
+    unavailable/broken model.
+    """
+    active = active_features_version()
+    bundle = _load_bundle()
+
+    if bundle is not None:
+        key = _model_cache["key"]
+        bundle_features_version = str(bundle.get("features_version") or FEATURES_V1)
+        if bundle_features_version != active:
+            _warn_once(("features_mismatch", key, active),
+                       "aerix model %s declares features_version=%s but the live pipeline's "
+                       "active extractor is %s; refusing to score with mismatched features -- "
+                       "using rules", key[0], bundle_features_version, active)
+            cls = _rule_fallback(spec, center_freq_mhz, det)
+            cls.features_version = active
+            cls.model_features_mismatch = True
+            return cls
+    else:
+        bundle_features_version = None
+
+    if active != FEATURES_V2:
+        cls = classify_spectrogram(spec, center_freq_mhz, det=det)
+        cls.features_version = active
+        return cls
+
+    # active == FEATURES_V2 from here.
+    if bundle is None or iq is None or sample_rate is None:
+        cls = _rule_fallback(spec, center_freq_mhz, det)
+        cls.features_version = active
+        return cls
+
+    key = _model_cache["key"]
+    version = str(bundle.get("version", "?"))
+    src = f"{bundle.get('kind', 'sklearn')}:{version}"
+    try:
+        vec, _valid_mask, frac = _extract_features_v2_live(iq, sample_rate)
+        x = vec.reshape(1, -1)
+        model = bundle["model"]
+        raw = str(model.predict(x)[0])
+        conf = _confidence(model, x, raw)
+        label = canonical_label(raw)
+        abstained = conf < ABSTAIN_THRESHOLD
+        if abstained:
+            label = "unknown"
+        return Classification(signature_class=label, confidence=conf, source=src,
+                              model_version=version, model_label=raw, abstained=abstained,
+                              features_version=active, features_valid_fraction=frac)
+    except Exception as exc:  # noqa: BLE001 -- never let a bad window kill the loop
+        _warn_once(("infer_v2", key), "aerix features_v2 live inference failed (%s): %s; using rules",
+                   key[0], exc)
+        cls = _rule_fallback(spec, center_freq_mhz, det)
+        cls.features_version = active
+        return cls
 
 
 def _confidence(model, x, label: str) -> float:

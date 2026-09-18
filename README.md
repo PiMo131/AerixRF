@@ -252,6 +252,15 @@ prints serial + position), `cap` = capture health (`ok` or `INCOMPLETE(-n)`; the
 
 ## Status
 
+- **2026-09-18 (later) — ANTSDR path live-verified.** `aerix-rf capture --backend antsdr_iio` runs the
+  full pipeline on the E200 at 12.288 MS/s cs16; 300 s captures with and without IQ writing delivered
+  300/300 windows (no loss on an idle host); replay is bit-exact. An earlier −5 % over 10 min coincided
+  with concurrent heavy CPU load on the same host — the libiio path has no overflow counter, so keep the
+  field box free of unrelated load (see `docs/design/antsdr-backend.md`). `scan`/`baseline` now run on any
+  backend (retune + Welch sweep; hardware check owed). New `features_v2` (302-D, device-confound-aware)
+  and dataset adapters for Zenodo-2020, RUB-SysSec and our own sessions feed the first cross-receiver
+  benchmark (`docs/design/features-and-benchmark.md`). Still owed for acceptance A4: a CRC-valid DJI
+  DroneID decode captured **by the E200** (needs a compatible aircraft powered nearby). 289 tests green.
 - **2026-09-18 — roadmap revision 2, ANTSDR primary.** E200 reachable and streaming
   (receive-only) from this host; hardware brief, backend design and canonical-representation
   memo written; session schema v2 (`iq_format`/`iq_full_scale`, cs16) and new `IQWindow`

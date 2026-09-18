@@ -58,21 +58,19 @@ validated yet (no E200 access during this change; see the CLI wiring in
     AERIX_RF_ANTSDR_URI=ip:192.168.1.10 uv run aerix-rf baseline
     --backend antsdr_iio --band 2.4 --seconds 30 --out <dir>``
 
-Known wiring gap (found running the ``sim`` backend end-to-end, not fixed
-here -- out of this change's scope): ``step_hz``'s fallback trusts
-``capabilities.max_instantaneous_bw_hz`` (a backend's advertised theoretical
-range ceiling) over the ACTUAL sample rate ``windows()`` delivers when a
-backend's real-time rate is fixed by ``Config`` rather than by capability
-(true for ``SimSource``: ``max_instantaneous_bw_hz=100e6`` but
-``windows()`` actually runs at ``cfg.sample_rate``, e.g. 20 MHz). This is
-intentional per ``test_retune_welch_sweep_step_hz_falls_back_to_capabilities``
-(which asserts ``step_hz`` honours capabilities even when a fake source's own
-window ``sample_rate`` differs), so it is not something this module should
-silently override -- but it means a ``--backend sim`` baseline over a span
-wider than the source's real per-window bandwidth leaves most of the grid
-NaN (all-NaN bins if the whole first step undershoots the span). Confirm
-against ``antsdr_iio``'s real ``rf_bandwidth``/sample-rate relationship
-before relying on this fallback there.
+FIXED (2026-09-18, architect decision): ``step_hz``'s fallback previously
+trusted ``capabilities.max_instantaneous_bw_hz`` (a backend's advertised
+theoretical range ceiling) over the ACTUAL sample rate ``windows()``
+delivers when a backend's real-time rate is fixed by ``Config`` rather than
+by capability (true for ``SimSource``: ``max_instantaneous_bw_hz=100e6`` but
+``windows()`` actually runs at ``cfg.sample_rate``, e.g. 20 MHz). Trusting
+the ceiling alone produced a single oversized step whose dwell only covered
+a fraction of the requested grid, leaving the rest NaN. ``step_hz`` now
+derives from the source's own usable-bandwidth attribute
+(``rf_bandwidth``/``bandwidth_hz``, e.g. ANTSDR's 10 MHz) or, failing that,
+``DEFAULT_USABLE_FRACTION`` (0.6) of the source's ACTUAL live sample rate,
+then is always capped by ``capabilities.max_instantaneous_bw_hz`` -- see
+``RetuneWelchSweep.__init__``.
 """
 
 from __future__ import annotations
@@ -99,6 +97,11 @@ DEFAULT_BIN_HZ = 500_000
 DEFAULT_DWELLS_PER_STEP = 2
 DEFAULT_SETTLE_S = 0.05
 DEFAULT_FFT_SIZE = 1024
+# Conservative default usable fraction of a source's ACTUAL live sample rate,
+# used only when the backend does not already advertise its own usable analog
+# bandwidth (``rf_bandwidth``/``bandwidth_hz``, e.g. ANTSDR's 10 MHz at
+# 12.288 MS/s). Matches the sim backend's default 20 MS/s -> 12 MHz.
+DEFAULT_USABLE_FRACTION = 0.6
 
 
 @runtime_checkable
@@ -144,12 +147,30 @@ class RetuneWelchSweep:
                  fft_size: int = DEFAULT_FFT_SIZE) -> None:
         self.source = source
         caps = source.capabilities
-        step_hz = step_hz if step_hz else getattr(source, "rf_bandwidth", None)
+        if not step_hz:
+            # Prefer a backend's own advertised usable analog bandwidth
+            # (ANTSDR: rf_bandwidth, 10 MHz at the default 12.288 MS/s profile).
+            step_hz = getattr(source, "rf_bandwidth", None) or getattr(source, "bandwidth_hz", None)
+        if not step_hz:
+            # No explicit usable-bandwidth attribute: derive from the source's
+            # ACTUAL live sample rate (never from capabilities alone -- a
+            # backend's capabilities ceiling is a theoretical range, not what
+            # windows() is actually delivering, e.g. sim advertises 100 MHz but
+            # runs at cfg.sample_rate=20 MHz; trusting the ceiling produced a
+            # single oversized step whose dwell only covered a fraction of the
+            # grid, leaving the rest NaN).
+            actual_sample_rate = (getattr(source, "sample_rate", None)
+                                   or getattr(getattr(source, "cfg", None), "sample_rate", None))
+            if actual_sample_rate:
+                step_hz = float(actual_sample_rate) * DEFAULT_USABLE_FRACTION
         if not step_hz:
             step_hz = caps.max_instantaneous_bw_hz or None
         if not step_hz:
             # last resort: the top of the source's own sample-rate range
             step_hz = caps.sample_rates_hz[-1] if caps.sample_rates_hz else 10e6
+        # Never exceed the backend's own advertised ceiling, whichever path produced step_hz.
+        if caps.max_instantaneous_bw_hz:
+            step_hz = min(float(step_hz), float(caps.max_instantaneous_bw_hz))
         self.step_hz = float(step_hz)
         self.dwells_per_step = max(1, int(dwells_per_step))
         self.settle_s = float(settle_s)

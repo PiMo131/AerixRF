@@ -305,7 +305,7 @@ def cmd_baseline(args) -> int:
         src.close()
     path = sweep.save_baseline(b, out)
     print(f"baseline saved: {path}  ({b.n_sweeps} sweeps averaged, {b.freqs_mhz.size} bins, "
-          f"floor {float(np.median(b.power_db)):.0f} dB)")
+          f"floor {float(np.nanmedian(b.power_db)):.0f} dB)")
     return 0
 
 
