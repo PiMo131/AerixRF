@@ -368,3 +368,20 @@ while the ambient control stays at zero. Level-2 remains almost closed — as di
 over-estimated by the single-look scalar floor (C4) and the 100 MS/s column is resolution-limited (C5); those are
 specified in `stage1-c4-c5-spec.md`. Evidence: level 1–2, third-party X310 capture, crowded band; no burst is
 attributed to any named transmitter.
+
+### RC positives after C5 (bench v3, three columns, 2026-09-19 ~15:30)
+
+214 slices × {dwell, full_band, full_band_4096}; ANTSDR ambient control 100 windows (0 positives, 40 wifi_like_wideband).
+
+| column | hopping | fixed_channel | level-2 labels | GRID_RESOLUTION_LIMITED | INSUFFICIENT_CHANNELS |
+|---|---|---|---|---|---|
+| dwell (10 MHz @ 15.36 MS/s) | 46 | 1 | rc_link_family 2 (SKYDROID_T10) | 0 | 201 |
+| full_band (100 MS/s / 1024) | 145 | 0 | 0 (withheld by G1) | 214/214 | 45 |
+| full_band_4096 (24.4 kHz bins) | 143 | 3 | **fhss_1mhz_grid 5 (SIYI_MK15, WFLY_ET10)** | 0 | 48 |
+
+Reading: with the resolution guard in place the 1024-pt full-band column is honestly marked unusable for grid
+tests, and the 4096-pt column produces the first 1 MHz-grid hits on two transmitters — a small number, consistent
+with the diagnosis that the remaining level-2 blocker is bandwidth over-estimation from the single-look scalar floor
+(C4, parked on `wip/stage1-c4` pending the ambient-FA fix). Whether SIYI MK15 / WFLY ET10 are documented 1 MHz-grid
+hoppers is to be checked against research/briefs/rc-link-raster-facts.md before any `consistent_with` wording is
+attached. Level-1 coverage 30/31 models; 0 errors. Evidence stays level 1–2 (third-party X310, crowded band).
