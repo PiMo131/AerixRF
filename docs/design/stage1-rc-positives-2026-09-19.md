@@ -348,3 +348,23 @@ current backend uses) and was not used to set the threshold.
 ambient. INSUFFICIENT_CHANNELS still 1160/1160: the grid test is still not *exercised* by ambient RF — only
 the RC-positives bench exercises it. Timing test (`test_timing_bound_1s_window_at_12_288_msps`, 50 ms budget)
 flakes at 52–56 ms only while two benches and the RFUAV prepare share the CPU; 40 ms median when idle.
+
+### RC positives after C1–C3 (bench rerun, fixed harness, 2026-09-19 ~13:40)
+
+Same 31 RFUAV RC transmitters, 428 windows (dwell + full_band per slice), ANTSDR ambient control 100 windows.
+
+| metric | before (v1) | after C1–C3 (v2) |
+|---|---|---|
+| models with ≥1 level-1 label | 27/31 | **30/31** |
+| `hopping_candidate` windows | 33 | **191** (dwell 46, full_band 145) |
+| `fixed_channel_burst_candidate` | 103 (102 were band-edge dwells, C6) | 1 |
+| `period.passed` | 375 (degenerate dt=0 / range-top) | 12 (all `free_search`) |
+| level-2: `fhss_1mhz_grid_candidate` / `rc_link_family_candidate` | 0 / 0 | **1 / 2** (2 models) |
+| `INSUFFICIENT_CHANNELS` tags | 320 | 246 |
+| ambient control positives | 0/100 | 0/100 (`wifi_like_wideband` 40) |
+
+Reading: the degenerate period passes are gone (375 → 12) and the hopping rule now fires on most transmitters
+while the ambient control stays at zero. Level-2 remains almost closed — as diagnosed, bandwidth is still
+over-estimated by the single-look scalar floor (C4) and the 100 MS/s column is resolution-limited (C5); those are
+specified in `stage1-c4-c5-spec.md`. Evidence: level 1–2, third-party X310 capture, crowded band; no burst is
+attributed to any named transmitter.
