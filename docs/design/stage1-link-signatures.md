@@ -149,3 +149,18 @@ Likely files: `aerix_rf/detect/{bursts.py,raster.py,energy.py}`, `aerix_rf/class
 3. **FlySky AFHDS2A channel spacing, channel count, frame rate** — COMMUNITY-grade only today, so no AFHDS2A entry may enter the Δ dictionary yet.
 4. **Bluetooth Core spec channel-selection #1/#2 hop-increment behaviour** — is the successive-channel difference a usable extra BLE discriminator?
 5. **Real-world Wi-Fi beacon interval distribution** (100 TU nominal; per-vendor deviation sets the ±2 % discount tolerance).
+
+
+## §R4 revision (2026-09-19) — measured on 1,160 ANTSDR ambient windows
+
+Run 1 (original R4): `hopping_candidate` on 758/1160 windows (65 %) — ambient Wi-Fi bursts (several MHz to
+>10 MHz, edge-clipped in the 10 MHz dwell) were clustered as "hops"; `wifi_beacon_like` never fired.
+Revision: the hop set is counted over NARROW clusters only (`HOP_MAX_CLUSTER_BW_HZ = 2.5 MHz`, not
+edge-clipped); `hopping_candidate` requires ≥5 distinct narrow clusters each revisited (`HOPPING_MIN_M_REPEAT`),
+plus whiteness; windows dominated by ≥10 MHz-wide bursts get the informational tag `wifi_like_wideband`; the
+beacon discount uses per-cluster intervals with late-only tolerance and ≥3 intervals.
+Run 2 (revised): grid 0, `droneid_cadence_candidate` 0, `rc_link_family_candidate` 0, `hopping_candidate` 12
+(1.0 %), `fixed_channel_burst_candidate` 205, `wifi_beacon_like` 6, `INSUFFICIENT_CHANNELS` 1160 → §9 budget
+MET. Trade-off accepted: a narrow hopper with < 5 channels visible in one dwell (e.g. a DJI-RC-like 2 MHz
+raster) is NOT labelled from a single dwell (`INSUFFICIENT_CHANNELS`) — it needs the multi-dwell path.
+Reports: `stage1-fa-budget-2026-09-19.md` (run 1), `stage1-fa-budget-2026-09-19-run2.md` (run 2).

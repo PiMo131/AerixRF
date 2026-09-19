@@ -89,6 +89,25 @@ WIFI_BEACON_MIN_R = 0.85                # absolute-phase Rayleigh concentration
 WIFI_BEACON_MIN_BW_HZ = 16e6            # design S "R3": fixed >=16 MHz flat-top channel
 WIFI_BEACON_MIN_N = 3
 
+# R3 revision -- wideband (Wi-Fi-like) occupancy. In a 10 MHz usable dwell a
+# 20 MHz Wi-Fi burst is ALWAYS frequency-edge-clipped, so it never reaches
+# ``cluster_centres`` (which drops edge-clipped events) and the original
+# ``WIFI_BEACON_MIN_BW_HZ = 16 MHz`` per-cluster beacon test could not fire by
+# construction. The wideband stream is therefore analysed separately, on the
+# RAW event list, where only timing (not centre) is trusted.
+WIFI_WIDEBAND_MIN_BW_HZ = 8e6      # "wider than any RC/BLE channel we model"
+WIFI_WIDEBAND_MIN_EVENTS = 3       # informational wifi_like_wideband tag floor
+WIFI_WIDEBAND_GROUP_TOL_HZ = 3e6   # coarse grouping of clipped centres (their
+                                    # centre estimate is dwell-edge-biased)
+WIFI_BEACON_LATE_TOL_S = 8e-3      # asymmetric: CSMA/CA contention + TBTT
+                                    # deferral only DELAYS a beacon
+WIFI_BEACON_EARLY_TOL_S = 0.5e-3   # small symmetric allowance for timestamp
+                                    # quantisation (200 us detector frames)
+WIFI_BEACON_MIN_INTERVALS = 3      # >=3 qualifying intervals (task spec)
+WIFI_BEACON_LATE_FRAC = 0.6        # ... and they must be the MAJORITY of the
+                                    # group's intervals, else dense data
+                                    # traffic trivially supplies 3 by chance
+
 # R3 -- BLE connection discount (facts brief item 4: 7.5 ms-4 s, 1.25 ms steps).
 BLE_CONN_MIN_S = 7.5e-3
 BLE_CONN_MAX_S = 4.0
@@ -116,9 +135,29 @@ DRONEID_MIN_R = 0.9
 
 # R4 -- fixed vs hopping.
 FIXED_STD_FRAC_OF_BW = 0.25
-HOPPING_MIN_M_REPEAT = 3
+HOPPING_MIN_M_REPEAT = 5   # R4 revision 2026-09-19 (was 3). Ambient-corpus
+                            # evidence: in a 10 MHz usable dwell, 3-4 reused
+                            # narrow clusters is the SATURATED ambient state of
+                            # a busy 2.4 GHz room (BLE data/advert traffic and
+                            # LO-adjacent narrow blips at +/-1/+/-3 MHz), not
+                            # evidence of a hop set. Raising the floor to 5
+                            # asks the hop set to be wider than "a handful of
+                            # adjacent channels", which is the same
+                            # decidability argument design S1 makes for the
+                            # raster test. A genuine narrow hopper that shows
+                            # only 3-4 channels per dwell is recovered by
+                            # multi-dwell accumulation (R1(e)), not by lowering
+                            # this floor.
 HOPPING_MIN_EVENTS = 6          # sample-size floor for a meaningful lag-1 autocorr
 HOPPING_WHITENESS_MAX_ABS_AUTOCORR = 0.3
+HOP_MAX_CLUSTER_BW_HZ = 2.5e6   # R4 revision: a hop channel must be NARROW
+                                 # relative to the dwell. A cluster whose
+                                 # median 6 dB bandwidth exceeds this is a
+                                 # wideband occupant (Wi-Fi/OFDM), and its
+                                 # -6 dB "centre" is a shape estimate, not a
+                                 # channel; such clusters are excluded from
+                                 # the hop-set count entirely (they can still
+                                 # carry fixed_channel_burst_candidate).
 HOPPING_MIN_REUSE_RATIO = 2.0   # events/cluster: guards against coincidental noise
                                 # clusters (birthday-paradox collisions) satisfying
                                 # M_repeat>=3 with no real channel reuse structure.
@@ -148,7 +187,8 @@ LABEL_VOCAB = frozenset({
     "fixed_channel_burst_candidate",
     "droneid_cadence_candidate",
 })
-TAG_VOCAB = frozenset({"wifi_beacon_like", "ble_connection_like", "INSUFFICIENT_CHANNELS"})
+TAG_VOCAB = frozenset({"wifi_beacon_like", "ble_connection_like", "wifi_like_wideband",
+                       "INSUFFICIENT_CHANNELS"})
 
 
 # --------------------------------------------------------------------------
@@ -503,6 +543,66 @@ def _wifi_beacon_like(cluster: Cluster) -> CadenceTag | None:
     return None
 
 
+def _wideband_events(events: list[BurstEvent]) -> list[BurstEvent]:
+    """Events too wide to be any channel this module models (Wi-Fi/OFDM
+    occupants). Includes frequency-edge-clipped events: in a 10 MHz usable
+    dwell a 20 MHz Wi-Fi burst is clipped by construction, and its measured
+    ``bw_6db_hz`` is a lower bound (the dwell width), not the true bandwidth."""
+    return [e for e in events
+            if e.bw_6db_hz >= WIFI_WIDEBAND_MIN_BW_HZ or e.edge_clipped]
+
+
+def _wideband_groups(events: list[BurstEvent]) -> list[list[BurstEvent]]:
+    """Coarse centre grouping of the wideband stream. Clipped centres are
+    dwell-edge-biased, so the tolerance is deliberately wide (a single AP's
+    bursts in one dwell all land in one group); this is a timing-analysis
+    grouping, NOT a channel estimate."""
+    out: list[list[BurstEvent]] = []
+    cur: list[BurstEvent] = []
+    for e in sorted(events, key=lambda e: e.centre_hz):
+        if cur and e.centre_hz - cur[-1].centre_hz > WIFI_WIDEBAND_GROUP_TOL_HZ:
+            out.append(cur)
+            cur = []
+        cur.append(e)
+    if cur:
+        out.append(cur)
+    return out
+
+
+def _wifi_beacon_like_wideband(events: list[BurstEvent]) -> CadenceTag | None:
+    """R3 revision: per-group INTERVAL analysis with a one-sided (late-only)
+    tolerance, on the wideband stream.
+
+    A beacon-only AP emits a ~1 ms burst every 102.4 ms (or a small integer
+    multiple, when TBTTs are missed); CSMA/CA contention and TBTT deferral can
+    only push a beacon LATE, never early (research/briefs/
+    rc-link-raster-facts.md item 5). So an interval between two consecutive
+    bursts of the same AP is ``n * 102.4 ms + delay``, ``delay >= 0``. Testing
+    the intervals directly (rather than the Rayleigh phase of absolute
+    timestamps) is what makes the asymmetry expressible.
+
+    Requires ``WIFI_BEACON_MIN_INTERVALS`` qualifying intervals AND that they
+    are the majority (``WIFI_BEACON_LATE_FRAC``) of the group's intervals:
+    in a busy room an AP's beacons are interleaved with data/ACK traffic, so
+    three qualifying intervals alone are easy to obtain by chance. This tag is
+    a DISCOUNT (level: non-UAS cadence explanation), never a detection, and a
+    busy-room miss is expected and acceptable."""
+    for group in _wideband_groups(events):
+        t = np.array(sorted(e.t_start for e in group), dtype=np.float64)
+        if len(t) < WIFI_BEACON_MIN_INTERVALS + 1:
+            continue
+        dt = np.diff(t)
+        n_mult = np.round(dt / WIFI_BEACON_PERIOD_S)
+        resid = dt - n_mult * WIFI_BEACON_PERIOD_S
+        ok = ((n_mult >= 1) & (n_mult <= WIFI_BEACON_MAX_N)
+              & (resid >= -WIFI_BEACON_EARLY_TOL_S) & (resid <= WIFI_BEACON_LATE_TOL_S))
+        n_ok = int(np.count_nonzero(ok))
+        if n_ok >= WIFI_BEACON_MIN_INTERVALS and n_ok >= WIFI_BEACON_LATE_FRAC * len(dt):
+            return CadenceTag(-1, "wifi_beacon_like", WIFI_BEACON_PERIOD_S,
+                              float(n_ok) / len(dt), len(t))
+    return None
+
+
 def _ble_connection_like(clusters: list[Cluster], period_ev: PeriodEvidence) -> CadenceTag | None:
     """Global test (design S3 "BLE discriminator"): the connection-interval
     periodicity survives even though each connection event lands on a
@@ -561,10 +661,13 @@ def _droneid_cadence_candidate(cluster: Cluster, idx: int) -> CadenceTag | None:
     return CadenceTag(idx, "droneid_cadence_candidate", DRONEID_PERIOD_S, r, len(t))
 
 
-def cadence_discount(clusters: list[Cluster], period_ev: PeriodEvidence) -> list[CadenceTag]:
-    """R3: per-cluster Wi-Fi-beacon / DroneID cadence checks plus the global
-    BLE-connection check. Returns every tag that fired (order: beacon,
-    droneid per cluster, then the single global BLE check)."""
+def cadence_discount(clusters: list[Cluster], period_ev: PeriodEvidence,
+                     events: list[BurstEvent] | None = None) -> list[CadenceTag]:
+    """R3: per-cluster Wi-Fi-beacon / DroneID cadence checks, the wideband
+    (clipped-inclusive) Wi-Fi beacon check, plus the global BLE-connection
+    check. ``events`` is the RAW event list (pre-clustering); pass it so the
+    wideband stream -- which ``cluster_centres`` deliberately drops -- is still
+    analysable. Returns every tag that fired."""
     tags: list[CadenceTag] = []
     for i, c in enumerate(clusters):
         wifi = _wifi_beacon_like(c)
@@ -574,6 +677,10 @@ def cadence_discount(clusters: list[Cluster], period_ev: PeriodEvidence) -> list
         drone = _droneid_cadence_candidate(c, i)
         if drone is not None:
             tags.append(drone)
+    if events and not any(t.tag == "wifi_beacon_like" for t in tags):
+        wb = _wifi_beacon_like_wideband(events)
+        if wb is not None:
+            tags.append(wb)
     ble = _ble_connection_like(clusters, period_ev)
     if ble is not None:
         tags.append(ble)
@@ -588,7 +695,8 @@ def fixed_vs_hopping(clusters: list[Cluster]) -> str | None:
     """R4 (level 1 only): replaces the old max-min "hop spread" heuristic.
     ``fixed_channel_burst_candidate`` requires exactly one cluster with a
     centre spread well inside its own bandwidth; ``hopping_candidate``
-    requires >=3 well-attested (>=2-burst) channel clusters, a minimum
+    requires >= ``HOPPING_MIN_M_REPEAT`` well-attested (>=2-burst) NARROW
+    (<= ``HOP_MAX_CLUSTER_BW_HZ``) channel clusters, a minimum
     events/cluster reuse ratio (rules out coincidental one-off centres that
     happen to collide within the cluster tolerance -- see
     ``HOPPING_MIN_REUSE_RATIO``), AND a near-white (non-drifting) lag-1
@@ -602,9 +710,16 @@ def fixed_vs_hopping(clusters: list[Cluster]) -> str | None:
             return "fixed_channel_burst_candidate"
         return None
 
-    repeat = _repeat_clusters(clusters)
-    all_events = sorted((e for c in clusters for e in c.events), key=lambda e: e.t_start)
-    reuse_ratio = len(all_events) / len(clusters) if clusters else 0.0
+    # R4 revision 2026-09-19: the hop set is counted over NARROW clusters only
+    # (``HOP_MAX_CLUSTER_BW_HZ``). A wideband occupant's -6 dB edge midpoint
+    # moves with its modulation/shape, so several such "centres" are one
+    # emitter's shape jitter, not several channels; and in a dwell narrower
+    # than the occupant the centre is dwell-edge-biased anyway (those events
+    # are already dropped as ``edge_clipped`` in ``cluster_centres``).
+    narrow = [c for c in clusters if c.bw_hz <= HOP_MAX_CLUSTER_BW_HZ]
+    repeat = _repeat_clusters(narrow)
+    all_events = sorted((e for c in narrow for e in c.events), key=lambda e: e.t_start)
+    reuse_ratio = len(all_events) / len(narrow) if narrow else 0.0
     if (len(repeat) >= HOPPING_MIN_M_REPEAT and len(all_events) >= HOPPING_MIN_EVENTS
             and reuse_ratio >= HOPPING_MIN_REUSE_RATIO):
         centres = np.array([e.centre_hz for e in all_events], dtype=np.float64)
@@ -682,7 +797,7 @@ def analyze_raster(
     clusters = cluster_centres(events, tol_hz=cluster_tol_hz)
     raster_ev = raster_test(clusters, deltas_hz=deltas_hz)
     period_ev = period_test(clusters, periods_s=periods_s)
-    cadence_tags = cadence_discount(clusters, period_ev)
+    cadence_tags = cadence_discount(clusters, period_ev, events)
     fixhop = fixed_vs_hopping(clusters)
 
     labels: list[str] = []
@@ -727,6 +842,22 @@ def analyze_raster(
         tags.append("wifi_beacon_like")
     if "ble_connection_like" in tag_by_name:
         tags.append("ble_connection_like")
+    # Informational only (never suppresses, never a detection): says "this
+    # window is dominated by occupants wider than any channel this module
+    # models", i.e. WHY a narrow hop set was not found. Level 1 morphology
+    # about the CHANNEL OCCUPANCY, not an identity claim -- a >=8 MHz burst in
+    # 2.4 GHz is most often Wi-Fi, but DroneID/OcuSync downlink and microwave
+    # leakage are also wideband, so the token deliberately says "wifi_like",
+    # not "wifi".
+    n_wide = len(_wideband_events(events))
+    if n_wide >= WIFI_WIDEBAND_MIN_EVENTS:
+        tags.append("wifi_like_wideband")
+        notes.append(
+            f"{n_wide} burst(s) at/above {WIFI_WIDEBAND_MIN_BW_HZ/1e6:.0f} MHz (or "
+            f"frequency-edge-clipped by the dwell) -- wideband occupancy; these are "
+            f"excluded from the hop-set count (R4 revision), so an absent hopping "
+            f"label here is 'masked/insufficient', not 'no hopper'."
+        )
     if any(t.tag == "droneid_cadence_candidate" for t in cadence_tags):
         labels.append("droneid_cadence_candidate")
 

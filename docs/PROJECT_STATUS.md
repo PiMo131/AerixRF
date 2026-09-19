@@ -43,9 +43,8 @@ A stage-1 candidate is never reported as a confirmed drone.
   an operator timeline (`docs/field/positives-protocol.md`) ⏳ next.
 - **G. Firmware trial** — second-SD-card UHD image ✅ booted; 15.36 MS/s sc16 and 20 MS/s sc8 stream clean in
   short runs, one 10-min soak failed (host socket buffer suspected) ⏳ needs a sysctl on the host to conclude.
-- **H. Stage-1 link-signature rules** — burst extraction + raster/period/cadence tests ✅ built; first real
-  false-alarm audit on 1,160 ambient windows: grid/DroneID/RC rules pass, `hopping` rule over-fires on Wi-Fi
-  (65 % vs 5 % budget) ⏳ rule correction in progress.
+- **H. Stage-1 link-signature rules** — burst extraction + raster/period/cadence tests ✅ built; false-alarm audit on
+  1,160 real ambient windows: all budgeted rules pass after one rule correction (hopping 65 % → 1.0 %) ✅.
 - **Server integration** — after F.
 
 ## 4. Progress to date (what is actually proven)

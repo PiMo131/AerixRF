@@ -259,10 +259,17 @@ def test_rule_wifi_like_packets_are_unknown():
 
 
 def test_rule_cadenced_10mhz_bursts_may_be_dji_with_bounded_confidence():
-    """10 MHz bursts every 600 ms over >= 1.5 s (the DroneID-like shape) may be
-    called dji_ocusync, but never with more than moderate confidence."""
+    """10 MHz bursts every 600 ms (the DroneID-like shape) may be called
+    dji_ocusync, but never with more than moderate confidence. Needs >= 4
+    bursts (>= 3 s) for a window-level cadence_ms: docs/design/
+    stage1-link-signatures.md S4/T3 requires >= 3 in-window intervals from a
+    single channel cluster's own stream (see tests/test_detect.py::
+    test_cadenced_burst_train_is_ofdm_candidate_with_cadence /
+    test_short_cadenced_burst_train_has_no_window_cadence, which fixed this
+    fixture's old 1.6 s/2-interval duration as insufficient under the same
+    rule)."""
     sr = 20e6
-    det, c = _rule(synth_iq(sr, 1.6, drone=True, snr_db=15.0, burst_bw_hz=10e6,
+    det, c = _rule(synth_iq(sr, 3.0, drone=True, snr_db=15.0, burst_bw_hz=10e6,
                             cadence_s=0.6, seed=3), sr)
     assert det.cadence_ms is not None and 300 <= det.cadence_ms <= 1000, det
     assert c.signature_class == "dji_ocusync", (det, c)
