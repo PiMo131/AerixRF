@@ -242,3 +242,9 @@ Receive-only throughout.
   bound transmitter (would be level-5 test truth).
 * `L_freq_eff` under a Hann window with the 300 kHz boxcar is estimated (≈ size/1.5); measure it
   empirically on AWGN in `test_noise_only_window_false_pixel_rate` and pin the constant.
+
+## Status 2026-09-19 (main)
+
+C4 implemented and reconciled on branch `wip/stage1-c4` (see that branch's copy of this document for
+"§ Implementation reconciliation" R1–R5). Ambient FA on the branch: hopping 199/1160 = 17.2 % vs 0.95 % on main →
+parked; main keeps C1–C3 only. Do not merge without an FA rerun ≤ ~1.5 % and level-2 = 0.
