@@ -34,7 +34,7 @@ from pathlib import Path
 import numpy as np
 
 from .config import Config
-from .pipeline import process_window, FrameResult
+from .pipeline import process_window, FrameResult, SessionCadenceStore
 
 log = logging.getLogger("aerix.rf.cli")
 
@@ -417,13 +417,14 @@ def _run_locked(args, *, record_all: bool) -> int:
     # requested-vs-actual device config is still worth having in session.json.
     receiver_readback = None
     stream_end_reason = None
+    session_cadence = SessionCadenceStore()
     try:
         for win in source.windows():
             if receiver_readback is None:
                 rb = win.metadata.get("readback")
                 if isinstance(rb, dict) and rb:
                     receiver_readback = dict(rb)
-            fr = process_window(win, cfg, decode=not args.no_decode)
+            fr = process_window(win, cfg, decode=not args.no_decode, session_cadence=session_cadence)
             n_windows += 1
             n_plaus += int(fr.plausible)
             n_crc += int(fr.decoded is not None)
@@ -519,8 +520,9 @@ def cmd_replay(args) -> int:
     n_crc = 0
     orig = {r.get("iq_file"): r for r in src.detections() if r.get("iq_file")}
     diffs = []
+    session_cadence = SessionCadenceStore()
     for win in src.iq_windows(cfg):
-        fr = process_window(win, cfg, decode=not args.no_decode)
+        fr = process_window(win, cfg, decode=not args.no_decode, session_cadence=session_cadence)
         rec = fr.record()
         rec["iq_file"] = Path(win.metadata.get("file", "")).name
         if args.png:

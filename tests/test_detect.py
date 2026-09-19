@@ -91,16 +91,32 @@ def test_very_wide_continuous_is_analog_candidate():
 
 
 def test_cadenced_burst_train_is_ofdm_candidate_with_cadence():
-    """The DroneID-like case: 10 MHz bursts every 600 ms over a >= 1.5 s window."""
+    """The DroneID-like case: 10 MHz bursts every 600 ms. Window-level
+    cadence_ms now only reports from a single channel cluster's own stream
+    with >= 3 intervals (docs/design/stage1-link-signatures.md S4/T3;
+    replaces the old whole-band-envelope autocorrelation estimator, which
+    fired on ambient Wi-Fi/BLE noise too) -- so this needs >= 4 bursts
+    (>= 3 s) rather than the old 1.6 s/3-burst window."""
     sr = 20e6
-    iq = synth_iq(sr, 1.6, drone=True, snr_db=15.0, burst_bw_hz=10e6,
+    iq = synth_iq(sr, 3.0, drone=True, snr_db=15.0, burst_bw_hz=10e6,
                   cadence_s=0.6, seed=3)
     det = _detect(iq, sr)
     assert det.morphology == "ofdm_candidate"
     assert det.cadence_ms is not None and 500 <= det.cadence_ms <= 700
-    assert det.burst_count >= 2
+    assert det.burst_count >= 4
     assert 8.0 <= det.occupied_bw_mhz <= 12.0
     assert det.duty_cycle < 0.1
+
+
+def test_short_cadenced_burst_train_has_no_window_cadence():
+    """The old bug (docs/design/stage1-link-signatures.md S4): a 1.6 s window
+    at 600 ms cadence gives only 2 intervals, below the >= 3 the design
+    requires before reporting a window-level cadence_ms at all."""
+    sr = 20e6
+    iq = synth_iq(sr, 1.6, drone=True, snr_db=15.0, burst_bw_hz=10e6,
+                  cadence_s=0.6, seed=3)
+    det = _detect(iq, sr)
+    assert det.cadence_ms is None, det
 
 
 def test_wifi_like_packets_have_no_cadence():
@@ -112,9 +128,19 @@ def test_wifi_like_packets_have_no_cadence():
     assert not (det.cadence_ms is not None and 300 <= det.cadence_ms <= 1000)
 
 
-def test_hopper_is_fhss_candidate():
+def test_hopper_is_hopping_or_grid_candidate():
+    """The old power-centroid fhss_candidate is replaced by the T1/T2
+    link-signature vocabulary (docs/design/stage1-link-signatures.md): a
+    frequency hopper now surfaces as hopping_candidate (R4) or, if the
+    channel centres happen to land on a decidable raster within this one
+    window, one of the grid-raster labels (R1) -- never the removed
+    "fhss_candidate" string."""
     det = _detect(_packets(20e6, 0.5, bw_hz=1e6, amp=8.0, hop_hz=16e6), 20e6)
-    assert det.morphology == "fhss_candidate", det
+    assert det.morphology in (
+        "hopping_candidate", "fhss_1mhz_grid_candidate", "fhss_2mhz_grid_candidate",
+        "rc_link_family_candidate",
+    ), det
+    assert "fhss_candidate" not in energy.MORPHOLOGIES
 
 
 def test_narrowband_burst_is_narrowband_candidate():

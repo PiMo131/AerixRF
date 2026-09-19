@@ -16,7 +16,7 @@ bursts, regardless of what stage 2 thinks.
 from __future__ import annotations
 
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace as dc_replace
 from datetime import datetime, timezone
 from typing import Any
 
@@ -25,6 +25,8 @@ from .dsp import spectrogram
 from .dsp.spectrogram import Spectrogram
 from .detect import energy
 from .detect.energy import Detection
+from .detect import raster as raster_mod
+from .detect.bursts import BurstEvent
 from .classify import model as classify_model
 from .classify.model import Classification
 from .decode import droneid
@@ -39,7 +41,43 @@ def iso(ts: float) -> str:
 # Morphologies for which a DroneID decode attempt is worth the CPU. Decode is
 # cheap on quiet windows (envelope only) but we still skip flat noise.
 _DECODE_MORPHOLOGIES = {"burst_wideband_candidate", "ofdm_candidate", "wideband_candidate",
-                        "fhss_candidate", "continuous_wideband_candidate", "unknown"}
+                        "continuous_wideband_candidate", "unknown",
+                        # stage-1 link-signature vocabulary (replaces "fhss_candidate")
+                        "fhss_1mhz_grid_candidate", "fhss_2mhz_grid_candidate",
+                        "rc_link_family_candidate", "hopping_candidate",
+                        "fixed_channel_burst_candidate", "droneid_cadence_candidate"}
+
+
+@dataclass
+class SessionCadenceStore:
+    """Bounded (~10 s) rolling store of :class:`BurstEvent`\\ s across windows,
+    in absolute (session) time, so R3 cadence (docs/design/stage1-link-signatures.md
+    S4) can see the >= 5 events spanning >= 3 s that a single 1 s window
+    structurally cannot (design S1: 640 ms gives <= 1 interval per window).
+
+    Not threaded through by default: ``process_window`` only consults one when
+    a caller explicitly passes it, so existing single-window callers (tests,
+    anything that doesn't own a multi-window session loop) keep today's pure,
+    stateless behaviour. ``cli.py``'s live and replay loops each own one
+    instance for the lifetime of a run.
+    """
+    window_s: float = 10.0
+    events: list[BurstEvent] = field(default_factory=list)
+
+    def add(self, det_events: list[BurstEvent], captured_at: float) -> None:
+        if not det_events:
+            return
+        shifted = [dc_replace(e, t_start=e.t_start + captured_at, t_end=e.t_end + captured_at)
+                   for e in det_events]
+        self.events.extend(shifted)
+        cutoff = max(e.t_end for e in self.events) - self.window_s
+        self.events = [e for e in self.events if e.t_end >= cutoff]
+
+    def result(self):
+        """Latest session-level ``RasterResult``, or ``None`` if empty."""
+        if not self.events:
+            return None
+        return raster_mod.analyze_raster(self.events)
 
 
 @dataclass
@@ -52,6 +90,7 @@ class FrameResult:
     attempts: list[Any] = field(default_factory=list)     # decode.DecodeAttempt
     decoded: Any = None                                    # decode.DroneIdResult | None
     elapsed_ms: float = 0.0
+    cadence_source: str = "window"                          # "window" | "session" (T3)
 
     # --- derived -------------------------------------------------------------
     @property
@@ -86,6 +125,8 @@ class FrameResult:
             "cadence_ms": None if d.cadence_ms is None else round(d.cadence_ms, 1),
             "duty_cycle": round(getattr(d, "duty_cycle", 0.0), 3),
             "morphology": getattr(d, "morphology", "unknown"),
+            "cadence_source": self.cadence_source,
+            "stage1": dict(getattr(d, "stage1", {}) or {}),
             "plausible": self.plausible,
             "class": c.signature_class,
             "class_confidence": round(c.confidence, 3),
@@ -181,8 +222,12 @@ class FrameResult:
 
 
 def process_window(win: IQWindow, cfg: Config, *, decode: bool = True,
-                   decode_min_score: float = 0.25) -> FrameResult:
-    """Run every stage on one window. Pure function of (window, cfg, model file)."""
+                   decode_min_score: float = 0.25,
+                   session_cadence: SessionCadenceStore | None = None) -> FrameResult:
+    """Run every stage on one window. Pure function of (window, cfg, model file)
+    unless the caller threads a ``session_cadence`` accumulator through a run's
+    windows (T3 session-level R3; see ``SessionCadenceStore``) -- omitted by
+    default so single-window callers (tests) stay pure and deterministic."""
     t0 = time.perf_counter()
     center_mhz = win.center_freq_hz / 1e6
 
@@ -191,6 +236,19 @@ def process_window(win: IQWindow, cfg: Config, *, decode: bool = True,
     cls = classify_model.classify_window(spec, det, center_mhz,
                                          iq=win.iq, sample_rate=win.sample_rate)
     plausible = det.score >= cfg.score_threshold
+
+    cadence_source = "window"
+    if session_cadence is not None:
+        session_cadence.add(det.events, win.captured_at)
+        sres = session_cadence.result()
+        if sres is not None:
+            if "droneid_cadence_candidate" in sres.labels and det.morphology != "noise":
+                det.morphology = "droneid_cadence_candidate"
+                if "droneid_cadence_candidate" not in det.stage1.get("labels", []):
+                    det.stage1["labels"] = list(det.stage1.get("labels", [])) + ["droneid_cadence_candidate"]
+            if det.cadence_ms is None and sres.period.passed and sres.period.n_intervals >= 3:
+                det.cadence_ms = sres.period.t_hat_s * 1000.0
+                cadence_source = "session"
 
     attempts: list[Any] = []
     decoded = None
@@ -205,4 +263,5 @@ def process_window(win: IQWindow, cfg: Config, *, decode: bool = True,
 
     return FrameResult(window=win, spec=spec, det=det, cls=cls, plausible=plausible,
                        attempts=attempts, decoded=decoded,
-                       elapsed_ms=(time.perf_counter() - t0) * 1000.0)
+                       elapsed_ms=(time.perf_counter() - t0) * 1000.0,
+                       cadence_source=cadence_source)

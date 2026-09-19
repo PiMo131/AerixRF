@@ -10,10 +10,23 @@ describes the measured shape only:
     wideband_candidate             2-6 MHz occupied (bursty or continuous)
     burst_wideband_candidate       >= 6 MHz, bursty, not flat-topped
     ofdm_candidate                 >= 6 MHz, bursty, flat-topped (OFDM-like)
-    fhss_candidate                 burst centroid hops around the band
     continuous_wideband_candidate  >= 6 MHz, on for most of the window
     analog_candidate               >= 18 MHz continuous (weak guess: analog FPV)
     unknown                        above the floor but no usable shape
+
+    -- stage-1 link-signature vocabulary (docs/design/stage1-link-signatures.md;
+       see aerix_rf.detect.{bursts,raster} T1/T2), overlaid ahead of the shape
+       buckets above when the burst-event evidence supports it:
+    fhss_1mhz_grid_candidate       Rayleigh-tested 1.000 MHz channel raster
+    fhss_2mhz_grid_candidate       Rayleigh-tested 2.000 MHz channel raster (collides
+                                    with BLE data channels by frequency alone)
+    rc_link_family_candidate       hopping + ELRS-rate period + <=2 MHz hops + short bursts
+    droneid_cadence_candidate      session-level 640 ms crystal-locked cadence (see
+                                    aerix_rf.pipeline.SessionCadenceStore; never fires
+                                    from one 1 s window alone)
+    hopping_candidate              >=3 reused channel clusters, near-white centre sequence
+                                    (replaces the old power-centroid ``fhss_candidate``)
+    fixed_channel_burst_candidate  one channel cluster, tight centre spread
 
 Stage 1 makes NO identity claim: a 10-20 MHz OFDM blob is just as likely
 ambient Wi-Fi as a drone link. Identity (``dji_ocusync`` / ``wifi_uas`` / ...)
@@ -28,17 +41,36 @@ the STFT is O(T*F) vectorised numpy at most, ~50 ms on the reference box.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, asdict
+from dataclasses import dataclass, asdict, field
 from typing import Any
 
 import numpy as np
+from scipy.ndimage import uniform_filter1d
 
 from ..dsp.spectrogram import Spectrogram
+from . import bursts as bursts_mod
+from . import raster as raster_mod
+from .bursts import BurstEvent
 
 MORPHOLOGIES = (
     "noise", "narrowband_candidate", "wideband_candidate", "burst_wideband_candidate",
-    "ofdm_candidate", "fhss_candidate", "continuous_wideband_candidate",
-    "analog_candidate", "unknown",
+    "ofdm_candidate", "continuous_wideband_candidate", "analog_candidate", "unknown",
+    # stage-1 link-signature vocabulary (docs/design/stage1-link-signatures.md S6);
+    # replaces the old power-centroid "fhss_candidate".
+    "fhss_1mhz_grid_candidate", "fhss_2mhz_grid_candidate", "rc_link_family_candidate",
+    "droneid_cadence_candidate", "hopping_candidate", "fixed_channel_burst_candidate",
+)
+
+# Priority order in which a T2 link-signature label overrides the plain
+# bandwidth/duty-cycle shape bucket below (most specific/rare first). This is
+# the position the old centroid-spread ``fhss_candidate`` heuristic used to
+# sit at (ahead of the narrowband/wideband/ofdm bucketing).
+_T2_LABEL_PRIORITY = (
+    "droneid_cadence_candidate",
+    "fhss_2mhz_grid_candidate",
+    "fhss_1mhz_grid_candidate",
+    "rc_link_family_candidate",
+    "hopping_candidate",
 )
 
 # Shape thresholds (MHz / ratios). Kept as module constants so tests and the
@@ -49,10 +81,26 @@ WIDEBAND_MIN_MHZ = 6.0        # >= this -> *_wideband / ofdm candidates
 ANALOG_MIN_MHZ = 18.0         # >= this and continuous -> analog_candidate
 CONTINUOUS_DUTY = 0.8         # duty cycle above which the emitter is "continuous"
 FLAT_TOP_SPREAD_DB = 6.0      # p90-p10 of the in-band PSD below this = flat-topped
-FHSS_MIN_BURSTS = 4           # need this many bursts to call a hop pattern
-FHSS_MIN_SPREAD_MHZ = 1.0     # centroid spread must exceed this ...
-FHSS_SPREAD_VS_BW = 0.5       # ... and this fraction of the union occupied bw
 _MAX_BURST_RUNS = 64          # cap per-burst work (bounded cost per window)
+MIN_CLUSTER_EVENTS_FOR_CADENCE = 4   # >= 3 intervals (design S4/T3)
+
+# T1 input conditioning (T3's own adapter, does not touch bursts.py). One raw
+# STFT frame is a single periodogram realisation of the underlying process --
+# a stationary random signal (an OFDM-like blob, or any bandlimited noise-like
+# burst) has ~5.6 dB of *irreducible per-bin fading* on a lone frame, same as
+# any single-look spectral estimate. bursts.py's own docstring assumes a "D8
+# detector frame" (already a lower-variance estimate, not one FFT snapshot);
+# feeding it a raw single-shot STFT frame instead fragments one genuine wide
+# burst into dozens of spurious sub-clusters at the 6/3 dB gate/hysteresis
+# margins (bridging in bursts.py is time-only, by design, so a 1-bin fade dip
+# permanently splits the frequency footprint). A modest frequency-domain
+# boxcar smooth over this many Hz -- applied ONLY to the copy handed to
+# detect_bursts, never to snr_db/occupied_bw_mhz/duty_cycle/burst_count/
+# peak_freq_mhz/score, which stay on the original array -- restores enough
+# independent samples (bandwidth / this width bins) to make the burst's own
+# footprint contiguous without smearing a genuine 1 MHz hop or a 0.5 MHz
+# narrowband burst into its neighbours.
+_T1_FREQ_SMOOTH_HZ = 300e3
 
 
 @dataclass
@@ -63,33 +111,18 @@ class Detection:
     peak_freq_mhz: float
     occupied_bw_mhz: float
     burst_count: int
-    cadence_ms: float | None     # inter-burst period, if periodic
+    cadence_ms: float | None     # inter-burst period, if periodic (per-cluster; window-level only)
     signature_class: str         # backward-compat only: "noise" | "unknown" (identity is stage 2)
     morphology: str = "unknown"  # one of MORPHOLOGIES (stage-1 shape vocabulary)
     duty_cycle: float = 0.0      # fraction of STFT slices with the occupied band active
+    stage1: dict[str, Any] = field(default_factory=dict)   # additive T2 evidence, see analyze()
+    events: list[BurstEvent] = field(default_factory=list)  # this window's T1 burst events, for
+                                                              # session-level (cross-window) R3/R1(e)
+                                                              # accumulation -- see aerix_rf.pipeline.
+                                                              # Not part of the persisted record schema.
 
     def as_dict(self) -> dict[str, Any]:
         return asdict(self)
-
-
-def _estimate_cadence_ms(power_per_slice: np.ndarray, slice_dt_s: float) -> float | None:
-    """Dominant inter-burst period via autocorrelation of the time envelope."""
-    x = power_per_slice - power_per_slice.mean()
-    if np.allclose(x, 0):
-        return None
-    ac = np.correlate(x, x, mode="full")[len(x) - 1:]
-    if ac[0] <= 0:
-        return None
-    ac = ac / ac[0]
-    # Ignore the zero-lag peak; look for the first strong secondary peak.
-    lo = max(1, int(0.05 / slice_dt_s))     # >= 50 ms apart
-    if lo >= len(ac):
-        return None
-    seg = ac[lo:]
-    k = int(np.argmax(seg))
-    if seg[k] < 0.3:                          # not convincingly periodic
-        return None
-    return (lo + k) * slice_dt_s * 1000.0
 
 
 def _burst_runs(bursts: np.ndarray) -> list[tuple[int, int]]:
@@ -100,43 +133,53 @@ def _burst_runs(bursts: np.ndarray) -> list[tuple[int, int]]:
     return list(zip(starts[:_MAX_BURST_RUNS].tolist(), stops[:_MAX_BURST_RUNS].tolist()))
 
 
-def _hop_spread_mhz(lin: np.ndarray, bursts: np.ndarray, freqs_hz: np.ndarray,
-                    noise_lin: float) -> float | None:
-    """Spread (max-min) of the power centroid across bursts, in MHz.
+def _cluster_cadence_ms(clusters: list, wifi_beacon_cluster_idx: set[int] | None = None) -> float | None:
+    """Window-level cadence (design T3): only reported from a single channel
+    cluster's OWN burst stream when it holds >= 3 intervals -- never from the
+    whole-band envelope (that was the old ``_estimate_cadence_ms`` bug: ambient
+    Wi-Fi sets a "cadence" on every candidate). A 1 s window at DroneID's
+    640 ms period gives <= 1 interval by construction (design S1/S4), so this
+    is expected to be ``None`` for that case at window level; DroneID cadence
+    recognition happens at the session level (``aerix_rf.pipeline``).
 
-    A fixed-frequency burst train (OcuSync, Wi-Fi) keeps its centroid put; an
-    FHSS link (Bluetooth, many RC links) moves it by several MHz per burst.
-    Only touches the burst slices, so cost is bounded by the burst duty cycle.
-    """
-    runs = _burst_runs(bursts)
-    if len(runs) < FHSS_MIN_BURSTS:
+    Returns ``None`` (never ``0.0``) whenever no cadence is established:
+    that includes a degenerate median inter-event gap of 0 s (e.g. two
+    fragments of the same physical burst landing in the same cluster at
+    (near-)identical timestamps -- a T1 artefact, not a real sub-millisecond
+    "cadence"), and a dominant cluster R3 has already tagged
+    ``wifi_beacon_like`` (design S3: a cadence better explained by a known
+    non-UAS beacon schedule is discounted here the same way raster.py
+    discounts it from the level-2 label set, rather than reported as a
+    generic "periodic burst" cadence)."""
+    if not clusters:
         return None
-    f_mhz = freqs_hz / 1e6
-    cents = []
-    for a, b in runs:
-        p = lin[a:b].mean(axis=0) - noise_lin
-        np.clip(p, 0.0, None, out=p)
-        tot = float(p.sum())
-        if tot <= 0.0:
-            continue
-        cents.append(float((p * f_mhz).sum() / tot))
-    if len(cents) < FHSS_MIN_BURSTS:
+    dominant_idx = max(range(len(clusters)), key=lambda i: clusters[i].n)
+    dominant = clusters[dominant_idx]
+    if dominant.n < MIN_CLUSTER_EVENTS_FOR_CADENCE:
         return None
-    return float(max(cents) - min(cents))
+    if wifi_beacon_cluster_idx and dominant_idx in wifi_beacon_cluster_idx:
+        return None
+    t = np.array(sorted(e.t_start for e in dominant.events))
+    dt = np.diff(t)
+    if dt.size < 3:
+        return None
+    median_dt_ms = float(np.median(dt) * 1000.0)
+    if not np.isfinite(median_dt_ms) or median_dt_ms <= 0.0:
+        return None
+    return median_dt_ms
 
 
 def _morphology(*, snr_db: float, occupied_bw_mhz: float, n_occupied: int,
                 burst_count: int, duty_cycle: float, flat_top: bool,
-                hop_spread_mhz: float | None) -> str:
+                t2_labels: list[str]) -> str:
     """Shape -> stage-1 vocabulary. No identity claim is made here."""
     if snr_db < NOISE_SNR_DB:
         return "noise"
     if n_occupied == 0:
         return "unknown"
-    if (hop_spread_mhz is not None and burst_count >= FHSS_MIN_BURSTS
-            and hop_spread_mhz >= FHSS_MIN_SPREAD_MHZ
-            and hop_spread_mhz >= FHSS_SPREAD_VS_BW * occupied_bw_mhz):
-        return "fhss_candidate"
+    for lbl in _T2_LABEL_PRIORITY:
+        if lbl in t2_labels:
+            return lbl
     continuous = duty_cycle > CONTINUOUS_DUTY
     if occupied_bw_mhz < NARROWBAND_MAX_MHZ:
         return "narrowband_candidate"
@@ -148,6 +191,8 @@ def _morphology(*, snr_db: float, occupied_bw_mhz: float, n_occupied: int,
     if burst_count >= 1:
         return "ofdm_candidate" if flat_top else "burst_wideband_candidate"
     # Wideband, above the floor, but neither continuous nor resolvable bursts.
+    if "fixed_channel_burst_candidate" in t2_labels:
+        return "fixed_channel_burst_candidate"
     return "wideband_candidate"
 
 
@@ -211,31 +256,57 @@ def detect(spec: Spectrogram, center_freq_mhz: float,
     else:
         flat_top = False
 
-    # Frequency hopping: centroid movement between bursts (bounded cost).
-    hop_spread = _hop_spread_mhz(lin, bursts, spec.freqs_hz, noise_lin) if bursty else None
-
     # Time step between STFT frames. Honour the actual hop the spectrogram was
     # computed with (it may be time-decimated for speed); fall back to the old
     # 50 %-overlap assumption for a Spectrogram built without one.
     hop = getattr(spec, "hop", None) or spec.freqs_hz.size // 2
     slice_dt_s = hop / spec.sample_rate
-    cadence_ms = _estimate_cadence_ms(p_t, slice_dt_s)
+
+    # -- T1/T2 (docs/design/stage1-link-signatures.md): burst-event extraction
+    # and hop-raster/period/cadence-discount evidence, replacing the old
+    # power-centroid "hop spread" heuristic. Absolute Hz so cluster centres
+    # are meaningful across windows/dwells (session accumulation, R1(e)).
+    freqs_hz_abs = center_freq_mhz * 1e6 + spec.freqs_hz
+    smooth_bins = max(1, int(round(_T1_FREQ_SMOOTH_HZ / bin_hz)))
+    lin_for_bursts = uniform_filter1d(lin, size=smooth_bins, axis=1, mode="nearest") \
+        if smooth_bins > 1 else lin
+    events = bursts_mod.detect_bursts(
+        lin_for_bursts, fs=spec.sample_rate, frame_dt_s=slice_dt_s, freqs_hz=freqs_hz_abs,
+        noise_floor_lin=noise_lin, t0_s=0.0,
+    )
+    clusters = raster_mod.cluster_centres(events)
+    raster_result = raster_mod.analyze_raster(events)
+    wifi_beacon_idx = {t.cluster_index for t in raster_result.cadence_tags
+                       if t.tag == "wifi_beacon_like"}
+    cadence_ms = _cluster_cadence_ms(clusters, wifi_beacon_idx)
+
+    stage1 = {
+        "labels": list(raster_result.labels),
+        "tags": list(raster_result.tags),
+        "consistent_with": list(raster_result.consistent_with),
+        "raster_delta_hz": raster_result.raster.delta_hz,
+        "raster_p": raster_result.raster.p_false,
+        "n_clusters": raster_result.raster.n_channels,
+        "period_s": raster_result.period.t_hat_s if raster_result.period.passed else None,
+    }
 
     # Approximate RSSI: peak power is dB relative to full scale; offset by gain to
     # a rough dBm. Not calibrated -- good for relative comparison, flagged as such.
     rssi_dbm = peak_db - gain_db
 
-    # Bounded score: signal strength + bandwidth interest + cadence bonus. This is
-    # "how strong/interesting is this RF", not "is it a drone".
+    # Bounded score: signal strength + bandwidth interest. The old +0.15
+    # "cadence_bonus" for a 300-1000 ms whole-band autocorrelation peak is
+    # removed (docs/design/stage1-link-signatures.md S4: that estimator fires
+    # on ambient Wi-Fi/BLE noise, not just DroneID); cadence is now evidence
+    # (``stage1``/``cadence_ms``), not a score input.
     snr_c = float(np.clip((snr_db - snr_threshold_db) / 20.0, 0.0, 1.0))
     bw_c = float(np.clip(occupied_bw_mhz / occupied_bw_ref_mhz, 0.0, 1.0))
-    cadence_bonus = 0.15 if (cadence_ms is not None and 300.0 <= cadence_ms <= 1000.0) else 0.0
-    score = float(np.clip(0.5 * snr_c + 0.5 * bw_c + cadence_bonus, 0.0, 1.0))
+    score = float(np.clip(0.5 * snr_c + 0.5 * bw_c, 0.0, 1.0))
 
     morphology = _morphology(snr_db=snr_db, occupied_bw_mhz=occupied_bw_mhz,
                              n_occupied=n_occupied, burst_count=burst_count,
                              duty_cycle=duty_cycle, flat_top=flat_top,
-                             hop_spread_mhz=hop_spread)
+                             t2_labels=raster_result.labels)
 
     return Detection(
         score=score,
@@ -249,4 +320,6 @@ def detect(spec: Spectrogram, center_freq_mhz: float,
         signature_class="noise" if morphology == "noise" else "unknown",
         morphology=morphology,
         duty_cycle=duty_cycle,
+        stage1=stage1,
+        events=events,
     )
