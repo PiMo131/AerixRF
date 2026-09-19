@@ -548,7 +548,7 @@ remedy is multi-dwell accumulation on a less occupied centre.
 | label | main | branch (before fix) | branch (after fix) |
 |---|---|---|---|
 | `hopping_candidate` | 11 (0.95 %) | 199 (17.2 %) | **16 (1.38 %)** |
-| `fixed_channel_burst_candidate` | 205 | 0 | 164 |
+| `fixed_channel_burst_candidate` | 205 | 0 | 166 |
 | level-2 labels (`fhss_*`, `rc_link_family`, `droneid_cadence`) | 0 | 0 | **0** |
 
 Budget verdict PASS on every line. Branch tests green (59 passed:
@@ -577,9 +577,9 @@ The multi-look path costs +151 ms, i.e. ~1.9x the detector, ~0.38 s of CPU per
 second of capture including the spectrogram. Single-threaded real-time still
 holds with margin on both paths, but the `iq=` path should stay opt-in per
 receiver profile. Note the FA residual is concentrated in the NON-`iq=`
-(single-look) sessions: 14 of the 16 remaining ambient `hopping_candidate`
-windows come from sessions captured without `iq=`, and both large `iq=` sessions
-(899 windows) contribute 2. More looks buy fewer false hop sets.
+(single-look) sessions: 15 of the 16 remaining ambient `hopping_candidate`
+windows come from the 261 windows captured without `iq=` (5.7 % of them), while
+the two large `iq=` sessions (899 windows) contribute 1 (0.1 %). More looks buy fewer false hop sets.
 
 ### Remaining gap and open items
 
