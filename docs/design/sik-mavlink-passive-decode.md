@@ -42,9 +42,7 @@ the **spacing is not**. Caveat (INFERRED): the hop-step register is written in *
 (`scale_uint32(spacing, 10000)`, 8-bit, ≤2.55 MHz), so realised spacing is quantised to a multiple of 10 kHz —
 exact at 915 (25), quantised at 433/868/470. Channel *k* centre = base + k·spacing, k = 0…N−1.
 
-**Hop schedule.** `fhop_init()` fills `channel_map[i]=i` then Fisher-Yates-shuffles it with an LCG
-(`r_next = r_next*1103515245 + 12345`, output `(r_next/65536) % (RAND_MAX+1)`) seeded by **`r_srand(NETID)`**
-(default NETID **25**). The transmit channel advances **+1 (mod N) at every TDM window change**, so the observed
+**Hop schedule.** `fhop_init()` fills `channel_map[i]=i` then applies a *naive* shuffle (ascending `i=0..n-2`, `j=((uint8_t)r_rand()) % n`, i.e. an 8-bit draw `(r_next>>16)&0xFF` modulo the whole array — NOT Fisher-Yates) with the LCG `r_next = r_next*1103515245 + 12345 (mod 2^32)` seeded by **`r_srand(seed)`**, seed = NETID on unencrypted links and `crc16(key)` when AES is enabled (so a recovered seed is only a NETID on unencrypted links). `raster.py::hop_map()` is a line-by-line transcription of `Firmware/radio/freq_hopping.c` (see `research/briefs/sik-freq-hopping-firmware.md`; test vector `hop_map(25,10)==[0,9,5,2,6,7,4,3,8,1]`). Channel 0 additionally sits at a seed-dependent offset within one spacing when N>5 (`main.c:417-428`) — raster *phase* is seed-dependent; not yet modelled (TODO, brief §6). (default NETID **25**). The transmit channel advances **+1 (mod N) at every TDM window change**, so the observed
 physical sequence is a fixed cyclic permutation of period N. **PRIMARY.** If AES is compiled in *and* enabled the
 seed becomes `crc16(32, key)` instead — the hop order is then not derivable from NETID.
 

@@ -159,6 +159,65 @@ def test_estimate_sik_raster_insufficient_on_too_few_bursts():
     assert not ev.consistent
 
 
+def test_hop_map_matches_firmware_transcription_vectors():
+    """Reference vectors from research/briefs/sik-freq-hopping-firmware.md
+    §1.5 (default NETID 25, N=10) and a hand-executed second vector
+    (seed=1, N=5) using the same LCG/shuffle by hand:
+
+    state = 1 (r_srand(1)); LCG state' = state*1103515245+12345 mod 2**32;
+    draw = (state' >> 16) & 0xFF; j = draw % 5.
+
+      i=0: state=1*1103515245+12345=1103527590 -> draw=(1103527590>>16)&0xFF=198
+           -> j=198%5=3 -> swap m[0],m[3]: [0,1,2,3,4] -> [3,1,2,0,4]
+      i=1: state=1103527590*1103515245+12345 mod 2**32=2524885223
+           -> draw=(2524885223>>16)&0xFF=126 -> j=126%5=1 -> swap m[1],m[1]
+           (self-swap, no-op): [3,1,2,0,4]
+      i=2: state=2524885223*1103515245+12345 mod 2**32=662824084
+           -> draw=(662824084>>16)&0xFF=129 -> j=129%5=4 -> swap m[2],m[4]:
+           [3,1,4,0,2]
+      i=3: state=662824084*1103515245+12345 mod 2**32=3295386429
+           -> draw=(3295386429>>16)&0xFF=107 -> j=107%5=2 -> swap m[3],m[2]:
+           [3,1,0,4,2]
+
+    final channel_map = [3, 1, 0, 4, 2].
+    """
+    assert hop_map(25, 10) == [0, 9, 5, 2, 6, 7, 4, 3, 8, 1]
+    assert hop_map(1, 5) == [3, 1, 0, 4, 2]
+
+
+def test_hop_maps_all_seeds_matches_hop_map_full_sweep():
+    """Vectorised :func:`aerix_rf.decode.sik.raster._hop_maps_all_seeds` must
+    agree with the scalar :func:`hop_map` for every seed. Full 0..65535
+    sweep at N=50 (the 915 MHz board's channel count) runs in well under a
+    second, so no sampling is needed."""
+    from aerix_rf.decode.sik.raster import _hop_maps_all_seeds
+
+    n = 50
+    maps = _hop_maps_all_seeds(n)
+    assert maps.shape == (65536, n)
+    for seed in range(65536):
+        assert hop_map(seed, n) == list(maps[seed]), f"mismatch at seed={seed}"
+
+
+def test_hop_maps_all_seeds_no_full_permutation_collisions_at_n50():
+    """Collision measurement (task requirement): at N=50 (the 915 board),
+    all 65536 seeds of the corrected naive-shuffle algorithm produce
+    DISTINCT full permutations -- 0 collisions, measured directly (not
+    assumed). This is a property of this specific (algorithm, N) pair, not
+    a general guarantee; smaller N (e.g. the 433/868 boards' N=10) were not
+    swept here."""
+    from aerix_rf.decode.sik.raster import _hop_maps_all_seeds
+
+    maps = _hop_maps_all_seeds(50)
+    _uniq, counts = np.unique(maps, axis=0, return_counts=True)
+    n_distinct = _uniq.shape[0]
+    assert n_distinct == 65536, (
+        f"{65536 - n_distinct} seed(s) collide with another seed's full hop "
+        f"map at N=50"
+    )
+    assert counts.max() == 1
+
+
 def test_netid_candidates_from_sequence_recovers_unique_netid():
     chans = hop_map(NETID, N_CHANNELS)
     observed = [chans[w % N_CHANNELS] for w in range(N_WINDOWS)]

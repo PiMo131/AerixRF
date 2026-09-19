@@ -29,6 +29,7 @@ result -- it never assumes the default edges are in force (S2 caveat).
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
 from functools import lru_cache
 from typing import Dict, List, Optional, Sequence, Tuple
@@ -58,8 +59,15 @@ HOP_STEP_QUANT_HZ = 10e3         # scale_uint32(spacing, 10000) register unit --
                                  # radio_443x.c:614-626 writes spacing/10 kHz to the 8-bit
                                  # FREQUENCY_HOPPING_STEP_SIZE register (hence the 2.55 MHz guard).
                                  # Firmware floors (fmax-fmin)/(N+2) to integer Hz FIRST, then rounds
-                                 # half-UP; _nominal_spacing_hz() below uses float + banker's round(),
-                                 # which differs on exact .5-register ties. See the brief.
+                                 # half-UP; _nominal_spacing_hz() below now matches this exactly (fixed
+                                 # 2026-09-19, see the brief) rather than float + banker's round().
+
+# TODO(sik-freq-hopping-firmware.md §3, §6.4): the NETID-dependent channel-0
+# base-frequency offset ("netid_offset" below, main.c:420-428) is NOT
+# implemented -- the exact value is unresolved (SDCC 16-bit `int` overflow
+# in `r_rand()*625`, see the brief). Do not add a phase predictor from
+# offset_hz until that is settled on a real build; the raster SPACING
+# estimate is unaffected.
 
 # Free-spacing search range: below the narrowest board's floor (N=50 on the
 # 433 band would be an absurdly dense hop set, but keep headroom) and above
@@ -89,11 +97,14 @@ def _band_limits(band: str) -> Tuple[float, float, int]:
 
 def _nominal_spacing_hz(freq_min_hz: float, freq_max_hz: float, n_channels: int) -> float:
     """``(freq_max-freq_min)/(N+2)``, rounded to the 10 kHz hop-step register
-    unit. PRIMARY (firmware main.c:417, radio_443x.c:624). Caveat: the
-    firmware floors the division to integer Hz and then rounds half-up; this
-    uses float division + banker's ``round()``."""
-    raw = (freq_max_hz - freq_min_hz) / (n_channels + 2)
-    return round(raw / HOP_STEP_QUANT_HZ) * HOP_STEP_QUANT_HZ
+    unit. PRIMARY (firmware main.c:417, radio_443x.c:624): the firmware
+    floors the division to integer Hz FIRST (``channel_spacing`` is a C
+    ``unsigned long``), then rounds the quotient by 10 kHz half-**up**
+    (``scale_uint32(v, s) = (v + s/2)/s``, integer division, radio_443x.c:
+    1097-1100) -- not Python's float division + banker's ``round()``."""
+    raw_hz = math.floor((freq_max_hz - freq_min_hz) / (n_channels + 2))
+    steps = (raw_hz + HOP_STEP_QUANT_HZ / 2.0) // HOP_STEP_QUANT_HZ
+    return steps * HOP_STEP_QUANT_HZ
 
 
 def legal_raster_pairs(band: str) -> List[Tuple[float, int]]:
@@ -275,87 +286,103 @@ _LCG_C = 12345
 _LCG_MASK = 0xFFFFFFFF
 
 
-def hop_map(netid: int, n_channels: int) -> List[int]:
-    """SiK's ``fhop_init()`` hop map: ``channel_map[i] = i`` then a
-    Durstenfeld Fisher-Yates shuffle driven by the LCG
-    ``r_next = r_next*1103515245 + 12345`` (32-bit wraparound), draw
-    ``(r_next >> 16) & 0x7FFF`` per step, seeded ``r_next = netid``
-    (``r_srand(netid)``). Used both to generate synthetic test hop sequences
-    and by :func:`netid_candidates_from_sequence`'s brute force.
+def hop_map(seed: int, n_channels: int) -> List[int]:
+    """SiK's ``fhop_init()`` hop map: ``channel_map[i] = i`` then the
+    firmware's *naive* benpfaff shuffle (``Firmware/radio/freq_hopping.c:
+    49-58``, **not** Durstenfeld Fisher-Yates) driven by the LCG
+    ``r_next = r_next*1103515245 + 12345`` (32-bit wraparound), ascending
+    ``i = 0 .. n-2``, draw ``j = ((uint8_t)r_rand()) % n`` (8-bit-truncated,
+    modulo the *whole* array, not ``i+1``) per step, seeded ``r_next = seed``
+    (``r_srand(seed)``, masked to 16 bits -- ``r_srand`` takes ``unsigned
+    int`` on the 8051/SDCC target).
 
-    .. warning::
-       **PROVENANCE: WRONG (task-spec formula, contradicted by the firmware).**
-       Verified 2026-09-19 against the upstream ``ArduPilot/SiK`` master C
-       source -- see ``research/briefs/sik-freq-hopping-firmware.md``.
-       ``Firmware/radio/freq_hopping.c:84-93`` uses the *naive* benpfaff
-       shuffle, not Durstenfeld Fisher-Yates:
+    ``seed`` is the value fed to ``r_srand()`` by ``shuffleRand()``
+    (``freq_hopping.c:70-78``): on a plaintext (``ENCRYPTION`` disabled)
+    link this is the NETID, but on an encrypted link it is
+    ``crc16(32, encryption_key)`` instead -- the hop map then carries **no**
+    NETID information, so brute-forcing NETID 0..65535 against an observed
+    hop sequence (:func:`netid_candidates_from_sequence`) is only meaningful
+    on plaintext links. See ``research/briefs/sik-freq-hopping-firmware.md``
+    §1.3.
 
-       * loop is ASCENDING ``i = 0 .. n-2`` (here: descending ``n-1 .. 1``);
-       * ``j = ((uint8_t)r_rand()) % n`` -- modulo ``n``, the whole array
-         (here: ``% (i+1)``);
-       * the draw is TRUNCATED TO 8 BITS by the ``(uint8_t)`` cast, i.e.
-         ``(r_next >> 16) & 0xFF`` (here: 15-bit ``& 0x7FFF``);
-       * the seed is NETID only on unencrypted links -- with ``ENCRYPTION``
-         set, ``shuffleRand()`` (``freq_hopping.c:95-104``) seeds with
-         ``crc16(32, encryption_key)`` instead, so NETID brute force is
-         invalid there by construction.
+    Used both to generate synthetic test hop sequences and by
+    :func:`netid_candidates_from_sequence`'s brute force.
 
-       The LCG constants below ARE correct. The resulting permutations agree
-       with the firmware only at chance level (1-3 of N positions for NETID
-       25/1/4242 at N=10/50), so any NETID reported today is meaningless and
-       every synthetic hop fixture built from this function is not SiK-like.
-       Fixing this (and the vectorised twin below) is a builder task; the
-       brief carries a drop-in Python transcription and a reference vector
-       (``hop_map(25, 10) == [0, 9, 5, 2, 6, 7, 4, 3, 8, 1]``). Do not treat
-       this function as decode evidence until then."""
-    state = int(netid) & _LCG_MASK
+    **PROVENANCE: PRIMARY (firmware transcription).** Verified 2026-09-19
+    against the upstream ``ArduPilot/SiK`` master C source; this replaces an
+    earlier task-spec Durstenfeld Fisher-Yates formula that agreed with the
+    firmware only at chance level. Reference vector (from the brief, C-to-
+    Python transcription level -- not yet checked against a running radio):
+    ``hop_map(25, 10) == [0, 9, 5, 2, 6, 7, 4, 3, 8, 1]``."""
+    state = int(seed) & 0xFFFF          # r_srand() takes unsigned int (16-bit)
     m = list(range(n_channels))
-    for i in range(n_channels - 1, 0, -1):
+    for i in range(n_channels - 1):     # ascending, n-1 draws
         state = (state * _LCG_A + _LCG_C) & _LCG_MASK
-        draw = (state >> 16) & 0x7FFF
-        j = draw % (i + 1)
+        draw = (state >> 16) & 0xFF     # (uint8_t)r_rand()
+        j = draw % n_channels           # modulo n, NOT i+1
         m[i], m[j] = m[j], m[i]
     return m
 
 
 @lru_cache(maxsize=8)
-def _hop_maps_all_netids(n_channels: int) -> np.ndarray:
-    """Vectorised :func:`hop_map` for all 65536 NETIDs at once: shape
-    ``[65536, n_channels]``. **Inherits :func:`hop_map`'s WRONG provenance**
-    (task-spec Fisher-Yates, contradicted by ``Firmware/radio/freq_hopping.c``
-    -- see the warning on :func:`hop_map` and
-    ``research/briefs/sik-freq-hopping-firmware.md``); must be re-derived with
-    the firmware's ascending ``j = draw % n`` / 8-bit-draw shuffle. The Fisher-Yates recursion is inherently
-    sequential in ``i``, but independent *across* NETIDs, so each of the
-    (at most 49) steps is one O(65536) numpy update rather than a Python
-    loop -- this is what makes the brute force "cheap" (module docstring)."""
-    n_netids = 1 << 16
-    state = np.arange(n_netids, dtype=np.uint64)
-    maps = np.tile(np.arange(n_channels, dtype=np.int64), (n_netids, 1))
-    rows = np.arange(n_netids)
-    for i in range(n_channels - 1, 0, -1):
+def _hop_maps_all_seeds(n_channels: int) -> np.ndarray:
+    """Vectorised :func:`hop_map` for all 65536 seeds (0..65535) at once:
+    shape ``[65536, n_channels]``, row index == seed. **PRIMARY (firmware
+    transcription)** -- same naive benpfaff shuffle as :func:`hop_map`:
+    ascending ``i = 0 .. n-2``, ``j = ((uint8_t)r_rand()) % n_channels``. The
+    shuffle is inherently sequential in ``i``, but independent *across*
+    seeds, so each of the (at most 49) steps is one O(65536) numpy update
+    rather than a Python loop -- this is what makes the brute force "cheap"
+    (module docstring).
+
+    ``i == j`` (probability ``1/n_channels`` per step, common since ``j``
+    now ranges over the whole array rather than ``0..i``) is handled
+    correctly: both ``vi``/``vj`` are read (as independent copies, via numpy
+    fancy indexing) before either is written back, so a self-swap is a
+    no-op, matching the firmware's plain C swap-with-itself."""
+    n_seeds = 1 << 16
+    state = np.arange(n_seeds, dtype=np.uint64)
+    maps = np.tile(np.arange(n_channels, dtype=np.int64), (n_seeds, 1))
+    rows = np.arange(n_seeds)
+    for i in range(n_channels - 1):     # ascending, n-1 draws
         state = (state * np.uint64(_LCG_A) + np.uint64(_LCG_C)) & np.uint64(_LCG_MASK)
-        draw = (state >> np.uint64(16)) & np.uint64(0x7FFF)
-        j = (draw.astype(np.int64) % (i + 1))
+        draw = (state >> np.uint64(16)) & np.uint64(0xFF)   # (uint8_t)r_rand()
+        j = draw.astype(np.int64) % n_channels               # modulo n, NOT i+1
         vi = maps[rows, i].copy()
-        vj = maps[rows, j]
+        vj = maps[rows, j].copy()
         maps[rows, i] = vj
         maps[rows, j] = vi
     return maps
 
 
 @dataclass
-class NetidCandidateResult:
-    """Brute-force NETID-vs-observed-hop-sequence consistency check (S2:
-    an auxiliary cross-check, NOT how NETID is normally recovered -- the
-    header carries it in clear once any frame's CRC validates)."""
+class SeedCandidateResult:
+    """Brute-force seed-vs-observed-hop-sequence consistency check (S2: an
+    auxiliary cross-check, NOT how NETID is normally recovered -- the header
+    carries it in clear once any frame's CRC validates).
+
+    ``candidates`` holds recovered ``r_srand()`` **seed** values (0..65535),
+    NOT NETID: the two coincide only on a plaintext (``ENCRYPTION``
+    disabled) link (``shuffleRand()``, ``freq_hopping.c:70-78``). On an
+    encrypted link the seed is ``crc16(32, encryption_key)`` instead, so a
+    hit here says nothing about NETID, and "no candidate reached the
+    threshold" is *not* evidence of a non-SiK link -- it may just be an
+    encrypted one. See ``research/briefs/sik-freq-hopping-firmware.md``
+    §1.3.
+    """
 
     n_channels: int
     n_observed: int
     threshold_k: int
     best_match_count: int
-    candidates: List[int]     # NETIDs reaching >= threshold_k consecutive-hop matches
-    unique: bool               # True iff exactly one candidate reached threshold_k
+    candidates: List[int]      # seeds reaching >= threshold_k consecutive-hop matches
+    unique: bool                # True iff exactly one candidate reached threshold_k
+
+
+# Pre-rename alias, kept for API stability. NOTE: even before this rename the
+# values in `.candidates` were r_srand() seeds, which equal NETID only on
+# plaintext (non-`ENCRYPTION`) links -- see `SeedCandidateResult`'s docstring.
+NetidCandidateResult = SeedCandidateResult
 
 
 def netid_candidates_from_sequence(
@@ -363,35 +390,38 @@ def netid_candidates_from_sequence(
     n_channels: int,
     *,
     k: Optional[int] = None,
-) -> NetidCandidateResult:
-    """Brute-force NETID 0-65535 against an observed sequence of physical
-    channel indices (0..``n_channels``-1, ``TX advances +1 (mod N) every TDM
-    window`` -- S1), assumed to be one entry per *consecutive* TDM window
-    (gaps are not modelled here). For each candidate NETID, the hop map's
-    inverse gives each observed channel's position in the cyclic schedule;
-    a genuine match has ``position - window_index`` constant (mod N) for
-    (close to) every observed hop. Returns every NETID whose best constant-
-    offset run reaches ``k`` (default: all but 2 of the observed hops, floor
-    5) matches.
+) -> SeedCandidateResult:
+    """Brute-force ``r_srand()`` seed 0-65535 against an observed sequence of
+    physical channel indices (0..``n_channels``-1, ``TX advances +1 (mod N)
+    every TDM window`` -- S1), assumed to be one entry per *consecutive* TDM
+    window (gaps are not modelled here). For each candidate seed, the hop
+    map's inverse gives each observed channel's position in the cyclic
+    schedule; a genuine match has ``position - window_index`` constant
+    (mod N) for (close to) every observed hop. Returns every seed whose best
+    constant-offset run reaches ``k`` (default: all but 2 of the observed
+    hops, floor 5) matches.
+
+    The recovered seed equals NETID only on a plaintext link -- see
+    :class:`SeedCandidateResult`.
     """
     obs = np.asarray(list(observed_channel_indices), dtype=np.int64)
     n_obs = len(obs)
     if k is None:
         k = max(5, n_obs - 2)
     if n_obs == 0 or n_channels < 2:
-        return NetidCandidateResult(n_channels, n_obs, k, 0, [], False)
+        return SeedCandidateResult(n_channels, n_obs, k, 0, [], False)
 
-    maps = _hop_maps_all_netids(n_channels)  # [65536, n_channels]
-    n_netids = maps.shape[0]
+    maps = _hop_maps_all_seeds(n_channels)  # [65536, n_channels], row == seed
+    n_seeds = maps.shape[0]
     inv = np.empty_like(maps)
-    rows = np.arange(n_netids)[:, None]
+    rows = np.arange(n_seeds)[:, None]
     inv[rows, maps] = np.arange(n_channels)[None, :]
 
     pos = inv[:, obs]                                    # [65536, n_obs]
     window_idx = np.arange(n_obs, dtype=np.int64)[None, :]
     diffs = (pos - window_idx) % n_channels              # [65536, n_obs]
 
-    best = np.zeros(n_netids, dtype=np.int64)
+    best = np.zeros(n_seeds, dtype=np.int64)
     for r in range(n_channels):
         cnt = np.count_nonzero(diffs == r, axis=1)
         np.maximum(best, cnt, out=best)
@@ -399,8 +429,8 @@ def netid_candidates_from_sequence(
     hit = np.nonzero(best >= k)[0]
     order = hit[np.argsort(-best[hit])]
     candidates = [int(x) for x in order]
-    best_match_count = int(best.max()) if n_netids else 0
-    return NetidCandidateResult(
+    best_match_count = int(best.max()) if n_seeds else 0
+    return SeedCandidateResult(
         n_channels=n_channels, n_observed=n_obs, threshold_k=k,
         best_match_count=best_match_count, candidates=candidates,
         unique=(len(candidates) == 1),
