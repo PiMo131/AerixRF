@@ -41,6 +41,13 @@ and independent review before it is "done". Evidence-wording rules apply.
 - [ ] Owed evidence: replay the 2026-09-04 HackRF golden session natively (20 MS/s) and resampled to
       canonical 15.36 — must yield identical CRC-valid frames. **Session is not on this machine.**
 
+## Non-DJI (approved 2026-09-19)
+- [ ] SiK/MAVLink passive telemetry decoder (GFSK demod + SiK framing + MAVLink parse) — design brief first; zero public IQ,
+      needs a recorded capture (no transmit by us).
+- [ ] Analog 5.8 GHz FPV carrier-grid detector on sweeps (F/Raceband grids); video content demod approved for research.
+- [ ] Wi-Fi drones: RF-level detection only in AERIX RF; frame parsing → ESP32 system.
+- [ ] ExpressLRS raster/period validation on real IQ (RFUAV RC set or field recording).
+
 ## Classifier / datasets
 - [ ] DroneRFb-DIR downloaded+verified (63 GB, sha256 in manifest) but is a SPLIT zip set (`twin_droneRF.zip` + `.z01–.z31`):
       recombine with `zip -s 0 … --out combined.zip` (~63 GB extra), inspect the inner layout, then write the adapter
