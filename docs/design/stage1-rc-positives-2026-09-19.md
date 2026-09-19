@@ -400,3 +400,15 @@ real RC transmitters (3 models in the 10 MHz dwell, 6 in full band) — but FA f
 with level-1 coverage (30 → 25 models) and 4 % control FA, matching the reviewer's sensitivity measurement
 (all true bursts ≤ 13 dB flagged noise-limited). FA fix 2 (occupancy-span discriminant, fail-open) is in progress on
 the branch; merge criteria: ambient hopping ≤ ~1.5 %, control ≤ 1 %, level-1 coverage ≥ 30/31, level-2 hits retained.
+
+### C4 FA fix 2 (branch b2bbc1f, occupancy-span fragment rule, fail-open) — 2026-09-19 evening
+
+- Sensitivity restored: reviewer scripts now show `frac_unresolved_fragment = 0.00` at every SNR 6–20 dB (fix 1:
+  1.00 at ≤ 10.5 dB). `bw_noise_limited` is still flagged for bursts ≤ 13 dB, but it no longer removes them from
+  hop-set membership; their centre comes from the above-hold centroid instead of the −6 dB midpoint.
+- Ambient FA: hopping **39/1160 = 3.36 %** (main 0.95 %; fix 1 1.38 %; design S9 cap 5 %), spread over all six
+  sessions (0/20, 5/122, 3/60, 5/59, 16/300, 9/599); level-2 0; `wifi_beacon_like` 1.
+- Pending before a merge decision: RC-positives bench on fix 2 (coverage ≥ 30/31? level-2 hits retained? control
+  ≤ 1/100?), CPU cap for the multi-look STFT, the FA rerun after that cap. The FA-vs-sensitivity trade
+  (0.95 % blind-to-level-2 vs ~3.4 % with level-2 unlocked) is an architecture decision, to be taken with the
+  numbers on the table — not by tuning the budget.
