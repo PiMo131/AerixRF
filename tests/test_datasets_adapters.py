@@ -21,9 +21,11 @@ import pytest
 from aerix_rf.datasets.adapters import (
     AerixSessionAdapter,
     RecordingMeta,
+    RfuavAdapter,
     RubDroneSecurityAdapter,
     ZenodoDroneRF2020Adapter,
     _ZENODO_BAND_CENTER_HZ,
+    parse_rfuav_pack_xml,
     parse_zenodo_stem,
     source_file_field,
     source_sha256,
@@ -776,6 +778,284 @@ def test_aerix_session_adapter_prefers_annotations_json(tmp_path):
 # ---------------------------------------------------------------------------
 
 _AERIX_REAL_DIR = DATASET_ROOT / "aerix_antsdr_ambient_2026_09_18" / "original"
+
+
+
+# ---------------------------------------------------------------------------
+# RfuavAdapter (Workstream D, T6) -- pack<K>.xml (SignalHound-style
+# metadata) + pack<K>_<a>-<b>s.iq (raw complex64, no header) synthetic
+# archive layout, no .rar/unrar dependency. Format verified empirically
+# against the real DJI_MINI4_PRO.rar extraction -- see
+# ~/rf-datasets/rfuav/original/FORMAT.md.
+# ---------------------------------------------------------------------------
+
+_RFUAV_XML_TEMPLATE = """<?xml version="1.0" encoding="UTF-8"?>
+<SignalHoundIQFile Version="1.0">
+    <DeviceType>USRPX310</DeviceType>
+    <Drone>{drone}</Drone>
+    <SerialNumber>{serial}</SerialNumber>
+    <DataType>{data_type}</DataType>
+    <ReferenceSNRLevel>29</ReferenceSNRLevel>
+    <CenterFrequency>2450000000.000</CenterFrequency>
+    <SampleRate>{sample_rate}</SampleRate>
+    <IFBandwidth>{sample_rate}</IFBandwidth>
+    <ScaleFactor>60</ScaleFactor>
+    <IQFileName>{pack}.iq</IQFileName>
+    <SampleCount>{sample_count}</SampleCount>
+</SignalHoundIQFile>
+"""
+
+
+def _write_rfuav_iq_slice(path: Path, n_samples: int, start_value: float = 0.0) -> np.ndarray:
+    """Writes ``n_samples`` complex64 values (interleaved float32 I/Q) as a
+    header-less raw file, the same layout FORMAT.md documents for a real
+    ``pack<K>_<a>-<b>s.iq``. Returns the complex64 array written, for the
+    caller to assert ``load_iq`` round-trips it exactly."""
+
+    iq = (np.arange(n_samples, dtype=np.float32) + start_value) + 1j * (
+        np.arange(n_samples, dtype=np.float32) * 0.5 + start_value
+    )
+    iq = iq.astype(np.complex64)
+    iq.view(np.float32).tofile(path)
+    return iq
+
+
+def _build_rfuav_mirror(
+    root: Path, drone: str = "DJI TESTMODEL", n_samples: int = 4, sample_rate_hz: float = 1000.0
+) -> Path:
+    """Builds ``root/rfuav/original/extracted/<drone>/VTSBW=10/pack1.xml`` +
+    two 1-second-numbered ``.iq`` slices, plus an incomplete
+    ``VTSBW=20/pack2.xml``(+``.aria2``) pack that ``iter_recordings`` must
+    refuse (same S1 incomplete-download rule the Zenodo adapter already
+    applies)."""
+
+    base = root / "rfuav" / "original" / "extracted" / drone
+    pack1_dir = base / "VTSBW=10"
+    pack1_dir.mkdir(parents=True)
+    (pack1_dir / "pack1.xml").write_text(
+        _RFUAV_XML_TEMPLATE.format(
+            drone=drone, serial="00099", data_type="Complex Float", pack="pack1",
+            sample_count=n_samples, sample_rate=sample_rate_hz,
+        ),
+        encoding="utf-8",
+    )
+    _write_rfuav_iq_slice(pack1_dir / "pack1_0-1s.iq", n_samples, start_value=0.0)
+    _write_rfuav_iq_slice(pack1_dir / "pack1_1-2s.iq", n_samples, start_value=100.0)
+
+    pack2_dir = base / "VTSBW=20"
+    pack2_dir.mkdir(parents=True)
+    (pack2_dir / "pack2.xml").write_text(
+        _RFUAV_XML_TEMPLATE.format(
+            drone=drone, serial="00100", data_type="Complex Float", pack="pack2",
+            sample_count=n_samples, sample_rate=sample_rate_hz,
+        ),
+        encoding="utf-8",
+    )
+    (pack2_dir / "pack2.xml.aria2").write_text("", encoding="utf-8")  # incomplete download
+    _write_rfuav_iq_slice(pack2_dir / "pack2_0-1s.iq", n_samples)
+    return base
+
+
+def test_rfuav_parse_pack_xml(tmp_path):
+    xml_path = tmp_path / "pack1.xml"
+    xml_path.write_text(
+        _RFUAV_XML_TEMPLATE.format(
+            drone="DJI MINI4 PRO", serial="00014", data_type="Complex Float",
+            pack="pack1", sample_count=100_000_000, sample_rate=1000.0,
+        ),
+        encoding="utf-8",
+    )
+    meta = parse_rfuav_pack_xml(xml_path)
+    assert meta.drone == "DJI MINI4 PRO"
+    assert meta.sample_rate_hz == pytest.approx(1000.0)
+    assert meta.center_freq_hz == pytest.approx(2.45e9)
+    assert meta.if_bandwidth_hz == pytest.approx(1000.0)
+    assert meta.sample_count == 100_000_000
+    assert meta.scale_factor == pytest.approx(60.0)
+    assert meta.reference_snr_level == pytest.approx(29.0)
+    assert meta.serial_number == "00014"
+    assert meta.note is None  # "Complex Float" is the verified/expected DataType
+
+
+def test_rfuav_parse_pack_xml_unexpected_datatype_flagged(tmp_path):
+    xml_path = tmp_path / "pack_weird.xml"
+    xml_path.write_text(
+        _RFUAV_XML_TEMPLATE.format(
+            drone="DJI MINI4 PRO", serial="00014", data_type="Complex Int16",
+            pack="pack1", sample_count=10, sample_rate=1000.0,
+        ),
+        encoding="utf-8",
+    )
+    meta = parse_rfuav_pack_xml(xml_path)
+    assert meta.note is not None
+    assert "Complex Int16" in meta.note
+
+
+def test_rfuav_iter_recordings_synthetic(tmp_path):
+    _build_rfuav_mirror(tmp_path)
+    adapter = RfuavAdapter()
+    recs = {r.recording_id: r for r in adapter.iter_recordings(tmp_path)}
+
+    # pack2 (VTSBW=20) is incomplete (pack2.xml.aria2 sibling) and must be
+    # refused entirely -- only pack1's two slices are enumerated.
+    assert set(recs) == {
+        "dji_testmodel/VTSBW=10/pack1_0-1s",
+        "dji_testmodel/VTSBW=10/pack1_1-2s",
+    }
+    r0 = recs["dji_testmodel/VTSBW=10/pack1_0-1s"]
+    r1 = recs["dji_testmodel/VTSBW=10/pack1_1-2s"]
+    assert r0.device_id == "dji_testmodel"
+    # Both slices of one pack share a run_id: one continuous capture must
+    # never be split across train/val/test.
+    assert r0.run_id == r1.run_id == "dji_testmodel/VTSBW=10/pack1"
+    assert r0.original_rate_hz == pytest.approx(1000.0)
+    assert r0.original_center_freq_hz == pytest.approx(2.45e9)
+    assert r0.channel_id == "VTSBW=10"
+
+
+def test_rfuav_load_iq_round_trips_and_checks_sample_count(tmp_path):
+    _build_rfuav_mirror(tmp_path, n_samples=4)
+    adapter = RfuavAdapter()
+    recs = {r.recording_id: r for r in adapter.iter_recordings(tmp_path)}
+    rec = recs["dji_testmodel/VTSBW=10/pack1_0-1s"]
+    iq, rate_hz, centre_hz, bw_hz = adapter.load_iq(rec)
+    assert iq.dtype == np.complex64
+    assert iq.size == 4
+    expected = np.array([0, 1, 2, 3], dtype=np.float32) + 1j * (
+        np.array([0, 1, 2, 3], dtype=np.float32) * 0.5
+    )
+    np.testing.assert_allclose(iq, expected.astype(np.complex64))
+    assert rate_hz == pytest.approx(1000.0)
+    assert centre_hz == pytest.approx(2.45e9)
+    assert bw_hz == pytest.approx(1000.0)
+
+    # Corrupt sample_count so load_iq's own byte-count check must fire
+    # rather than silently returning a truncated/misaligned array.
+    import dataclasses
+    bad_rec = dataclasses.replace(rec, extra={**rec.extra, "sample_count": 999})
+    with pytest.raises(ValueError):
+        adapter.load_iq(bad_rec)
+
+
+@pytest.mark.parametrize(
+    "folder_name,expected_model,expected_link_family",
+    [
+        ("DJI AVATA2", "avata_2", LinkFamily.OCUSYNC),
+        ("DJI FPV COMBO", "fpv_combo", LinkFamily.OCUSYNC),
+        ("DJI MAVIC3 PRO", "mavic_3_pro", LinkFamily.OCUSYNC),
+        ("DJI MINI4 PRO", "mini_4_pro", LinkFamily.OCUSYNC),
+    ],
+)
+def test_rfuav_labels_dji_mapping(folder_name, expected_model, expected_link_family):
+    adapter = RfuavAdapter()
+    rec = RecordingMeta(
+        dataset_id="rfuav",
+        recording_id="x",
+        device_id="x",
+        run_id="x",
+        source_paths=(Path("/dev/null"),),
+        original_rate_hz=1000.0,
+        original_center_freq_hz=2.45e9,
+        original_bw_hz=1000.0,
+        original_dtype="float32_interleaved",
+        extra={"folder_name": folder_name, "serial_number": "00001"},
+    )
+    labels = adapter.labels(rec)
+    assert labels.scene.emitter_class == EmitterClass.DRONE_LINK
+    assert labels.scene.manufacturer == "DJI"
+    assert labels.scene.model == expected_model
+    assert labels.scene.link_family == expected_link_family
+    assert labels.scene.evidence_level == EvidenceLevel.OPERATOR_TRUTH
+    assert labels.scene.label_source == LabelSource.DATASET_METADATA
+
+
+def test_rfuav_labels_mini3_ambiguous_link_family_unknown():
+    """'DJI MINI3' cannot be disambiguated between Mini 3 (non-Pro, DJI O2)
+    and Mini 3 Pro (O3) from the archive name alone -- link_family must stay
+    unknown rather than guessing either OcuSync generation."""
+
+    adapter = RfuavAdapter()
+    rec = RecordingMeta(
+        dataset_id="rfuav",
+        recording_id="x",
+        device_id="x",
+        run_id="x",
+        source_paths=(Path("/dev/null"),),
+        original_rate_hz=1000.0,
+        original_center_freq_hz=2.45e9,
+        original_bw_hz=1000.0,
+        original_dtype="float32_interleaved",
+        extra={"folder_name": "DJI MINI3", "serial_number": "00002"},
+    )
+    labels = adapter.labels(rec)
+    assert labels.scene.emitter_class == EmitterClass.DRONE_LINK
+    assert labels.scene.model == "mini_3"
+    assert labels.scene.link_family == LinkFamily.UNKNOWN
+
+
+def test_rfuav_labels_unmapped_folder_stays_unknown():
+    """A folder not in `_RFUAV_DJI_LABELS` (e.g. one of the 32 non-DJI
+    RC-transmitter archives, not yet verified) must never be defaulted to
+    drone_link."""
+
+    adapter = RfuavAdapter()
+    rec = RecordingMeta(
+        dataset_id="rfuav",
+        recording_id="x",
+        device_id="x",
+        run_id="x",
+        source_paths=(Path("/dev/null"),),
+        original_rate_hz=1000.0,
+        original_center_freq_hz=2.45e9,
+        original_bw_hz=1000.0,
+        original_dtype="float32_interleaved",
+        extra={"folder_name": "FLYSKY EL18", "serial_number": "unknown"},
+    )
+    labels = adapter.labels(rec)
+    assert labels.scene.emitter_class == EmitterClass.UNKNOWN
+    assert labels.scene.evidence_level == EvidenceLevel.RF_CANDIDATE
+
+
+def test_rfuav_prepare_dataset_synthetic(tmp_path):
+    # sample_rate_hz=200_000.0 makes each 200_000-sample slice exactly 1.0 s
+    # (one canonical window per recording); the default 1000.0 Hz used by
+    # other synthetic tests would make this a 200 s recording (200 windows).
+    _build_rfuav_mirror(tmp_path, n_samples=200_000, sample_rate_hz=200_000.0)
+    adapter = RfuavAdapter()
+    stats = prepare_dataset(
+        "rfuav", adapter, root=tmp_path, limit=None, write_iq=False, write_tensor=True
+    )
+    assert stats.recordings == 2
+    assert stats.windows == 2
+
+
+# ---------------------------------------------------------------------------
+# Real-mirror smoke: ~/rf-datasets/rfuav/original/extracted (skip if
+# absent -- the DJI archives are large and extraction is a separate,
+# detached step, see FORMAT.md).
+# ---------------------------------------------------------------------------
+
+_RFUAV_REAL_DIR = DATASET_ROOT / "rfuav" / "original" / "extracted"
+
+
+@pytest.mark.skipif(not _RFUAV_REAL_DIR.is_dir(), reason="RFUAV extracted mirror not found under AERIX_RF_DATASET_ROOT")
+def test_rfuav_adapter_real_mirror():
+    from aerix_rf.datasets.adapters import ADAPTERS
+
+    adapter = ADAPTERS["rfuav"]
+    recs = list(adapter.iter_recordings(DATASET_ROOT))
+    assert len(recs) >= 1
+
+    rec = recs[0]
+    iq, rate_hz, centre_hz, bw_hz = adapter.load_iq(rec)
+    assert iq.dtype == np.complex64
+    assert rate_hz == pytest.approx(100e6)
+    assert centre_hz == pytest.approx(2.45e9)
+    assert np.all(np.isfinite(iq))
+    assert np.max(np.abs(iq)) > 0.0  # not a silent/all-zero capture
+
+    labels = adapter.labels(rec)
+    assert labels.scene.manufacturer == "DJI"
 
 
 @pytest.mark.skipif(not _AERIX_REAL_DIR.is_dir(), reason="AERIX ANTSDR session mirror not found under AERIX_RF_DATASET_ROOT")

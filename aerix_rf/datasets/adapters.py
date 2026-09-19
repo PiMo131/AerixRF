@@ -723,9 +723,244 @@ class AerixSessionAdapter:
         return LabelsGroup(scene=inst, window=inst)
 
 
+# ---------------------------------------------------------------------------
+# RFUAV (this project's local mirror, ~/rf-datasets/rfuav/original) -- one
+# .rar per drone/RC-transmitter model, each containing "<Drone Name>/
+# VTSBW=<N>/pack<K>.xml" (SignalHound-style capture metadata) + raw
+# "pack<K>_<a>-<b>s.iq" 1.0 s slices of one continuous capture. Format
+# verified empirically 2026-09-19 against DJI_MINI4_PRO.rar (the smallest of
+# the 5 complete DJI archives this task covers) -- see
+# ~/rf-datasets/rfuav/original/FORMAT.md for the full evidence trail.
+# Headline facts, all read from the pack's own XML (never a hardcoded
+# constant): DataType="Complex Float", SampleRate=100000000 (100 MS/s),
+# CenterFrequency=2450000000.000 (2.45 GHz), SampleCount=100000000.
+# pack1_0-1s.iq is exactly 800,000,000 bytes == SampleCount * 8 bytes/sample
+# with zero header bytes -- confirmed complex64 (float32 I + float32 Q
+# interleaved) by exact byte-count match, not assumed from the "Complex
+# Float" string alone.
+# ---------------------------------------------------------------------------
+
+import xml.etree.ElementTree as ET
+
+_RFUAV_IQ_STEM_RE = re.compile(r"^pack(\d+)_(\d+)-(\d+)s$")
+
+
+@dataclass(frozen=True)
+class _RfuavPackMeta:
+    drone: str
+    sample_rate_hz: float
+    center_freq_hz: float
+    if_bandwidth_hz: float
+    sample_count: int
+    scale_factor: Optional[float]
+    reference_snr_level: Optional[float]
+    serial_number: Optional[str]
+    note: Optional[str]
+
+
+def parse_rfuav_pack_xml(path: Path) -> _RfuavPackMeta:
+    """Parse one RFUAV ``pack<K>.xml`` (SignalHound-style capture metadata,
+    see FORMAT.md). Raises on a missing required field rather than
+    defaulting -- an RFUAV archive whose XML omits ``SampleRate``/
+    ``CenterFrequency``/``IFBandwidth``/``SampleCount`` must fail loudly,
+    never fall back to the DJI_MINI4_PRO constants documented above (those
+    are this pack's own declared values, not a dataset-wide default)."""
+
+    root_el = ET.parse(path).getroot()
+
+    def _text(tag: str) -> Optional[str]:
+        el = root_el.find(tag)
+        return el.text.strip() if el is not None and el.text else None
+
+    data_type = _text("DataType")
+    note: Optional[str] = None
+    if data_type != "Complex Float":
+        note = (
+            f"unexpected <DataType>{data_type!r}</DataType> in {path.name}; "
+            "this adapter assumes complex64 (verified only for 'Complex "
+            "Float') -- VERIFY before trusting this recording's IQ"
+        )
+    scale_factor_text = _text("ScaleFactor")
+    ref_snr_text = _text("ReferenceSNRLevel")
+    return _RfuavPackMeta(
+        drone=_text("Drone") or "unknown",
+        sample_rate_hz=float(_text("SampleRate")),
+        center_freq_hz=float(_text("CenterFrequency")),
+        if_bandwidth_hz=float(_text("IFBandwidth")),
+        sample_count=int(_text("SampleCount")),
+        scale_factor=float(scale_factor_text) if scale_factor_text else None,
+        reference_snr_level=float(ref_snr_text) if ref_snr_text else None,
+        serial_number=_text("SerialNumber"),
+        note=note,
+    )
+
+
+@dataclass(frozen=True)
+class _RfuavLabel:
+    manufacturer: str
+    model: str
+    link_family: LinkFamily
+    note: Optional[str] = None
+
+
+# manufacturer/model/link_family per extracted top-level folder name (== the
+# archive's own <Drone> XML field), for the 5 complete DJI archives this
+# task covers. link_family per
+# research/briefs/dji-generations-and-o3o4-identification.md's generation
+# table: Avata 2 and Mini 4 Pro are O4, Mavic 3 Pro and DJI FPV are
+# O3/O3+ -- all OcuSync-family generations, hence LinkFamily.OCUSYNC for all
+# four. "DJI MINI3" is deliberately left LinkFamily.UNKNOWN: the archive/XML
+# name does not disambiguate "Mini 3" (non-Pro -- that brief's A-FIELD row
+# calls this DJI O2) from "Mini 3 Pro" (O3); both readings are still
+# OcuSync, but which specific aircraft/generation the archive holds is
+# unresolved without RFUAV's own paper/README (not consulted this pass), so
+# this stays UNKNOWN with a note rather than asserting OCUSYNC on an
+# unresolved model reading.
+_RFUAV_MINI3_NOTE = (
+    "RFUAV archive/XML name 'DJI MINI3' does not disambiguate Mini 3 "
+    "(non-Pro, DJI O2 per dji-generations-and-o3o4-identification.md's "
+    "A-FIELD row) from Mini 3 Pro (O3); link_family left unknown pending "
+    "RFUAV paper/README confirmation."
+)
+_RFUAV_DJI_LABELS: dict[str, _RfuavLabel] = {
+    "DJI AVATA2": _RfuavLabel("DJI", "avata_2", LinkFamily.OCUSYNC),
+    "DJI AVATA 2": _RfuavLabel("DJI", "avata_2", LinkFamily.OCUSYNC),
+    "DJI FPV COMBO": _RfuavLabel("DJI", "fpv_combo", LinkFamily.OCUSYNC),
+    "DJI FPV": _RfuavLabel("DJI", "fpv_combo", LinkFamily.OCUSYNC),
+    "DJI MAVIC3 PRO": _RfuavLabel("DJI", "mavic_3_pro", LinkFamily.OCUSYNC),
+    "DJI MAVIC 3 PRO": _RfuavLabel("DJI", "mavic_3_pro", LinkFamily.OCUSYNC),
+    "DJI MINI4 PRO": _RfuavLabel("DJI", "mini_4_pro", LinkFamily.OCUSYNC),
+    "DJI MINI 4 PRO": _RfuavLabel("DJI", "mini_4_pro", LinkFamily.OCUSYNC),
+    "DJI MINI3": _RfuavLabel("DJI", "mini_3", LinkFamily.UNKNOWN, note=_RFUAV_MINI3_NOTE),
+    "DJI MINI 3": _RfuavLabel("DJI", "mini_3", LinkFamily.UNKNOWN, note=_RFUAV_MINI3_NOTE),
+}
+
+
+def _rfuav_device_slug(folder_name: str) -> str:
+    return re.sub(r"[\s_]+", "_", folder_name.strip()).lower()
+
+
+class RfuavAdapter:
+    """S1 adapter for the local RFUAV mirror
+    (``~/rf-datasets/rfuav/original``): per-model ``.rar`` archives
+    extracted to ``original/extracted/<Drone Folder>/VTSBW=<N>/pack<K>.xml``
+    + ``pack<K>_<a>-<b>s.iq``. See the module-level comment above and
+    ``~/rf-datasets/rfuav/original/FORMAT.md`` for the format evidence
+    trail (verified against ``DJI_MINI4_PRO.rar`` only).
+
+    One :class:`RecordingMeta` per ``.iq`` slice (each already ~1.0 s at the
+    source 100 MS/s rate). ``run_id`` groups a pack's slices
+    (``<device_slug>/<VTSBW folder>/pack<K>``) so one continuous multi-second
+    capture is never split across train/val/test. Only the 5 complete DJI
+    archives are labelled via :data:`_RFUAV_DJI_LABELS`; any other extracted
+    folder (e.g. the 32 still-downloading non-DJI RC-transmitter archives)
+    is still enumerated/loadable but gets ``EmitterClass.UNKNOWN`` /
+    ``EvidenceLevel.RF_CANDIDATE`` rather than a guessed ``drone_link``
+    label -- see FORMAT.md's "Non-DJI archives" section before extending
+    this table.
+    """
+
+    dataset_id = "rfuav"
+    mirror_dir_name = "rfuav"
+
+    def iter_recordings(self, root: Path) -> Iterator[RecordingMeta]:
+        base = root / self.mirror_dir_name / "original" / "extracted"
+        if not base.is_dir():
+            return
+        for model_dir in sorted(p for p in base.iterdir() if p.is_dir()):
+            device_slug = _rfuav_device_slug(model_dir.name)
+            for vtsbw_dir in sorted(model_dir.glob("VTSBW=*")):
+                if vtsbw_dir.with_name(vtsbw_dir.name + ".aria2").exists():
+                    continue  # incomplete: refused per the normalisation memo S1 rule
+                for xml_path in sorted(vtsbw_dir.glob("pack*.xml")):
+                    if xml_path.with_name(xml_path.name + ".aria2").exists():
+                        continue
+                    pack_id = xml_path.stem  # e.g. "pack1"
+                    try:
+                        pack_num = int(pack_id.removeprefix("pack"))
+                    except ValueError:
+                        continue  # unrecognised xml name: skip, don't fail the whole scan
+                    meta = parse_rfuav_pack_xml(xml_path)
+                    run_id = f"{device_slug}/{vtsbw_dir.name}/{pack_id}"
+                    for iq_path in sorted(vtsbw_dir.glob(f"{pack_id}_*-*s.iq")):
+                        if iq_path.with_name(iq_path.name + ".aria2").exists():
+                            continue
+                        m = _RFUAV_IQ_STEM_RE.match(iq_path.stem)
+                        if not m or int(m.group(1)) != pack_num:
+                            continue
+                        recording_id = f"{device_slug}/{vtsbw_dir.name}/{iq_path.stem}"
+                        yield RecordingMeta(
+                            dataset_id=self.dataset_id,
+                            recording_id=recording_id,
+                            device_id=device_slug,
+                            run_id=run_id,
+                            source_paths=(iq_path,),
+                            original_rate_hz=meta.sample_rate_hz,
+                            original_center_freq_hz=meta.center_freq_hz,
+                            original_bw_hz=meta.if_bandwidth_hz,
+                            original_dtype="float32_interleaved",
+                            channel_id=vtsbw_dir.name,
+                            notes=meta.note,
+                            extra={
+                                "folder_name": model_dir.name,
+                                "xml_drone": meta.drone,
+                                "sample_count": meta.sample_count,
+                                "scale_factor": meta.scale_factor,
+                                "reference_snr_level": meta.reference_snr_level,
+                                "serial_number": meta.serial_number,
+                            },
+                        )
+
+    def load_iq(
+        self, rec: RecordingMeta
+    ) -> tuple[np.ndarray, float, Optional[float], Optional[float]]:
+        raw = np.memmap(rec.source_paths[0], dtype="<f4", mode="r")
+        expected_samples = int(rec.extra["sample_count"])
+        if raw.size != expected_samples * 2:
+            raise ValueError(
+                f"RfuavAdapter: {rec.source_paths[0]} has {raw.size} float32 "
+                f"values, expected {expected_samples * 2} (2 * XML "
+                f"SampleCount={expected_samples}) -- format assumption "
+                "(complex64, no header) may not hold for this file"
+            )
+        iq = np.asarray(raw).view(np.complex64)
+        return iq, rec.original_rate_hz, rec.original_center_freq_hz, rec.original_bw_hz
+
+    def labels(self, rec: RecordingMeta) -> LabelsGroup:
+        label = _RFUAV_DJI_LABELS.get(rec.extra["folder_name"].upper())
+        if label is None:
+            inst = LabelInstance(
+                emitter_class=EmitterClass.UNKNOWN,
+                link_family=LinkFamily.UNKNOWN,
+                link_role=LinkRole.UNKNOWN,
+                activity=Activity.UNKNOWN,
+                evidence_level=EvidenceLevel.RF_CANDIDATE,
+                label_source=LabelSource.UNKNOWN,
+            )
+            return LabelsGroup(scene=inst, window=inst)
+        inst = LabelInstance(
+            emitter_class=EmitterClass.DRONE_LINK,
+            link_family=label.link_family,
+            # VTSBW almost certainly abbreviates "video transmission signal
+            # bandwidth" (consistent with OcuSync's selectable 10/20/40 MHz
+            # video-downlink channel width), but no README/paper text inside
+            # the archive confirms this -- see FORMAT.md -- so link_role is
+            # left unknown rather than asserted as downlink_video.
+            link_role=LinkRole.UNKNOWN,
+            manufacturer=label.manufacturer,
+            model=label.model,
+            individual_id=str(rec.extra.get("serial_number") or "unknown"),
+            activity=Activity.UNKNOWN,
+            evidence_level=EvidenceLevel.OPERATOR_TRUTH,
+            label_source=LabelSource.DATASET_METADATA,
+        )
+        return LabelsGroup(scene=inst, window=inst)
+
+
 ADAPTERS: dict[str, Adapter] = {
     ZenodoDroneRF2020Adapter.dataset_id: ZenodoDroneRF2020Adapter(),
     RubDroneSecurityAdapter.dataset_id: RubDroneSecurityAdapter(),
+    RfuavAdapter.dataset_id: RfuavAdapter(),
     "aerix_antsdr_ambient_2026_09_18": AerixSessionAdapter(
         dataset_id="aerix_antsdr_ambient_2026_09_18"
     ),
