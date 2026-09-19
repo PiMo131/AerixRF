@@ -501,3 +501,79 @@ def test_strong_component_bw_matches_main_within_5pct():
     assert rel <= 0.05, (
         f"strong-component bw drifted {rel * 100:.1f} % from main "
         f"({median_bw:.0f} Hz vs {_MAIN_STRONG_BW_HZ:.0f} Hz)")
+
+
+# --------------------------------------------------------------------------
+# (g) R2: bw_6db_hz on a strong, well-resolved 300 kHz burst TRAIN must not
+#     drift when the branch's PER-BIN Q25 floor path (``perbin_noise_floor_
+#     lin`` -> ``floor_excess_db``) is used instead of a fixed scalar floor.
+#     ``test_strong_component_bw_matches_main_within_5pct`` above already
+#     pins the scalar-floor path against main; this test pins the per-bin-
+#     floor path (the one the live detector actually calls -- see
+#     ``energy.detect``) against the SAME reference algorithm (main's -6 dB
+#     edge walk), fed the true noise power through the per-bin estimator
+#     rather than a hand-supplied scalar, so a bias introduced by
+#     ``perbin_noise_floor_lin`` itself (not just by the gate/hold or
+#     fragment-rule changes) would show up here.
+# --------------------------------------------------------------------------
+
+_R2_N_FRAMES = 5000            # 1 s / 200 us D8 frames
+_R2_BURST_FRAMES = 5           # 5 * 200 us = 1 ms per burst
+_R2_PERIOD_FRAMES = 100        # 20 ms cadence -> 50 bursts across the 1 s
+                                # window, well over the required >= 10
+_R2_SNR_DB = 20.0
+_R2_SEEDS = range(4100, 4108)  # 8 trials, disjoint from the seeds used by
+                                # ``test_strong_component_bw_matches_main_
+                                # within_5pct`` (4000..4007) so the two
+                                # regressions are not the same draw twice
+
+# ``main`` (``git rev-parse --short main`` == ``b0bacd4`` on 2026-09-19)
+# measured with ``git show main:aerix_rf/detect/bursts.py`` (main's
+# ``detect_bursts`` takes a *scalar* ``noise_floor_lin``; called with 1.0,
+# the true mean of the single-look ``rng.gamma(shape=1.0, scale=1.0, ...)``
+# noise below). Generation: fs=12.288e6, n_bins=1024, n_frames=5000,
+# frame_dt_s=200e-6, centre_bin=1024//2+3=515, bw_hz=300e3, snr_db=20.0,
+# burst_frames=5 (1 ms) every 100 frames (20 ms) from frame 10 to 4990 (50
+# bursts), seeds 4100..4107, median of the per-seed strongest-candidate
+# ``bw_6db_hz``.  Hard-coded rather than recomputed so this stays a
+# regression against the RELEASED reference algorithm even after main moves.
+_MAIN_R2_BW_HZ = 436510.9
+
+
+def test_r2_strong_component_bw_unchanged_vs_main():
+    freqs = _sens_freqs()
+    centre_true = float(freqs[_SENS_CENTRE_BIN])
+    sig = _gauss_shape(_SENS_BW_HZ, _SENS_CENTRE_BIN) * (10 ** (_R2_SNR_DB / 10.0) - 1.0)
+
+    on = np.zeros(_R2_N_FRAMES, dtype=bool)
+    for k in range(10, _R2_N_FRAMES - 10, _R2_PERIOD_FRAMES):
+        on[k:k + _R2_BURST_FRAMES] = True
+    n_bursts = int(np.sum(np.diff(np.concatenate(([0], on.astype(int), [0]))) == 1))
+    assert n_bursts >= 10, f"fixture problem: only {n_bursts} bursts in the train"
+
+    bws = []
+    for seed in _R2_SEEDS:
+        rng = np.random.default_rng(seed)
+        power = rng.gamma(shape=1.0, scale=1.0, size=(_R2_N_FRAMES, _SENS_BINS))
+        power += on[:, None] * sig[None, :]
+
+        # The per-bin Q25 floor the branch's ``energy.detect`` would supply,
+        # fed the TRUE noise power (L=1, matching the single-look gamma draw
+        # above) as the clamp reference.
+        floor, excess = bursts_mod.perbin_noise_floor_lin(
+            power, l_eff=1.0, ref_lin=1.0, return_excess=True)
+        events = bursts_mod.detect_bursts(
+            power, fs=_SENS_FS, frame_dt_s=200e-6, freqs_hz=freqs,
+            noise_floor_lin=floor, floor_excess_db=excess, l_eff=1.0)
+        cand = [e for e in events if abs(e.centre_hz - centre_true) < 1e6]
+        assert cand, f"seed {seed}: strong component not detected"
+        best = max(cand, key=lambda e: e.peak_db_over_floor)
+        bws.append(best.bw_6db_hz)
+
+    median_bw = float(np.median(bws))
+    rel = abs(median_bw - _MAIN_R2_BW_HZ) / _MAIN_R2_BW_HZ
+    assert rel <= 0.05, (
+        f"R2 per-bin-floor bw drifted {rel * 100:.1f} % from main's reference "
+        f"edge walk ({median_bw:.0f} Hz vs {_MAIN_R2_BW_HZ:.0f} Hz)")
+    assert median_bw <= 1.5 * _SENS_BW_HZ, (
+        f"R2 median bw {median_bw:.0f} Hz exceeds 1.5x the true {_SENS_BW_HZ:.0f} Hz")
