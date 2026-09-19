@@ -412,3 +412,17 @@ the branch; merge criteria: ambient hopping ≤ ~1.5 %, control ≤ 1 %, level-1
   ≤ 1/100?), CPU cap for the multi-look STFT, the FA rerun after that cap. The FA-vs-sensitivity trade
   (0.95 % blind-to-level-2 vs ~3.4 % with level-2 unlocked) is an architecture decision, to be taken with the
   numbers on the table — not by tuning the budget.
+
+### Branch comparison table (RFUAV RC positives, 2026-09-19 late)
+
+| variant | level-1 models | dwell rc_link_family / fhss_1mhz | full_band (1024) fhss grid | control hopping /100 | ambient FA hopping /1160 |
+|---|---|---|---|---|---|
+| main (C1–C3 + C5) | 30/31 | 2 / 0 (1 model) | withheld (G1) | 0 | 11 (0.95 %) |
+| branch fix 1 (594eed9) | 25/31 | 9 / 2 (3 models) | 22 (6 models) | 4 | 16 (1.38 %) |
+| branch fix 2, looks=8 (b2bbc1f) | 28/31 | 9 / 1 (2 models) | 21 (5 models) | **12** | 39 (3.36 %) |
+| branch fix 2, looks=1 (0125deb) | pending | pending | pending | pending | 46 (3.97 %) |
+
+Grid hits at 1024-pt full band are resolution-limited by definition (bin 97.7 kHz > Δ/20) and are shown only
+because the branch predates the C5 guard; treat them as "the lattice statistic exceeded threshold", not as grid
+evidence. The RC-bench control (100 ANTSDR ambient windows) is drawn from the noisier session, hence higher rates
+than the 1160-window FA bench.
