@@ -162,4 +162,5 @@ and independent review before it is "done". Evidence-wording rules apply.
       NOT on main. Needs: fragment/skirt fix or C6 (frequency-local floor reference), Wi-Fi discounts re-validated
       with corrected bandwidths, ≥20 dB R2 regression test, CPU cost of the default-on second STFT (`iq=` path),
       explicit decision on the R5 cadence-suppression false-negative risk (real RC link inside an active Wi-Fi channel).
-- [ ] C5 (grid-resolution guard G1/G2, bench `full_band_4096` column) not started — spec in docs/design/stage1-c4-c5-spec.md.
+- [x] C5 committed on main (7affe10).
+- [ ] wip/stage1-c4 follow-ups: ≥20 dB R2 regression test (strong-component bw unchanged vs main) still missing; multi-look STFT is opt-in (`AERIX_RF_DETECTOR_LOOKS`) because the second STFT costs 340–470 ms/window — a cheaper multi-look product needs a detector-side STFT that shares the FFT with the canonical one; C6 frequency-local floor reference (needs the tilt test re-specified in dB/MHz).
