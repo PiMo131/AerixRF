@@ -8,3 +8,4 @@
 - [No IQ on tmpfs](feedback_no_iq_on_tmpfs.md) — /tmp is 32 GB RAM tmpfs; session roots go on NVMe; no captures during heavy test runs
 - [Benchmark lesson](project_benchmark_lesson.md) — chamber-vs-ambient confound; probe PASS withdrawn; need same-session ON/OFF drone positives + read-back device state
 - [Stage-1 RC lessons](project_stage1_rc_lessons.md) — 2026-09-19: five structural Stage-1 defects found via RFUAV positives; read per-record labels before reporting; fix order C3→C2
+- [RFUAV corpus](project_rfuav_corpus.md) — 109 GB / 349 recordings prepared 2026-09-19; 31 RC transmitters; level 1–2 evidence; pair classifier numbers with receiver-ID probe
