@@ -86,13 +86,58 @@ distinguishes MAVLink-transparent links); DJI DroneID 640ms burst interval + OFD
 occupied BW (PRIMARY PAPER, load-bearing for any DroneID scan-dwell design); FlySky
 AFHDS2A (best-corroborated COMMUNITY entry, worth a follow-up primary source check).
 
+## RFUAV models present locally (2026-09-19)
+
+All 37 top-level RFUAV `.rar` archives (5 DJI + 32 non-DJI) are now downloaded
+and byte-exact size-verified against the live HF `api/datasets/kitofrank/RFUAV/tree/main`
+listing (0 mismatches). SHA256 of every archive computed locally, HF publishes
+no per-file checksums so size-match is the strongest available cross-check.
+Full per-model manufacturer/category/link-family table with evidence grades is
+maintained at `~/rf-datasets/rfuav/original/MODELS.md` (not duplicated in full
+here — read that file for the complete 37-row table). Summary:
+
+- 5 DJI airframes: Avata 2 (O4), FPV Combo (O3), Mavic 3 Pro (O3+), Mini 4 Pro
+  (O4), Mini 3 (generation ambiguous — Pro vs non-Pro not disambiguated by
+  archive name).
+- 1 non-DJI airframe: Autel EVO Nano — Autel SkyLink proprietary adaptive-hop
+  link across 2.4/5.8/5.2 GHz (Medium confidence, from Autel's own FAQ/product
+  pages; no public PHY spec).
+- 31 RC-transmitter-only recordings, by protocol family: FrSky ACCESS (X14,
+  X20R, X9D Plus 2019 — 3 units), FlySky AFHDS2A/AFHDS3 (FS-i6X, EL18, NV14 —
+  3 units), Futaba FASST/FASSTest/T-FHSS (T10J, T14SG, T16IZ, T18SZ — 4
+  units), digital-HD-link vendors comparable to OcuSync in market segment
+  (Herelink Hx4, SIYI FT24/MK15/MK32, Skydroid H12/T10 — 6 units), and 14
+  units (JR Propo, Radiolink, WFLY, Yunzhuo, Devention) whose exact protocol
+  name is Low-confidence/unconfirmed this pass. **No TBS Crossfire unit is
+  present in RFUAV** despite Crossfire being a common example RC brand —
+  confirmed absent, not a search miss. RadioMaster/Jumper units are
+  multi-protocol radios; the archive name alone cannot confirm which RF
+  module (ELRS/CC2500/etc.) was actually installed at capture time.
+- Internal IQ format confirmed only for DJI Mini 4 Pro so far (USRP X310,
+  100 MS/s, complex64, no header, `VTSBW=<N>` pack folders — see `FORMAT.md`);
+  extraction of the remaining 36 archives was in progress at write time.
+- License confirmed Apache-2.0 directly from the HF dataset card YAML
+  frontmatter (High confidence, primary source) — corrects prior "not
+  confirmed" status. Authors confirmed from the same card: Rui Shi, Xiaodong
+  Yu, Shengming Wang, Yijia Zhang, Lu Xu, Peng Pan, Chunlai Ma.
+- Local total: 109.2 GB / 101.7 GiB across the 37 archives. The HF README's
+  "~1.3 TB" figure refers to the dataset overall including spectrogram/model
+  weight/curated-image folders NOT pulled in this task (out of scope) — this
+  is not a download shortfall.
+
 ## Open questions
 - `dronerfb_dir` and `dronerfa` model lists remain unread — both block any dataset
   table row from moving out of "needs adapter/needs read".
-- RFUAV per-model `.rar` internal structure (sample rate, exact IQ format) not yet
-  verified — first task once the current download completes.
+- RFUAV per-archive internal structure (sample rate, exact IQ format) is confirmed
+  only for DJI Mini 4 Pro — the other 36 archives still need their own pack.xml
+  read once extracted; do not assume the USRP X310/100 MS/s/complex64 parameters
+  carry over.
 - DJI "Mini 3" vs "Mini 3 Pro" OcuSync generation ambiguity in the RFUAV label is
   unresolved — do not assume O3 without checking the archive contents/paper.
+- Most RFUAV non-DJI RC-transmitter link-family names (JR Propo DMSS, Radiolink,
+  WFLY, Yunzhuo, Devention) are Low-confidence, sourced from general RC-industry
+  knowledge, not a manufacturer manual opened this pass — verify before using any
+  single-model claim as decode-feasibility evidence.
 - Crossfire/FrSky/Futaba rows remain COMMUNITY-only; no primary firmware or FCC
   filing was located in this corpus for their hop rasters.
 

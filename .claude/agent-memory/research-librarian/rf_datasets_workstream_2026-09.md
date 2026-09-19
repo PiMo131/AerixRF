@@ -307,3 +307,65 @@ Update 2026-09-19 (RFUAV non-DJI subset download + unrar install):
   "download started, no manual action needed" instead of "not started" —
   re-read that file (not this memory) for the current authoritative status
   since download state changes fast and this memory note will go stale.
+
+Update 2026-09-19 (RFUAV download-complete housekeeping: sha256/model table/manifest merge):
+- **All 37 RFUAV archives (5 DJI + 32 non-DJI) confirmed complete and correct.**
+  Computed sha256 for all 37 in one `sha256sum *.rar` pass (~106GB, few minutes,
+  no errors) -> `~/rf-datasets/rfuav/original/SHA256SUMS`. Cross-checked every
+  archive's byte size against a freshly re-fetched live HF
+  `api/datasets/kitofrank/RFUAV/tree/main` JSON (not the stale saved
+  `rfuav_nondji_urls.txt`, which only has aria2c URLs/out-paths, no sizes) —
+  **0 mismatches, 37/37 exact**. HF publishes no per-file checksums, so
+  size-match against the live tree API is the strongest available integrity
+  check without re-hashing against a publisher value.
+- A detached `extract_all.sh`/`extract_all.log` extraction was running
+  concurrently in `~/rf-datasets/rfuav/original/extracted/` during this pass —
+  did NOT touch it, did NOT run `unrar t` (would double the I/O). Only DJI
+  MINI4 PRO was extracted+format-verified before this pass (per `FORMAT.md`);
+  the other 36 archives' internal format is still unconfirmed.
+- **New file `~/rf-datasets/rfuav/original/MODELS.md`**: full 37-row
+  model->manufacturer->category->link_family table with an explicit evidence
+  grade per row (High only for the 5 DJI + HF-card-sourced facts; Medium for
+  well-established RC-industry protocol names not manual-verified this pass
+  e.g. FrSky ACCESS/FlySky AFHDS2A-3/Futaba FASST-family; Low for JR Propo
+  DMSS, Radiolink, WFLY, Yunzhuo, Devention, and all RadioMaster/Jumper
+  entries since those are multi-protocol radios and the archive name alone
+  can't confirm the installed RF module). **No TBS Crossfire unit is present
+  in RFUAV** — confirmed absent from the full file list, not a search miss.
+  6 units (Herelink Hx4, SIYI FT24/MK15/MK32, Skydroid H12/T10) are
+  proprietary digital-HD-link vendors in the same market segment as DJI
+  OcuSync/CUAV Herelink — none of their PHY layers are publicly documented
+  primary-source (Medium/Low only, band + "LTE-like"/OFDM-class framing from
+  reseller/vendor marketing copy, not a spec sheet). This table is mirrored
+  (summarized, not full) into `research/briefs/datasets-and-signatures-plan.md`
+  under "RFUAV models present locally (2026-09-19)" — read MODELS.md itself
+  for the complete 37-row table, don't reconstruct it from the brief.
+- **License resolved**: Apache-2.0, confirmed directly from the HF dataset
+  card's own YAML frontmatter (`curl .../raw/main/README.md`) — High
+  confidence, primary source. This replaces every prior "not confirmed this
+  pass" note for RFUAV license in both manifests. Authors also confirmed from
+  the same card: Rui Shi, Xiaodong Yu, Shengming Wang, Yijia Zhang, Lu Xu,
+  Peng Pan, Chunlai Ma (arXiv 2503.09033).
+- **Manifest merge**: `rfuav_dji_subset` and `rfuav_nondji_subset` entries
+  RETIRED (deleted) from both `~/rf-datasets/manifests/datasets.json` and
+  `~/aerix-rf/research/datasets/manifest.json` (now 17 entries each, was 18 —
+  16 pre-existing + rfuav_dji_subset + rfuav_nondji_subset - 1 old-stale-rfuav
+  + 1 new merged rfuav = 17). The single `rfuav` entry is now
+  `download_status: complete`, `size_downloaded: 109.2 GB`, checksum_status
+  references SHA256SUMS, and carries the full model/manufacturer summary
+  inline. **Do not recreate the two subset entries** — if anyone asks "what
+  happened to rfuav_dji_subset", point them at this merged entry.
+- Local total for all 37 archives: 109,197,005,563 bytes = 109.2 GB / 101.7
+  GiB exactly (computed by summing `os.path.getsize` over the 37 `.rar`
+  files). The HF README's own claim of "~1.3 TB of raw frequency data" refers
+  to the dataset repo as a whole including `ImageSet-AllDrones-MatlabPipeline/`,
+  `ValidationSet_5Drones/`, `abstract/`, `weight/` top-level folders (spectrograms,
+  model weights, curated image sets) that were intentionally NOT pulled this
+  pass (out of scope: raw per-model archives only) — do not treat 109GB vs
+  1.3TB as a download failure or a residual gap to chase.
+- `status.sh`'s `rfuav` line needed no code change (generic dataset_id
+  iteration, as noted 2026-09-18) — it now shows `original=169G` because that
+  path also contains the in-progress `extracted/` output tree alongside the
+  109GB of raw archives; this will keep growing until extraction finishes,
+  don't mistake it for the archive-only size (use the 109.2GB figure above
+  for that).
