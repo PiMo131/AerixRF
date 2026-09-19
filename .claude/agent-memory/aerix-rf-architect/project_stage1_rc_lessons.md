@@ -21,3 +21,8 @@ looks like all-zero, read the per-record labels before reporting — I misreport
 for a `counts` key that did not exist; (3) fix order matters: C3 clustering before C2 cap; (4) C4 per-bin floor is
 detector-local — do NOT change the canonical STFT/tensor for it; (5) evidence from RFUAV stays level 1–2
 (third-party receiver, crowded band) — same-receiver single-TX captures are the conversion path.
+
+**C4 lesson (2026-09-19 evening):** the per-bin-floor / P_fa-threshold rework (branch `wip/stage1-c4`) passed 710
+tests and an independent review yet raised ambient hopping FA 0.95 % → 17.2 %. Unit tests and synthetic reviews
+do not substitute for the ambient FA bench; every detector-threshold change must run `bench/stage1_fa_budget.py`
+BEFORE commit to main, and the RC-positives bench after. Park on a branch rather than merge-and-fix.
