@@ -11,3 +11,4 @@
 - [Analog 5.8 GHz FPV detector](project_analog-fpv-58.md) — carrier = −12 dB edge midpoint (never the peak), grid false-match ~13 %, Band A == U-NII-3, seam comb, duty-1.0 floor trap.
 - [SiK 2-GFSK T1 demod](project_sik-gfsk-t1.md) — post-detection matched filter = the missing dB, OBW98 calibration, preamble-gated 2-bit sync arithmetic.
 - [SiK T4 dwell pipeline](project_sik-pipeline-t4.md) — wideband-fixture AWGN trap, -6 dB centre bias on bimodal 2-FSK, single-look gating, per-burst DDC cost.
+- [Stage-1 RC-capture defects (2026-09-19)](project_stage1-rc-defects.md) — t̂=1.0 s period bug, first-64 event cap, cluster chaining, single-look gate, grid bin-width limit.
