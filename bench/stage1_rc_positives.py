@@ -21,6 +21,13 @@ Per window this script reports BOTH:
     channels than full_band for any hop set wider than ~12 MHz (e.g. FrSky's
     47-channel, ~94 MHz-wide hop set) -- reported as ``INSUFFICIENT_CHANNELS``
     dominance, not a rule failure.
+  * "full_band_4096": the SAME native-rate 100 MS/s IQ as "full_band", but
+    with a 4096-point FFT (24.4 kHz bins) instead of 1024 (97.7 kHz bins).
+    "full_band" is kept as a documented ``GRID_RESOLUTION_LIMITED`` column
+    (its bins are too coarse to pass the C5 grid-resolution guard for the
+    1/2 MHz hop-set deltas, docs/design/stage1-c4-c5-spec.md); this column
+    has enough resolution to actually test for those grids at full hop-set
+    width.
 
 ``aerix_rf/detect/*`` is NOT modified by this script or as a result of
 running it: this is read-only validation. Where a rule's real-data behaviour
@@ -203,7 +210,7 @@ def _dwell_center_by_occupancy(spec, fs_hz: float) -> tuple[float, dict[str, Any
 
 
 def _window_record(det, model: str, pack_id: str, slice_name: str, mode: str,
-                    fs_hz: float, center_freq_hz: float,
+                    fs_hz: float, center_freq_hz: float, fft_size: int,
                     dwell_select: dict[str, Any] | None = None) -> dict[str, Any]:
     from aerix_rf.detect import raster as raster_mod
 
@@ -216,7 +223,16 @@ def _window_record(det, model: str, pack_id: str, slice_name: str, mode: str,
     # duplicating/trusting det.stage1's flattened summary (which does not
     # carry every RasterResult field this record needs, e.g. offset_hz,
     # aliases, rayleigh_r_debiased, duration_hist).
-    rr = raster_mod.analyze_raster(det.events, frame_dt_s=det.frame_dt_s)
+    #
+    # C5 fix (docs/design/stage1-c4-c5-spec.md): this recompute must ALSO
+    # forward bin_hz, exactly as energy.detect's own internal analyze_raster
+    # call does (bin_hz = spec.sample_rate / n_freq, n_freq == fft_size for
+    # the complex-FFT Spectrogram this bench builds) -- otherwise the C5
+    # GRID_RESOLUTION_LIMITED guard, which is bin_hz-gated, would silently
+    # never fire on this recomputed RasterResult regardless of fft_size,
+    # even though det.stage1 (unused here) already computed it correctly.
+    bin_hz = fs_hz / fft_size
+    rr = raster_mod.analyze_raster(det.events, frame_dt_s=det.frame_dt_s, bin_hz=bin_hz)
     return {
         "model": model,
         "pack": pack_id,
@@ -224,6 +240,7 @@ def _window_record(det, model: str, pack_id: str, slice_name: str, mode: str,
         "mode": mode,
         "fs_hz": fs_hz,
         "center_freq_hz": center_freq_hz,
+        "fft_size": fft_size,
         "dwell_select": dwell_select,
         "morphology": det.morphology,
         "n_events": len(det.events),
@@ -263,7 +280,24 @@ def _process_one_iq(iq: np.ndarray, fs_hz: float, center_freq_hz: float,
     out = []
     spec_full = spectrogram.compute(iq, sample_rate=fs_hz, fft_size=1024)
     det_full = energy.detect(spec_full, center_freq_mhz=center_freq_hz / 1e6)
-    out.append(_window_record(det_full, model, pack_id, slice_name, "full_band", fs_hz, center_freq_hz))
+    out.append(_window_record(det_full, model, pack_id, slice_name, "full_band", fs_hz,
+                               center_freq_hz, fft_size=1024))
+
+    # C5 (docs/design/stage1-c4-c5-spec.md): "full_band" above is kept as the
+    # documented resolution-limited column (its 97.7 kHz bins at 100 MS/s
+    # fail the C5 G1 grid-resolution guard for the 1/2 MHz hop-set grids, so
+    # it now carries GRID_RESOLUTION_LIMITED and never emits a level-2 grid
+    # label). This third column reuses the SAME full-band 100 MS/s IQ (no
+    # re-slicing, no extra memmap read) but with a 4096-point FFT (24.4 kHz
+    # bins), which passes G1 at both tested deltas and gives G2 = 12 bins on
+    # a 300 kHz burst -- the column that actually answers "is there a 1 MHz
+    # grid in this capture". spectrogram.compute already chunks internally
+    # via its hop/_TARGET_FRAMES logic, so the ~4x per-frame FFT cost is not
+    # compounded by any extra full-window buffering here.
+    spec_full_4096 = spectrogram.compute(iq, sample_rate=fs_hz, fft_size=4096)
+    det_full_4096 = energy.detect(spec_full_4096, center_freq_mhz=center_freq_hz / 1e6)
+    out.append(_window_record(det_full_4096, model, pack_id, slice_name, "full_band_4096",
+                               fs_hz, center_freq_hz, fft_size=4096))
 
     # Dwell emulation: re-centre on this window's OWN highest-occupancy 10 MHz
     # band (a live 12 MHz dwell tuned anywhere in the recording's band would
@@ -279,7 +313,7 @@ def _process_one_iq(iq: np.ndarray, fs_hz: float, center_freq_hz: float,
     spec_dwell = spectrogram.compute(dwell_iq, sample_rate=resample.CANONICAL_RATE_HZ, fft_size=1024)
     det_dwell = energy.detect(spec_dwell, center_freq_mhz=dwell_center_hz / 1e6)
     out.append(_window_record(det_dwell, model, pack_id, slice_name, "dwell",
-                               resample.CANONICAL_RATE_HZ, dwell_center_hz,
+                               resample.CANONICAL_RATE_HZ, dwell_center_hz, fft_size=1024,
                                dwell_select=dwell_select))
     return out
 
@@ -313,7 +347,7 @@ def _run_one_model(model_dir_str: str) -> dict[str, Any]:
 
     return {
         "model": model,
-        "n_windows_raw": len(records) // 2,  # full+dwell per window
+        "n_windows_raw": len(records) // 3,  # full_band+full_band_4096+dwell per window
         "records": records,
         "errors": errors,
         "elapsed_s": time.perf_counter() - t0,

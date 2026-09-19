@@ -228,7 +228,46 @@ LABEL_VOCAB = frozenset({
     "droneid_cadence_candidate",
 })
 TAG_VOCAB = frozenset({"wifi_beacon_like", "ble_connection_like", "wifi_like_wideband",
-                       "INSUFFICIENT_CHANNELS"})
+                       "INSUFFICIENT_CHANNELS", "GRID_RESOLUTION_LIMITED"})
+
+# C5 (docs/design/stage1-c4-c5-spec.md "C5 -- grid-resolution guard"): the
+# Rayleigh lattice concentration for centre-error sigma_f is
+# R ~= exp(-2*pi^2*sigma_f^2/Delta^2); R_MIN_RASTER = 0.93 gives a total
+# sigma_f budget of 0.0606*Delta. Two necessary (not sufficient) conditions
+# are checked before any level-2 grid label is emitted -- neither is a
+# statement about the data being wrong, only about the frequency resolution
+# being too coarse to resolve the lattice at all:
+#   G1: bin_hz <= Delta/20 (quantisation term sigma_q = bin_hz/sqrt(12) stays
+#       at ~12% of the sigma_f budget, leaving the rest to the estimator).
+#   G2: median -6 dB burst bandwidth of the contributing clusters
+#       >= GRID_G2_MIN_BINS * bin_hz (the -6 dB edge-midpoint walk needs
+#       enough bins across the burst to be sub-bin accurate).
+GRID_G1_MAX_BIN_FRAC_OF_DELTA = 1.0 / 20.0
+GRID_G2_MIN_BW_BINS = 8
+
+
+def _grid_resolution_guard(delta_hz: float, bin_hz: float | None,
+                            median_bw_hz: float | None) -> tuple[bool, str | None]:
+    """C5: returns ``(ok, reason)`` for the frequency-lattice resolution
+    guard at the tested spacing ``delta_hz``.
+
+    ``bin_hz is None`` means the caller did not forward a bin width (older
+    callers / backwards compatibility): the guard is not evaluated and
+    ``(True, None)`` is returned -- behaviour is unchanged from before C5.
+
+    Otherwise G1 is checked first (``reason="bin_pitch"`` on failure), then
+    G2 (``reason="burst_bins"`` on failure, only meaningful once G1 has
+    passed and a ``median_bw_hz`` is available). ``(True, None)`` means both
+    necessary conditions hold; this is NOT sufficient on its own for a
+    level-2 label (the Rayleigh test in ``raster_test`` still has to pass).
+    """
+    if bin_hz is None:
+        return True, None
+    if bin_hz > delta_hz * GRID_G1_MAX_BIN_FRAC_OF_DELTA:
+        return False, "bin_pitch"
+    if median_bw_hz is not None and median_bw_hz < GRID_G2_MIN_BW_BINS * bin_hz:
+        return False, "burst_bins"
+    return True, None
 
 
 # --------------------------------------------------------------------------
@@ -936,6 +975,7 @@ def analyze_raster(
     deltas_hz: tuple[float, ...] = DEFAULT_DELTAS_HZ,
     periods_s: tuple[float, ...] = ELRS_PERIODS_S,
     frame_dt_s: float | None = None,
+    bin_hz: float | None = None,
 ) -> RasterResult:
     """Run R1-R5 over one window's (or one accumulated multi-dwell)
     ``BurstEvent`` list and assemble the controlled-vocabulary result.
@@ -951,6 +991,15 @@ def analyze_raster(
     ``frame_dt_s``, when known, is forwarded to ``period_test`` so it can
     drop degenerate co-temporal (dt ~= 0) intervals before the R2 Rayleigh
     scan (C1 fix); see ``period_test``'s docstring.
+
+    ``bin_hz``, when known (the caller's STFT frequency-bin width in Hz,
+    e.g. ``spec.sample_rate / n_freq`` in ``energy.detect``), gates the 1/2
+    MHz grid labels behind the C5 resolution guard (see
+    ``_grid_resolution_guard`` and ``docs/design/stage1-c4-c5-spec.md``
+    "C5"): a lattice that cannot be resolved at the given frequency
+    resolution is reported as ``GRID_RESOLUTION_LIMITED`` (level-1
+    diagnostic only), never as a level-2 grid candidate. ``bin_hz=None``
+    (the default) evaluates exactly as before C5 -- the guard is skipped.
     """
     clusters = cluster_centres(events, tol_hz=cluster_tol_hz)
     raster_ev = raster_test(clusters, deltas_hz=deltas_hz)
@@ -963,6 +1012,22 @@ def analyze_raster(
     consistent: list[str] = []
     notes: list[str] = []
 
+    # C5 G1 as a column-level flag: if the caller's bin pitch cannot resolve
+    # ANY of the tested grid steps (bin_hz > Delta/20), say so regardless of
+    # whether a lattice was found or enough channels exist -- the tag then
+    # describes the capability of this spectrogram configuration, not a
+    # verdict on the data. G2 (burst width in bins) below stays conditional
+    # on a lattice actually being attempted.
+    g1_limited = [d for d in deltas_hz if bin_hz is not None and bin_hz > d / 20.0]
+    if g1_limited:
+        tags.append("GRID_RESOLUTION_LIMITED")
+        notes.append(
+            "Grid-resolution guard (C5 G1): bin_hz=%.1f kHz exceeds Delta/20 for Delta in {%s} MHz "
+            "-- the corresponding fhss_*_grid_candidate labels cannot be evaluated at this frequency "
+            "resolution (bin_pitch); insufficient resolution, not a negative result."
+            % (bin_hz / 1e3, ", ".join(f"{d/1e6:.3f}" for d in g1_limited))
+        )
+
     if raster_ev.insufficient:
         tags.append("INSUFFICIENT_CHANNELS")
         notes.append(
@@ -972,11 +1037,40 @@ def analyze_raster(
         )
     elif raster_ev.delta_hz is not None:
         d = raster_ev.delta_hz
-        if abs(d - 1.0e6) <= 0.1e6:
+        is_1mhz = abs(d - 1.0e6) <= 0.1e6
+        is_2mhz = abs(d - 2.0e6) <= 0.2e6
+        guard_ok, guard_reason = True, None
+        if is_1mhz or is_2mhz:
+            median_bw_hz = float(np.median([c.bw_hz for c in clusters])) if clusters else None
+            guard_ok, guard_reason = _grid_resolution_guard(d, bin_hz, median_bw_hz)
+        if (is_1mhz or is_2mhz) and not guard_ok:
+            if "GRID_RESOLUTION_LIMITED" not in tags:
+                tags.append("GRID_RESOLUTION_LIMITED")
+            which = "fhss_1mhz_grid_candidate" if is_1mhz else "fhss_2mhz_grid_candidate"
+            if guard_reason == "bin_pitch":
+                reason_text = (
+                    f"bin_hz={bin_hz/1e3:.1f} kHz exceeds the G1 limit "
+                    f"Delta/20={d / 20.0 / 1e3:.1f} kHz for Delta={d/1e6:.3f} MHz (bin_pitch)"
+                )
+            else:
+                reason_text = (
+                    f"median burst bandwidth ({median_bw_hz/1e3:.1f} kHz, "
+                    f"{median_bw_hz / bin_hz:.1f} bins) is below the G2 floor of "
+                    f"{GRID_G2_MIN_BW_BINS} bins ({GRID_G2_MIN_BW_BINS * bin_hz/1e3:.1f} kHz) "
+                    f"at bin_hz={bin_hz/1e3:.1f} kHz (burst_bins)"
+                )
+            notes.append(
+                f"Grid-resolution guard (C5, design doc 'C5'): the Delta={d/1e6:.3f} MHz "
+                f"lattice test is not resolvable at this frequency resolution -- {reason_text}. "
+                f"This is insufficient resolution, not a negative result; "
+                f"{which} withheld (RasterEvidence numeric fields are still populated for "
+                f"diagnostics)."
+            )
+        elif is_1mhz:
             labels.append("fhss_1mhz_grid_candidate")
             if raster_ev.offset_hz is not None and _elrs_offset_consistent(raster_ev.offset_hz, d):
                 consistent.append("expresslrs_2g4")
-        elif abs(d - 2.0e6) <= 0.2e6:
+        elif is_2mhz:
             labels.append("fhss_2mhz_grid_candidate")
             notes.append(
                 "2 MHz raster spacing/offset is indistinguishable from BLE data-channel "
