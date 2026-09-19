@@ -127,6 +127,70 @@ def test_process_one_iq_end_to_end_synthetic():
     # at the native rate (the whole point of the full_band-vs-dwell split).
     from aerix_rf.datasets.resample import CANONICAL_RATE_HZ
     assert dwell["fs_hz"] == CANONICAL_RATE_HZ
+    # Selection provenance (task item (c)): the dwell record must carry the
+    # chosen-centre selection metric; full_band never re-centres, so it must not.
+    assert dwell["dwell_select"] is not None
+    assert dwell["dwell_select"]["method"] in ("occupancy_grid", "fallback_guard_too_wide_for_band")
+    full_band = next(r for r in records if r["mode"] == "full_band")
+    assert full_band["dwell_select"] is None
+
+
+def test_dwell_center_by_occupancy_prefers_midband_hopping_over_edge_rolloff():
+    """Regression for the C6 bench-only defect (docs/design/
+    stage1-rc-positives-2026-09-19.md sec 3/4 item 6): raw argmax(mean PSD)
+    landed on the extreme band edge for FLYSKY/FRSKY. Build a synthetic PSD
+    with a persistent, flickering band-edge roll-off (which the OLD
+    argmax(mean PSD) logic picks) plus a genuine mid-band hopping cluster
+    (several distinct channels, each active a minority of frames) and assert
+    the NEW selector lands its dwell centre in the mid-band cluster, not the
+    edge."""
+    from aerix_rf.dsp.spectrogram import Spectrogram
+
+    fs_hz = 100_000_000.0
+    fft_size = 1024
+    bin_hz = fs_hz / fft_size
+    freqs = (np.arange(fft_size) - fft_size // 2) * bin_hz
+    n_frames = 300
+    rng = np.random.default_rng(1)
+
+    power_db = np.full((n_frames, fft_size), -80.0, dtype=np.float32)
+
+    # Persistent band-edge roll-off: bins 0..40 (~-50.0..-46.1 MHz), well
+    # inside the >=5 MHz edge guard, flickering above its own floor 30% of
+    # frames -- exactly the kind of artefact the OLD raw argmax(mean PSD)
+    # picked (it dominates the plain time-average because it never turns off
+    # across the whole band elsewhere).
+    edge_bins = list(range(0, 41))
+    for b in edge_bins:
+        active = rng.random(n_frames) < 0.3
+        power_db[active, b] = -40.0
+
+    # Real mid-band hopping cluster: several distinct channels well inside
+    # the guarded region, each on a minority of frames (a hop set, not a
+    # continuous carrier).
+    mid_bins = [500, 540, 580, 620, 660]
+    for b in mid_bins:
+        active = rng.random(n_frames) < 0.3
+        power_db[active, b] = -55.0
+
+    spec = Spectrogram(freqs_hz=freqs, power_db=power_db, sample_rate=fs_hz, hop=fft_size // 2)
+
+    # Sanity: confirm the OLD raw argmax(mean PSD) would indeed have picked
+    # the edge on this synthetic PSD (otherwise this test would not exercise
+    # the regression at all).
+    old_style_bin = int(power_db.mean(axis=0).argmax())
+    assert old_style_bin in edge_bins
+
+    offset_hz, meta = bench._dwell_center_by_occupancy(spec, fs_hz)
+
+    mid_lo_hz, mid_hi_hz = freqs[min(mid_bins)], freqs[max(mid_bins)]
+    assert mid_lo_hz <= offset_hz <= mid_hi_hz, (
+        f"expected a mid-band dwell centre in [{mid_lo_hz}, {mid_hi_hz}] Hz, got {offset_hz} Hz")
+    lo_edge = freqs.min() + bench._DWELL_EDGE_GUARD_HZ
+    hi_edge = freqs.max() - bench._DWELL_EDGE_GUARD_HZ
+    assert lo_edge <= offset_hz <= hi_edge  # never inside the guarded edge band
+    assert meta["method"] == "occupancy_grid"
+    assert meta["occupancy"] > 0.0
 
 
 def test_load_slice_rejects_wrong_sample_count(tmp_path):

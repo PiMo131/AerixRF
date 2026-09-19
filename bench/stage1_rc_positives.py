@@ -57,6 +57,16 @@ ANTSDR_CONTROL_TARGET_WINDOWS = 100
 MAX_RECORDINGS_PER_MODEL = 3
 MAX_SLICES_PER_RECORDING = 10
 
+# Dwell re-centre selection (fix for the C6 bench-only defect, docs/design/
+# stage1-rc-positives-2026-09-19.md sec 3/4 item 6): raw argmax(mean PSD)
+# landed on the extreme band edge (2390.0 MHz, a roll-off artefact) for
+# FLYSKY/FRSKY, so the `dwell` column mostly measured a band edge, not the
+# link. See ``_dwell_center_by_occupancy``.
+_DWELL_WINDOW_HZ = 10.0e6      # width of the emulated dwell window
+_DWELL_EDGE_GUARD_HZ = 5.0e6   # exclude >= this much at both band edges
+_DWELL_DC_GUARD_HZ = 200.0e3   # exclude the DC-bin region from the score
+_DWELL_OCCUPANCY_DB = 6.0      # "above floor" threshold for the occupancy metric
+
 _IQ_STEM_RE = re.compile(r"^pack(\d+)_(\d+)-(\d+)s$")
 
 LEVEL1_LEVEL2_LABELS = (
@@ -131,8 +141,70 @@ def _load_slice(iq_path: Path, expected_samples: int) -> np.ndarray:
     return np.asarray(raw).view(np.complex64)
 
 
+def _dwell_center_by_occupancy(spec, fs_hz: float) -> tuple[float, dict[str, Any]]:
+    """Choose the dwell re-centre offset (baseband Hz) from ``spec``'s own PSD.
+
+    Replaces raw ``argmax(mean PSD)`` (which picked the band edge for two of
+    three inspected RFUAV models -- a roll-off artefact, not the link):
+
+      * a >= ``_DWELL_EDGE_GUARD_HZ`` guard band at both ends of the capture,
+        plus a small guard around the DC bin, is excluded from the score;
+      * every ``_DWELL_WINDOW_HZ``-wide candidate window is scored by
+        OCCUPANCY -- the fraction of (frame, bin) cells above a per-bin
+        robust floor (its own time-median) + ``_DWELL_OCCUPANCY_DB`` -- not
+        raw mean power, so a persistent narrow spur (constant power, zero
+        variance -> zero occupancy against its own median) or a broad but
+        low-duty-cycle roll-off cannot outscore a real hopping cluster once
+        the edge guard also keeps it out of the candidate set.
+
+    Returns ``(chosen baseband offset_hz, selection metadata)``; the metadata
+    is recorded on the bench record for provenance (task item (c)).
+    """
+    freqs = np.asarray(spec.freqs_hz, dtype=np.float64)
+    power_db = spec.power_db
+    n_bins = freqs.size
+    meta_base = {"window_hz": _DWELL_WINDOW_HZ, "edge_guard_hz": _DWELL_EDGE_GUARD_HZ,
+                 "dc_guard_hz": _DWELL_DC_GUARD_HZ}
+    if n_bins < 2 or power_db.shape[0] < 1:
+        return 0.0, {**meta_base, "method": "fallback_degenerate_spectrogram", "occupancy": None}
+
+    bin_hz = float(freqs[1] - freqs[0])
+    floor_db = np.median(power_db, axis=0)
+    occ = (power_db > (floor_db + _DWELL_OCCUPANCY_DB)).mean(axis=0).astype(np.float64)
+    # A spur sitting exactly on the DC bin (LO-leak residual) cannot itself
+    # justify a window's score.
+    occ_scored = np.where(np.abs(freqs) <= _DWELL_DC_GUARD_HZ, 0.0, occ)
+
+    window_bins = max(1, min(n_bins, int(round(_DWELL_WINDOW_HZ / bin_hz))))
+    starts = np.arange(0, n_bins - window_bins + 1)
+    win_lo = freqs[starts]
+    win_hi = freqs[starts + window_bins - 1]
+    lo_edge = freqs.min() + _DWELL_EDGE_GUARD_HZ
+    hi_edge = freqs.max() - _DWELL_EDGE_GUARD_HZ
+    valid = (win_lo >= lo_edge) & (win_hi <= hi_edge)
+
+    csum = np.concatenate(([0.0], np.cumsum(occ_scored)))
+    win_mean_occ = (csum[starts + window_bins] - csum[starts]) / window_bins
+
+    method = "occupancy_grid"
+    if not np.any(valid):
+        # Band too narrow for guard + window (e.g. a short/narrowband dev
+        # capture): fall back to the unguarded candidate set rather than
+        # raising, but flag it so it is visible in the record.
+        valid = np.ones_like(valid, dtype=bool)
+        method = "fallback_guard_too_wide_for_band"
+
+    scored = np.where(valid, win_mean_occ, -np.inf)
+    best = int(np.argmax(scored))
+    center_bin = min(best + window_bins // 2, n_bins - 1)
+    offset_hz = float(freqs[center_bin])
+    return offset_hz, {**meta_base, "method": method, "occupancy": float(win_mean_occ[best]),
+                        "window_bins": window_bins}
+
+
 def _window_record(det, model: str, pack_id: str, slice_name: str, mode: str,
-                    fs_hz: float, center_freq_hz: float) -> dict[str, Any]:
+                    fs_hz: float, center_freq_hz: float,
+                    dwell_select: dict[str, Any] | None = None) -> dict[str, Any]:
     from aerix_rf.detect import raster as raster_mod
 
     rr = raster_mod.analyze_raster(det.events)
@@ -143,6 +215,7 @@ def _window_record(det, model: str, pack_id: str, slice_name: str, mode: str,
         "mode": mode,
         "fs_hz": fs_hz,
         "center_freq_hz": center_freq_hz,
+        "dwell_select": dwell_select,
         "morphology": det.morphology,
         "n_events": len(det.events),
         "burst_count": det.burst_count,
@@ -183,13 +256,13 @@ def _process_one_iq(iq: np.ndarray, fs_hz: float, center_freq_hz: float,
     det_full = energy.detect(spec_full, center_freq_mhz=center_freq_hz / 1e6)
     out.append(_window_record(det_full, model, pack_id, slice_name, "full_band", fs_hz, center_freq_hz))
 
-    # Dwell emulation: re-centre on this window's OWN strongest-activity bin
-    # (a live 12 MHz dwell tuned anywhere in the recording's band would be
-    # centred by its own scan logic, not necessarily at the RFUAV capture's
-    # native centre), then resample down to the 15.36 MS/s canonical rate.
-    psd = spec_full.power_db.mean(axis=0)
-    peak_bin = int(np.argmax(psd))
-    peak_offset_hz = float(spec_full.freqs_hz[peak_bin])
+    # Dwell emulation: re-centre on this window's OWN highest-occupancy 10 MHz
+    # band (a live 12 MHz dwell tuned anywhere in the recording's band would
+    # be centred by its own scan logic, not necessarily at the RFUAV
+    # capture's native centre), then resample down to the 15.36 MS/s
+    # canonical rate. See ``_dwell_center_by_occupancy`` for why this is not
+    # a raw argmax(mean PSD) (that lands on band-edge roll-off artefacts).
+    peak_offset_hz, dwell_select = _dwell_center_by_occupancy(spec_full, fs_hz)
     mixed, _ = resample.mix_and_slice(iq, in_rate_hz=fs_hz, offset_hz=peak_offset_hz)
     chain = resample.plan_chain(fs_hz, out_rate_hz=resample.CANONICAL_RATE_HZ, grade="live")
     dwell_iq = resample.apply_chain(mixed, chain, in_rate_hz=fs_hz)
@@ -197,7 +270,8 @@ def _process_one_iq(iq: np.ndarray, fs_hz: float, center_freq_hz: float,
     spec_dwell = spectrogram.compute(dwell_iq, sample_rate=resample.CANONICAL_RATE_HZ, fft_size=1024)
     det_dwell = energy.detect(spec_dwell, center_freq_mhz=dwell_center_hz / 1e6)
     out.append(_window_record(det_dwell, model, pack_id, slice_name, "dwell",
-                               resample.CANONICAL_RATE_HZ, dwell_center_hz))
+                               resample.CANONICAL_RATE_HZ, dwell_center_hz,
+                               dwell_select=dwell_select))
     return out
 
 
