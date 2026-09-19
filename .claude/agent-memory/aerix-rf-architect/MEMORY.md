@@ -7,3 +7,4 @@
 - [A4 acceptance progress](project_a4_progress.md) — live E200 session+replay works (2026-09-18); DJI CRC decode on ANTSDR still needs a drone powered nearby
 - [No IQ on tmpfs](feedback_no_iq_on_tmpfs.md) — /tmp is 32 GB RAM tmpfs; session roots go on NVMe; no captures during heavy test runs
 - [Benchmark lesson](project_benchmark_lesson.md) — chamber-vs-ambient confound; probe PASS withdrawn; need same-session ON/OFF drone positives + read-back device state
+- [Stage-1 RC lessons](project_stage1_rc_lessons.md) — 2026-09-19: five structural Stage-1 defects found via RFUAV positives; read per-record labels before reporting; fix order C3→C2

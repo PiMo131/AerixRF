@@ -37,7 +37,13 @@ import numpy as np
 
 from aerix_rf.detect.raster import _free_search, _rayleigh_stat  # reuse (T2)
 
-# Board default (freq_min_hz, freq_max_hz, default_num_channels), S1 table.
+# Board default (freq_min_hz, freq_max_hz, default_num_channels).
+# PRIMARY (firmware main.c:322-346, verified 2026-09-19). NOTE: the firmware
+# also has a FREQ_470 board (470-471 MHz, N=10) that is missing here.
+# Also unmodelled: the firmware places channel 0 at
+# freq_min + spacing/2 + netid_offset, netid_offset in [0, spacing) when N > 5
+# (main.c:420-428) -- so the recovered raster PHASE is NETID-dependent and must
+# not be compared against a band-edge-derived phase. See the brief.
 # Keyed by the CLI/pipeline band token (aerix_rf.scan.bands presets
 # "sik915"/"sik868"/"sik433"); bare region digits are accepted as aliases.
 BAND_LIMITS_HZ: Dict[str, Tuple[float, float, int]] = {
@@ -47,8 +53,13 @@ BAND_LIMITS_HZ: Dict[str, Tuple[float, float, int]] = {
 }
 _BAND_ALIASES: Dict[str, str] = {"915": "sik915", "868": "sik868", "433": "sik433"}
 
-MAX_FREQ_CHANNELS = 50           # firmware MAX_FREQ_CHANNELS (S1)
-HOP_STEP_QUANT_HZ = 10e3         # scale_uint32(spacing, 10000) register unit (S1 caveat, INFERRED)
+MAX_FREQ_CHANNELS = 50           # PRIMARY: freq_hopping.h:37 (and main.c:371 clamps N to 1..50)
+HOP_STEP_QUANT_HZ = 10e3         # scale_uint32(spacing, 10000) register unit -- PRIMARY (firmware):
+                                 # radio_443x.c:614-626 writes spacing/10 kHz to the 8-bit
+                                 # FREQUENCY_HOPPING_STEP_SIZE register (hence the 2.55 MHz guard).
+                                 # Firmware floors (fmax-fmin)/(N+2) to integer Hz FIRST, then rounds
+                                 # half-UP; _nominal_spacing_hz() below uses float + banker's round(),
+                                 # which differs on exact .5-register ties. See the brief.
 
 # Free-spacing search range: below the narrowest board's floor (N=50 on the
 # 433 band would be an absurdly dense hop set, but keep headroom) and above
@@ -77,9 +88,10 @@ def _band_limits(band: str) -> Tuple[float, float, int]:
 
 
 def _nominal_spacing_hz(freq_min_hz: float, freq_max_hz: float, n_channels: int) -> float:
-    """``(freq_max-freq_min)/(N+2)`` (S1), rounded to the 10 kHz hop-step
-    register unit (S1 caveat -- exact multiple at 915/50ch, quantised
-    elsewhere)."""
+    """``(freq_max-freq_min)/(N+2)``, rounded to the 10 kHz hop-step register
+    unit. PRIMARY (firmware main.c:417, radio_443x.c:624). Caveat: the
+    firmware floors the division to integer Hz and then rounds half-up; this
+    uses float division + banker's ``round()``."""
     raw = (freq_max_hz - freq_min_hz) / (n_channels + 2)
     return round(raw / HOP_STEP_QUANT_HZ) * HOP_STEP_QUANT_HZ
 
@@ -268,9 +280,34 @@ def hop_map(netid: int, n_channels: int) -> List[int]:
     Durstenfeld Fisher-Yates shuffle driven by the LCG
     ``r_next = r_next*1103515245 + 12345`` (32-bit wraparound), draw
     ``(r_next >> 16) & 0x7FFF`` per step, seeded ``r_next = netid``
-    (``r_srand(netid)``). Task-spec formula; single-radio reference
-    implementation, used both to generate synthetic test hop sequences and
-    by :func:`netid_candidates_from_sequence`'s brute force."""
+    (``r_srand(netid)``). Used both to generate synthetic test hop sequences
+    and by :func:`netid_candidates_from_sequence`'s brute force.
+
+    .. warning::
+       **PROVENANCE: WRONG (task-spec formula, contradicted by the firmware).**
+       Verified 2026-09-19 against the upstream ``ArduPilot/SiK`` master C
+       source -- see ``research/briefs/sik-freq-hopping-firmware.md``.
+       ``Firmware/radio/freq_hopping.c:84-93`` uses the *naive* benpfaff
+       shuffle, not Durstenfeld Fisher-Yates:
+
+       * loop is ASCENDING ``i = 0 .. n-2`` (here: descending ``n-1 .. 1``);
+       * ``j = ((uint8_t)r_rand()) % n`` -- modulo ``n``, the whole array
+         (here: ``% (i+1)``);
+       * the draw is TRUNCATED TO 8 BITS by the ``(uint8_t)`` cast, i.e.
+         ``(r_next >> 16) & 0xFF`` (here: 15-bit ``& 0x7FFF``);
+       * the seed is NETID only on unencrypted links -- with ``ENCRYPTION``
+         set, ``shuffleRand()`` (``freq_hopping.c:95-104``) seeds with
+         ``crc16(32, encryption_key)`` instead, so NETID brute force is
+         invalid there by construction.
+
+       The LCG constants below ARE correct. The resulting permutations agree
+       with the firmware only at chance level (1-3 of N positions for NETID
+       25/1/4242 at N=10/50), so any NETID reported today is meaningless and
+       every synthetic hop fixture built from this function is not SiK-like.
+       Fixing this (and the vectorised twin below) is a builder task; the
+       brief carries a drop-in Python transcription and a reference vector
+       (``hop_map(25, 10) == [0, 9, 5, 2, 6, 7, 4, 3, 8, 1]``). Do not treat
+       this function as decode evidence until then."""
     state = int(netid) & _LCG_MASK
     m = list(range(n_channels))
     for i in range(n_channels - 1, 0, -1):
@@ -284,7 +321,11 @@ def hop_map(netid: int, n_channels: int) -> List[int]:
 @lru_cache(maxsize=8)
 def _hop_maps_all_netids(n_channels: int) -> np.ndarray:
     """Vectorised :func:`hop_map` for all 65536 NETIDs at once: shape
-    ``[65536, n_channels]``. The Fisher-Yates recursion is inherently
+    ``[65536, n_channels]``. **Inherits :func:`hop_map`'s WRONG provenance**
+    (task-spec Fisher-Yates, contradicted by ``Firmware/radio/freq_hopping.c``
+    -- see the warning on :func:`hop_map` and
+    ``research/briefs/sik-freq-hopping-firmware.md``); must be re-derived with
+    the firmware's ascending ``j = draw % n`` / 8-bit-draw shuffle. The Fisher-Yates recursion is inherently
     sequential in ``i``, but independent *across* NETIDs, so each of the
     (at most 49) steps is one O(65536) numpy update rather than a Python
     loop -- this is what makes the brute force "cheap" (module docstring)."""

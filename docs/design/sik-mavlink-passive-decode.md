@@ -177,3 +177,16 @@ classification remain available with the flag off. Video/content payloads over M
   false-positive rate is untested; (2) thresholds (5 frames / 3 channels / 5 bursts) are design-derived, not
   validated against a real 64 kbps SiK link; (3) everything is level-1 synthetic self-consistency until a real SiK
   recording exists.
+
+## Independent review (test-reviewer, 2026-09-19, part B) — PASS WITH CONDITIONS
+
+- Provenance: sync word 0x2DD4 (Si4432 POR default, AN440), hardware CRC-16/ARC and SiK software CRC (`crc.c`),
+  Golay(23,12) tables (regex-extracted from `Firmware/radio/golay23.h`) are traceable to firmware/datasheet.
+  **The hop-map LCG in `raster.py` (`_LCG_A/_LCG_C`, Fisher-Yates seeded by NETID) is NOT sourced — it is a
+  task-spec formula.** NETID recovery is therefore self-consistency only until verified against `fhop_init()`
+  in the local SiK firmware (`research/library/…/ArduPilot_SiK_master.zip`) — verification delegated 2026-09-19.
+- Golay: 2000/2000 random 1–3-bit error blocks corrected; 4-bit errors spread over the 48-bit block → 10 % silent
+  mis-decodes (single-codeword-confined 4-bit case not run; expected ~100 % mis-correct — CRC is the guard).
+- Robustness (`decode_sik_window`, fixture): pure noise ×3 seeds → 0 bursts, 0 CRC-valid frames; CFO ±20 kHz and
+  rate ±2 % → 40/40 CRC-valid, NETID 25, unchanged. No breaking point located (larger sweep not run).
+- Gap: no wideband OFDM/Wi-Fi waveform simulator in the repo → false-CRC-under-wideband-interferer untested.
