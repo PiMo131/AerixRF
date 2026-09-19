@@ -1,7 +1,7 @@
 # AERIX RF — Project Status (living document)
 
 *Maintained by the architect session; updated with every commit that changes scope, plan or evidence.
-Last update: 2026-09-19 (late). Audience: technical manager. One page; details link to the repo.*
+Last update: 2026-09-19 (evening). Audience: technical manager. One page; details link to the repo.*
 
 ## 1. Scope — what AERIX RF is (and is not)
 
@@ -37,10 +37,16 @@ A stage-1 candidate is never reported as a confirmed drone.
 - **B/C. Datasets** — download all accessible public RF/UAV datasets, catalogue them, review usefulness ✅
   (ongoing for gated sets). RFUAV corpus (109 GB, 349 recordings / 37 models incl. 31 RC transmitters) fully
   local; adapter handles XML-less recordings and short tail slices; full `prepare` at the canonical
-  15.36 MS/s is running (~240/349 at time of writing). Next: retrain `features_v2` / rerun the benchmark
-  with real RC + DJI positives.
+  15.36 MS/s is **complete** (2026-09-19 evening: 349/349 recordings, 1.4 GB tensors; manifest updated).
+  `features_v2` has been retrained on the RFUAV positives (§D).
 - **D. Normalisation + benchmark** — one canonical representation for live and training data,
   leakage-safe splits, receiver-confound controls ✅ built; first honest results in ✅.
+  **Update (2026-09-19 evening):** `features_v2` retrained on the 349 RFUAV positives vs. 449 ANTSDR
+  ambient negatives; receiver-ID probe **CONDITIONAL** (balanced accuracy 0.647 — part of the class
+  separation is receiver fingerprint, not signal content); cross-receiver holdout recall 0.875 (14/16)
+  on the Zenodo set. Tier D receiver-state confound unchanged. Evidence level 2 at best; the blocking
+  need is unchanged — drone positives captured on our own E200 (`docs/field/positives-protocol.md`).
+  Doc: `docs/design/features-and-benchmark.md` §6.
 - **E. Research corpus** — 1,113 unique local sources indexed with evidence grades ✅.
 - **F. Positives campaign** — capture real aircraft (O2 for decode; O3/O4 for detection) on the E200 with
   an operator timeline (`docs/field/positives-protocol.md`) ⏳ next.
@@ -69,10 +75,20 @@ A stage-1 candidate is never reported as a confirmed drone.
   actually a time cut; unbounded cluster chaining; single-look floor over-estimating bandwidth 15–50×; grid
   test resolution-starved at 100 MS/s). C1–C3 fixed and committed (`41a1787`) after independent review caught
   two further defects (merge cap splitting wideband bursts; `frame_dt_s` not forwarded on the session path);
-  ambient false-alarm rate after the fix: `hopping` 11/1160 (0.95 %), level-2 = 0. C4/C5 spec in progress; the
-  RC-positives bench rerun is in progress. Evidence: level 1–2 on a third-party X310 capture in a crowded
-  band; same-receiver single-TX captures on the E200 are the conversion path to level 5. Doc:
-  `docs/design/stage1-rc-positives-2026-09-19.md`.
+  ambient false-alarm rate after the fix: `hopping` 11/1160 (0.95 %), level-2 = 0.
+  **Update (2026-09-19 evening):** C5 (grid-resolution guard) committed (`7affe10`) — a `GRID_RESOLUTION_LIMITED`
+  tag withholds level-2 grid labels when bin pitch > Δ/20 (G1) or burst width < 8 bins (G2); ambient
+  false-alarm rate unchanged (`hopping` 11/1160 = 0.95 %, level-2 0). RC-positives bench v3 (dwell /
+  full_band / full_band_4096 windows, 2 models): level-1 still fires on 30/31 transmitters; the first
+  1 MHz-grid hits appear (5 windows, 2 models), all in the new 24.4 kHz-bin (`full_band_4096`) column,
+  which is tagged `GRID_RESOLUTION_LIMITED` on 214/214 rows; ambient control 0/100. C4 (per-bin floor /
+  P_fa thresholds / Welch looks) is **parked on `wip/stage1-c4`**, not on `main`: 710 tests pass and
+  independent review was PASS-with-conditions, but the ambient hopping false-alarm rate rose from
+  0.95 % to 17.2 % — a regression the FA bench catches — so it was held back; `rf-dsp-specialist` is
+  diagnosing (skirt fragments / Wi-Fi discounts vs. corrected bandwidths). Lesson recorded: detector-threshold
+  changes must pass the ambient FA bench before merge. Evidence: level 1–2 on a third-party X310 capture in a
+  crowded band; same-receiver single-TX captures on the E200 are the conversion path to level 5. Docs:
+  `docs/design/stage1-rc-positives-2026-09-19.md` (bench v3 is the final section).
 - **Server integration** — after F.
 
 ## 4. Progress to date (what is actually proven)
@@ -105,8 +121,15 @@ catch was a hop-map PRNG that did not match the firmware, fixed by transcribing 
 verified 410/410 against an independently compiled C rig. Evidence level 1 (synthetic) throughout; a real
 SiK recording is the conversion path to level 3/4. Stage-1's RC-positives bench (§3.H) found five structural
 defects in the burst/period/cluster/bandwidth/grid tests; three are fixed and committed, cutting ambient
-false alarms to `hopping` 11/1160 (0.95 %) and level-2 grid to 0; C4/C5 and the RC-positives rerun are in
-progress.
+false alarms to `hopping` 11/1160 (0.95 %) and level-2 grid to 0. **Update (2026-09-19 evening):** C5 (grid-
+resolution guard) is also committed — ambient FA unchanged, and the RC-positives bench v3 shows the first
+1 MHz-grid hits (5 windows, 2 models), correctly withheld as `GRID_RESOLUTION_LIMITED` at the 24.4 kHz-bin
+resolution. C4 (threshold/floor rework) is parked on `wip/stage1-c4`: it passed its own tests and
+independent review but regressed the ambient FA bench (0.95 % → 17.2 %), so it stays off `main` pending
+diagnosis. RFUAV `prepare` finished (349/349 recordings, 1.4 GB tensors) and `features_v2` was retrained
+on it vs. ANTSDR ambient negatives; the receiver-ID confound probe is CONDITIONAL (balanced accuracy
+0.647) and cross-receiver holdout recall is 0.875 (14/16, Zenodo) — level 2 at best, same blocking need
+(same-receiver positives).
 
 **Synthetic-only (level 1–2) so far:** decoder sensitivity knee (≈3 dB in-band) and its robustness to
 strong adjacent emitters; the classifier feature set's device-invariance properties.
@@ -128,8 +151,14 @@ positives campaign is the next step, not more training.
 | Benchmark honesty | no detection-probability or cross-receiver claim yet; receiver-ID probe is a mandatory control | first results §5 of the design doc |
 | SiK hop-map | firmware algorithm transcribed from `freq_hopping.c`; naive shuffle, 8-bit draw mod n, 16-bit seed; NETID → seed only on unencrypted links | verified 410/410 vs independently compiled C rig |
 | Stage-1 RC-positives | five structural defects found (period test, event cap, cluster chaining, bandwidth floor, grid resolution); C1–C3 fixed | `bench/stage1_rc_positives.py`, independent review |
+| Stage-1 C5 grid guard | `GRID_RESOLUTION_LIMITED` tag withholds level-2 grid labels when bin pitch > Δ/20 or bursts < 8 bins; ambient FA unchanged; first 1 MHz-grid hits (bench v3) correctly flagged | commit `7affe10`; ambient 11/1160 (0.95 %), level-2 0; bench v3 214/214 flagged |
+| Stage-1 C4 threshold rework | PARKED on `wip/stage1-c4` — passes own tests + review, but ambient hopping FA rose 0.95 % → 17.2 %; not merged | 710 tests, independent review PASS-with-conditions; ambient FA bench regression |
+| Classifier features_v2 (RFUAV) | retrained on 349 RFUAV positives vs. 449 ANTSDR ambient negatives; receiver-ID confound CONDITIONAL | balanced acc. 0.647 (receiver-ID probe); cross-receiver holdout recall 0.875 (14/16, Zenodo) |
 
 ## 6. Open items, risks, needs
+
+*2026-09-19 evening: no new open decisions for the user. The E200 field items below (sysctl soak, Avata
+O3+ decode test, positives campaign, SiK radio recording) remain the highest-value inputs.*
 
 **Needs from the team**
 - First campaign measurement: the **Avata (O3) plaintext-decode test** (available). For a guaranteed O2
@@ -162,4 +191,5 @@ positives campaign is the next step, not more training.
 `README.md` (status log) · `AERIX_RF_ANTSDR_PROJECT.md` (plan, §0 decisions/questions) ·
 `docs/design/*.md` (architecture memos) · `research/briefs/*.md` (evidence briefs) ·
 `docs/BACKLOG.md` (engineering backlog) · `docs/field/positives-protocol.md` (campaign checklist).
-Tests: 699 collected (incl. 197 SiK, 46 Stage-1, 8 OFDM/BLE negative-control). Commits on `main`: 45+ since the pivot.
+Tests: 705 collected (incl. 197 SiK, 52 Stage-1, 8 OFDM/BLE negative-control) on `main`; a further 710
+on the parked `wip/stage1-c4` branch (not merged). Commits on `main`: 46+ since the pivot.
