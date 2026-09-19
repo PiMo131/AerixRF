@@ -74,6 +74,26 @@ CLUSTER_GRID_MERGE_CAP_HZ = 333e3  # C3b fix (docs/design/stage1-c4-c5-spec.md
                                     # step even in the worst case (two bursts
                                     # sitting right at the inner edges of
                                     # adjacent channels).
+FRAGMENT_MAX_BW_HZ = 300e3        # FA fix 2026-09-19 (docs/design/
+                                    # stage1-c4-c5-spec.md "S FA regression
+                                    # 2026-09-19"): an event that is BOTH
+                                    # ``bw_noise_limited`` (its -6 dB edge walk
+                                    # was stopped by the noise limit, so its
+                                    # bandwidth and its -6 dB-midpoint centre
+                                    # are threshold artefacts) AND narrower
+                                    # than the detector's own frequency
+                                    # resolution (``energy._T1_FREQ_SMOOTH_HZ``,
+                                    # the 300 kHz T1 smoothing boxcar) is an
+                                    # UNRESOLVED FRAGMENT -- usually a skirt or
+                                    # speckle piece of a wideband occupant. No
+                                    # real component can measure narrower than
+                                    # the smoothing kernel that produced it, so
+                                    # such an event is not a channel and must
+                                    # not vote in channel/hop-set reasoning.
+                                    # Configurable: must track the front-end's
+                                    # frequency smoothing.
+
+
 CLUSTER_MAX_SPAN_HZ = 5.0e6       # a cluster may not grow past this centre-
                                     # to-centre span regardless of how many
                                     # consecutive pairwise gaps stay under
@@ -340,7 +360,11 @@ def cluster_centres(events: list[BurstEvent], tol_hz: float = DEFAULT_CLUSTER_TO
     the bandwidth-scaled floor stops one wide, shape-varying emitter's -6 dB
     edge jitter from being split into a fake multi-channel hop set. Events
     with ``edge_clipped`` set are excluded (their centre estimate is
-    dwell-edge-biased, not a real channel estimate).
+    dwell-edge-biased, not a real channel estimate), and so are unresolved
+    fragments (``is_unresolved_fragment``; FA fix 2026-09-19): their -6 dB
+    midpoint is a threshold artefact that moves between bursts, so repeated
+    fragments of ONE wideband occupant otherwise scatter into many apparent
+    narrow "channels" and synthesise a hop set.
 
     C3 fix (docs/design/stage1-rc-positives-2026-09-19.md S3/S4): unbounded
     single-linkage chaining. Two independent bounds are applied on top of the
@@ -374,7 +398,11 @@ def cluster_centres(events: list[BurstEvent], tol_hz: float = DEFAULT_CLUSTER_TO
         # ceiling computed once here (rather than re-derived per pair) gives
         # the same result.
         max_merge_hz = max(CLUSTER_MAX_MERGE_HZ, bw_separation_frac * HOP_MAX_CLUSTER_BW_HZ)
-    usable = sorted((e for e in events if not e.edge_clipped), key=lambda e: e.centre_hz)
+    spans = wideband_occupancy_spans(events)
+    usable = sorted((e for e in events
+                     if not e.edge_clipped and not is_unresolved_fragment(e)
+                     and not is_occupancy_masked(e, spans)),
+                    key=lambda e: e.centre_hz)
     clusters: list[Cluster] = []
     current: list[BurstEvent] = []
     for e in usable:
@@ -427,6 +455,108 @@ def _make_cluster(evs: list[BurstEvent]) -> Cluster:
         bw_hz=float(np.median(bws)),
         events=list(evs),
     )
+
+
+WIDEBAND_SPAN_MIN_BW_HZ = 2.5e6     # an event at/above this -6 dB width anchors a
+                                    # WIDEBAND OCCUPANCY SPAN (see
+                                    # ``wideband_occupancy_spans``). Half of
+                                    # ``WIFI_WIDEBAND_MIN_BW_HZ``: after the C4
+                                    # per-bin floor a 20 MHz Wi-Fi channel is
+                                    # reported as several 4-6 MHz pieces, never
+                                    # as one 20 MHz event, so the anchor has to
+                                    # sit below the true channel width.
+WIDEBAND_SPAN_WIDTH_RATIO = 4.0   # a narrow event is masked only by a span at
+                                    # least this many times wider than itself.
+
+
+def wideband_occupancy_spans(events: list[BurstEvent],
+                              min_bw_hz: float = WIDEBAND_SPAN_MIN_BW_HZ,
+                              ) -> list[tuple[float, float]]:
+    """Merged frequency intervals occupied by wideband emissions in this
+    window (FA fix 2026-09-19).
+
+    Built from the -6 dB intervals of every event at/above ``min_bw_hz``,
+    unioned where they overlap. Time overlap is deliberately NOT required:
+    the occupancy this models (a Wi-Fi/video channel) is quasi-continuous
+    over the dwell but is reported as a train of short pieces, so requiring
+    co-temporality with any individual piece would mask almost nothing (on
+    the ANTSDR ambient corpus a per-event concurrency+containment test caught
+    6 of 1008 hop-set member events; the merged-span form catches the
+    Wi-Fi-interior clusters the per-event form misses).
+    """
+    ivals = sorted((e.centre_hz - 0.5 * e.bw_6db_hz, e.centre_hz + 0.5 * e.bw_6db_hz)
+                   for e in events if e.bw_6db_hz >= min_bw_hz)
+    spans: list[tuple[float, float]] = []
+    for lo, hi in ivals:
+        if spans and lo <= spans[-1][1]:
+            spans[-1] = (spans[-1][0], max(spans[-1][1], hi))
+        else:
+            spans.append((lo, hi))
+    return spans
+
+
+def is_occupancy_masked(event: BurstEvent, spans: list[tuple[float, float]],
+                         width_ratio: float = WIDEBAND_SPAN_WIDTH_RATIO) -> bool:
+    """True when ``event``'s centre lies inside a wideband occupancy span at
+    least ``width_ratio`` times wider than the event itself (FA fix
+    2026-09-19).
+
+    Rationale: with the C4 per-bin noise floor the floor INSIDE a continuously
+    occupied band tracks the occupant's own PSD, so the occupant no longer
+    surfaces as one >8 MHz event but as a shifting set of 0.3-1.2 MHz local
+    maxima -- OFDM spectral ripple and modulation speckle -- whose -6 dB
+    midpoints land on several distinct centres and repeat over the dwell.
+    That is exactly the signature ``fixed_vs_hopping`` reads as a hop set, and
+    it produced 199/1160 ambient ``hopping_candidate`` windows. A narrow
+    component sitting inside a much wider concurrent occupancy is not
+    evidence of an independent channel.
+
+    Evidence level: this is MASKING, not rejection of the hypothesis. A real
+    hopper transmitting inside an occupied Wi-Fi channel is masked here; the
+    ``wifi_like_wideband`` note already states that an absent hopping label
+    under wideband occupancy means "masked/insufficient", not "no hopper".
+    Multi-dwell accumulation on a less occupied centre is the remedy.
+    """
+    bw = max(event.bw_6db_hz, 0.0)
+    for lo, hi in spans:
+        if lo <= event.centre_hz <= hi and (hi - lo) >= width_ratio * bw:
+            return True
+    return False
+
+
+def is_unresolved_fragment(event: BurstEvent,
+                            max_bw_hz: float | None = None) -> bool:
+    """True when ``event``'s bandwidth and centre are detector artefacts
+    rather than measurements (FA fix 2026-09-19, see
+    ``docs/design/stage1-c4-c5-spec.md``).
+
+    Two conditions must hold together:
+
+    * ``bw_noise_limited`` -- at least one -6 dB edge walk terminated on the
+      per-bin noise limit instead of on the -6 dB level, i.e. the peak is less
+      than ``bursts.EDGE_DB`` above the component's own hold threshold. The
+      returned edge is then wherever the threshold happened to cut the noise,
+      and the midpoint of two such edges is not a channel centre.
+    * ``bw_6db_hz < FRAGMENT_MAX_BW_HZ`` -- the reported width is below the
+      detector's own frequency resolution, which is impossible for a real
+      component: the T1 path smooths with a 300 kHz boxcar, so even a 250 kHz
+      RC hop channel measures WIDER than the kernel, never narrower.
+
+    The conjunction matters. ``bw_noise_limited`` alone is far too broad
+    (72 % of events on the ANTSDR ambient corpus: every weak-but-real burst
+    whose peak sits under ~10 dB over its floor is flagged, genuine hop
+    bursts included), while a width test alone would discard narrow bursts
+    that really were resolved. Together they select exactly the events for
+    which the detector holds no evidence of a channel at all.
+
+    Evidence level: this is a level-1 measurement-validity gate, not a
+    classification. A rejected event is "no channel measured here", never
+    "no emitter here".
+    """
+    if max_bw_hz is None:
+        max_bw_hz = FRAGMENT_MAX_BW_HZ
+    return bool(getattr(event, "bw_noise_limited", False)
+                and event.bw_6db_hz < max_bw_hz)
 
 
 def _repeat_clusters(clusters: list[Cluster]) -> list[Cluster]:
@@ -740,9 +870,16 @@ def _wideband_events(events: list[BurstEvent]) -> list[BurstEvent]:
     """Events too wide to be any channel this module models (Wi-Fi/OFDM
     occupants). Includes frequency-edge-clipped events: in a 10 MHz usable
     dwell a 20 MHz Wi-Fi burst is clipped by construction, and its measured
-    ``bw_6db_hz`` is a lower bound (the dwell width), not the true bandwidth."""
+    ``bw_6db_hz`` is a lower bound (the dwell width), not the true bandwidth.
+
+    Unresolved fragments (``is_unresolved_fragment``) are excluded even when
+    frequency-clipped: a fragment whose -6 dB level lies under its own hold
+    threshold carries no evidence about occupancy width in either
+    direction, and at a band edge such fragments are numerous.
+    """
     return [e for e in events
-            if e.bw_6db_hz >= WIFI_WIDEBAND_MIN_BW_HZ or e.edge_clipped]
+            if e.bw_6db_hz >= WIFI_WIDEBAND_MIN_BW_HZ
+            or (e.edge_clipped and not is_unresolved_fragment(e))]
 
 
 def _wideband_groups(events: list[BurstEvent]) -> list[list[BurstEvent]]:

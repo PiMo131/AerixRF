@@ -409,3 +409,191 @@ re-specified in Hz/MHz-per-MHz terms first.
   causes change the armed-pixel rate, and R3 raises sensitivity on occupied bins).
 * Acceptance items 1 (RFUAV bandwidth truth, 3 slices), 2 (cluster counts 19-75) and
   3 (ambient FA) are not verified here — no bench was run.
+
+## § FA regression 2026-09-19
+
+Observed on `wip/stage1-c4` against the ANTSDR ambient corpus
+(`bench/out/stage1_fa_budget_after_c4_v2.{md,json}`, 1160 windows, 6 sessions):
+
+| label/tag | main | wip/stage1-c4 (after C4 reconcile) |
+|---|---|---|
+| `hopping_candidate` | 11 / 1160 (0.95 %) | **199 / 1160 (17.2 %)** |
+| `fixed_channel_burst_candidate` | 205 | **0** |
+| `wifi_beacon_like` | 6 | **0** |
+| level-2 labels | 0 | 0 |
+
+The pre-reconcile snapshot (`after_c4.json`) had 46/1160, so the reject-to-reference
+clamp change of the C4 reconciliation is inside the causal chain, not incidental.
+
+### Root cause (single mechanism, three symptoms)
+
+The three numbers above are **one** failure, not three. The corrected per-bin floor
+(`perbin_noise_floor_lin`, reject-to-reference clamp) raises the floor estimate
+*inside* bins occupied for more than 75 % of the window — exactly the continuous
+Wi-Fi / video occupants that dominate ambient 2.4 GHz. Those bins' own Q25 sits on
+the signal; when the bin survives the ±`FLOOR_CLAMP_DB` test its floor is the
+signal, and when it is rejected it is pulled to `F_ref`. Either way the *hold*
+threshold `floor_db + hysteresis` inside the occupant is much closer to the
+occupant's own PSD than it was on main.
+
+`_edge_cross` walks out from the component peak to the −6 dB level but stops early
+on `stop_db = floor_db + hysteresis_db`. When the peak is less than `EDGE_DB` above
+its own hold threshold, the walk terminates within a bin or two of the peak and
+returns a **noise-limited** edge. Consequences:
+
+1. `bw_6db_hz` collapses from the occupant's true 16–20 MHz to sub-bin values.
+   With the T1 300 kHz frequency-smoothing boxcar in `energy.detect` no real
+   component can measure 6–60 kHz: such widths are threshold artefacts.
+2. `centre_hz`, being the midpoint of those two artefact edges, is an artefact
+   too — it is wherever the threshold happened to cut the noise skirt, and it
+   *moves between bursts*, so repeated fragments of ONE occupant scatter across
+   many apparent narrow "channels".
+3. The discounts are keyed on the bandwidths that just collapsed:
+   `WIFI_WIDEBAND_MIN_BW_HZ = 8 MHz` (`_wideband_events` → `wifi_like_wideband`)
+   and `WIFI_BEACON_MIN_BW_HZ = 16 MHz` (`_wifi_beacon_like`). Both stop firing →
+   `wifi_beacon_like` 6 → 0, and the R5 level-2 suppression path goes dead.
+4. `fixed_vs_hopping` sees the occupant no longer as one wide cluster
+   (`fixed_channel_burst_candidate`, 205 → 0) but as ≥ `HOPPING_MIN_M_REPEAT`
+   narrow (≤ `HOP_MAX_CLUSTER_BW_HZ`) repeat clusters with a whitened lag-1
+   centre autocorrelation — the literal definition of `hopping_candidate`.
+
+So hypothesis (c) (discounts disabled by corrected bandwidths) and hypothesis (a)
+(skirt fragments forming ≥ 5-revisit narrow channels) are the *same* mechanism seen
+from the discount side and the hop side. (b) and (d) are downstream amplifiers, not
+causes.
+
+### Evidence level
+
+This is a level-1 morphology defect. No level-2 label was ever emitted, on either
+branch; the regression is that a stage-1 *channel-use* label was produced from
+bandwidth/centre numbers that the detector had no resolution to support.
+
+### Fix layer
+
+The right layer is the **event**, not the rule thresholds. Re-deriving
+`WIFI_WIDEBAND_MIN_BW_HZ` / `WIFI_BEACON_MIN_BW_HZ` downwards would be fitting the
+discounts to a corrupted measurement and would make them fire on genuinely narrow
+emitters. Instead `_channelise` now marks `BurstEvent.bw_noise_limited` when either
+−6 dB edge walk was stopped by the noise limit, and consumers refuse to treat such
+an event as a resolved channel:
+
+* `cluster_centres` excludes `bw_noise_limited` events (as it already excludes
+  `edge_clipped` ones) — they carry no usable centre;
+* `_wideband_events` excludes them from the `edge_clipped` branch — a fragment at
+  a band edge carries no evidence about occupancy width either.
+
+`bw_noise_limited` is strictly narrower than, and supersedes, the R5 cadence
+suppression added as a stopgap: it acts on the measurement that is invalid rather
+than on the conclusion.
+
+### Measurement (ANTSDR ambient, 40-window probe + full 1160-window bench)
+
+| quantity | value |
+|---|---|
+| events flagged `bw_noise_limited` | 7404 / 10240 = **72 %** |
+| events with `bw_6db_hz` < 2 FFT bins (30 kHz) | 17 % |
+| `bw_6db_hz` in bins, p10/p50/p90 | 0.5 / 8.6 / 111 |
+| events per window | **256 = the strongest-N cap, saturated in every window** |
+
+`bw_noise_limited` alone is therefore NOT a usable exclusion key: at 72 % it
+would discard every weak-but-real burst (any component whose peak sits under
+`EDGE_DB + hold_db` ~ 10 dB over its floor), RC hop bursts included. It is used
+only in conjunction with a resolution test — see `is_unresolved_fragment`.
+
+The first probe measured the intended fix, plus two variants, on 40 ambient
+windows (first 8 of each session — a deliberately dense subsample):
+
+| rule | `hopping_candidate` / 40 |
+|---|---|
+| none (branch as found) | 29 |
+| `bw_noise_limited` only | 11 |
+| `bw_noise_limited` AND bw < 30 kHz (2 bins) | 12 |
+| `bw_noise_limited` AND bw < 300 kHz (T1 kernel) | 13 |
+| + wideband occupancy mask | **3** |
+
+### Second mechanism: occupancy interior speckle (the larger half)
+
+The fragment rule alone left 13/40. Inspecting the survivors showed they are
+**not** sub-bin fragments: the repeat clusters are 0.3–1.2 MHz wide with peaks
+3–42 dB over floor, at stable distinct centres (e.g. 2431.4 / 2432.1 / 2434.7 /
+2439.1 / 2442.0 MHz), all inside the frequency span covered by 4–6 MHz wide
+events. This is the same per-bin-floor mechanism acting one level up: inside a
+continuously occupied band the floor tracks the occupant's own PSD, so a 20 MHz
+Wi-Fi channel never surfaces as one >8 MHz event but as a shifting set of local
+maxima — OFDM spectral ripple and modulation speckle — each individually well
+above *its own* local floor. Their −6 dB midpoints are genuinely distinct and
+they repeat over the dwell: `fixed_vs_hopping`'s definition of a hop set.
+
+The architect's proposed per-event form of the rule ("narrow AND concurrent with
+a ≥4× wider event") was measured and is too weak: it caught **6 of 1008** hop-set
+member events, because the occupant's pieces are individually short and only
+4–6 MHz wide. The working form drops the co-temporality requirement and unions
+the wide events into occupancy **spans** first (`wideband_occupancy_spans`,
+`is_occupancy_masked`): a narrow event whose centre lies inside a merged span at
+least `WIDEBAND_SPAN_WIDTH_RATIO` (4×) wider than itself is a piece of that
+occupancy, not a channel. `WIDEBAND_SPAN_MIN_BW_HZ` is set to
+`HOP_MAX_CLUSTER_BW_HZ` (2.5 MHz) — "wider than any channel this module models"
+— because the occupant's *pieces*, not the occupant, are what the detector
+reports: an anchor at 4 MHz left 30/1160, at 2.5 MHz it leaves 16/1160.
+
+This is **masking**, not rejection: a real hopper transmitting inside an occupied
+Wi-Fi channel is masked. That is already the documented meaning of the
+`wifi_like_wideband` note ("masked/insufficient, not 'no hopper'"), and the
+remedy is multi-dwell accumulation on a less occupied centre.
+
+### Result
+
+`bench/out/stage1_fa_budget_c4_fix.{md,json}`, same 1160 ambient windows:
+
+| label | main | branch (before fix) | branch (after fix) |
+|---|---|---|---|
+| `hopping_candidate` | 11 (0.95 %) | 199 (17.2 %) | **16 (1.38 %)** |
+| `fixed_channel_burst_candidate` | 205 | 0 | 164 |
+| level-2 labels (`fhss_*`, `rc_link_family`, `droneid_cadence`) | 0 | 0 | **0** |
+
+Budget verdict PASS on every line. Branch tests green (59 passed:
+`test_stage1_c4`, `test_detect_bursts`, `test_detect_raster`, `test_detect`,
+`test_stage1_rc_positives`, `test_pipeline_cadence_store`) — in particular the
+RC-positive fixtures still detect, so the occupancy mask is not eating genuine
+hop sets in those captures.
+
+The R5 cadence suppression was NOT removed: the only R5 suppression in the module
+(`wifi_beacon_like`/`ble_connection_like` → drop level-2 family labels) predates
+this branch, acts on cadence rather than on bandwidth, and is orthogonal to the
+fragment/occupancy rules. There is no branch-local cadence stopgap to retire.
+
+### Cost (reviewer condition)
+
+`energy.detect`, 1 s window at 12.288 MS/s (4000 x 1024 frames), median of 5,
+idle box:
+
+| path | median |
+|---|---|
+| `spectrogram.compute` (prerequisite) | 63.9 ms |
+| `energy.detect` **without** `iq=` | 168.9 ms |
+| `energy.detect` **with** `iq=` (multi-look, `max_looks`) | 320.1 ms |
+
+The multi-look path costs +151 ms, i.e. ~1.9x the detector, ~0.38 s of CPU per
+second of capture including the spectrogram. Single-threaded real-time still
+holds with margin on both paths, but the `iq=` path should stay opt-in per
+receiver profile. Note the FA residual is concentrated in the NON-`iq=`
+(single-look) sessions: 14 of the 16 remaining ambient `hopping_candidate`
+windows come from sessions captured without `iq=`, and both large `iq=` sessions
+(899 windows) contribute 2. More looks buy fewer false hop sets.
+
+### Remaining gap and open items
+
+* 16/1160 (1.38 %) vs 11/1160 (0.95 %) on main. The residual is single-look
+  speckle inside occupied spans that the span union does not reach (no
+  >=2.5 MHz anchor event in that window). Candidate next step: derive the
+  occupancy span from the per-bin floor's own clamp-rejection mask (bins whose
+  Q25 was rejected to `F_ref` ARE the occupied bins) instead of from event
+  widths — that is a direct occupancy measurement rather than an inference from
+  fragments, but it requires passing the mask from `bursts` through to `raster`.
+* The 256 strongest-N event cap is saturated in every ambient window. While
+  saturated, "number of events" carries no information and the surviving set is
+  biased toward whatever the cap ranks highest; any future rule that counts
+  events (not clusters) must account for this.
+* `FRAGMENT_MAX_BW_HZ` is hard-coded to the T1 smoothing width (300 kHz). If the
+  front-end smoothing changes it must change with it; it should eventually be
+  carried on the event or passed from `energy.detect`.

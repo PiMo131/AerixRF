@@ -137,6 +137,13 @@ class BurstEvent:
     n_frames: int
     edge_clipped: bool            # touches the time edge of the input or a
                                    # frequency edge of the bin axis
+    bw_noise_limited: bool = False  # the -6 dB level lies BELOW this component's
+                                     # own hold threshold on at least one side, so
+                                     # the -6 dB edge walk stopped on the noise
+                                     # limit: ``bw_6db_hz``/``centre_hz`` are then
+                                     # detector artefacts (a lower bound and a
+                                     # midpoint of that lower bound), not a
+                                     # measured channel. See ``_edge_cross``.
 
     def as_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -272,7 +279,10 @@ def _edge_cross(profile_db: np.ndarray, freqs_hz: np.ndarray, peak_idx: int,
                  stop_db: np.ndarray | None = None) -> tuple[float, bool]:
     """Walk from ``peak_idx`` in ``direction`` (+1/-1) until ``profile_db``
     drops below ``thresh_db``; return the interpolated crossing frequency and
-    whether the walk instead ran off the array (a frequency-edge clip).
+    whether the walk instead ran off the array (a frequency-edge clip), and
+    whether the walk was stopped by ``stop_db`` (the noise limit) rather than
+    by the -6 dB level itself -- in which case the returned edge is a
+    NOISE-LIMITED bound, not a measured -6 dB edge (see ``bw_noise_limited``).
 
     ``stop_db`` (``[n_bins]``, optional) is a per-bin NOISE-LIMIT profile
     (the caller passes ``floor_db + hysteresis_db``): the walk also stops
@@ -300,11 +310,11 @@ def _edge_cross(profile_db: np.ndarray, freqs_hz: np.ndarray, peak_idx: int,
             frac = 0.0 if span <= 0 else (profile_db[i] - limit) / span
             frac = min(max(frac, 0.0), 1.0)
             f = freqs_hz[i] + direction * frac * bin_hz
-            return float(f), False
+            return float(f), False, bool(limit > thresh_db)
         i = j
     # Ran off the edge without crossing: report the true band edge, clipped.
     edge = freqs_hz[0] - 0.5 * bin_hz if direction < 0 else freqs_hz[-1] + 0.5 * bin_hz
-    return float(edge), True
+    return float(edge), True, False
 
 
 def _channelise(power_lin: np.ndarray, floor_lin: np.ndarray,
@@ -394,10 +404,21 @@ def _channelise(power_lin: np.ndarray, floor_lin: np.ndarray,
         peak_db = profile_db[local_peak]
         thresh_db = peak_db - EDGE_DB
 
-        left_hz, left_clip = _edge_cross(profile_db, freqs_hz, local_peak, thresh_db, -1,
-                                          stop_db=noise_limit_db)
-        right_hz, right_clip = _edge_cross(profile_db, freqs_hz, local_peak, thresh_db, +1,
-                                            stop_db=noise_limit_db)
+        left_hz, left_clip, left_nl = _edge_cross(profile_db, freqs_hz, local_peak, thresh_db, -1,
+                                                   stop_db=noise_limit_db)
+        right_hz, right_clip, right_nl = _edge_cross(profile_db, freqs_hz, local_peak, thresh_db, +1,
+                                                      stop_db=noise_limit_db)
+        # FA fix 2026-09-19 (docs/design/stage1-c4-c5-spec.md "S FA regression
+        # 2026-09-19"): a component whose peak is less than ``EDGE_DB`` above
+        # its own hold threshold has no measurable -6 dB width -- the walk
+        # stops on ``noise_limit_db`` within a bin or two of the peak and
+        # reports a bandwidth far below the detector's own frequency
+        # resolution (the T1 boxcar in ``energy.detect`` is 300 kHz wide, so
+        # NO real component can measure 6-60 kHz here). Both its bandwidth
+        # and its -6 dB-midpoint centre are then artefacts of where the
+        # threshold happened to cut the noise, so downstream channel/raster
+        # reasoning must not treat it as a resolved channel.
+        bw_noise_limited = bool(left_nl or right_nl)
         centre_hz = 0.5 * (left_hz + right_hz)
         bw_hz = right_hz - left_hz
 
@@ -418,6 +439,7 @@ def _channelise(power_lin: np.ndarray, floor_lin: np.ndarray,
             mean_db_over_floor=float(region_db_over_floor.mean()),
             n_frames=int(n_frames),
             edge_clipped=edge_clipped,
+            bw_noise_limited=bw_noise_limited,
         ))
     return events
 
