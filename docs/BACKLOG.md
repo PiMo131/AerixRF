@@ -44,6 +44,8 @@ and independent review before it is "done". Evidence-wording rules apply.
 ## Non-DJI (approved 2026-09-19)
 - [ ] SiK/MAVLink passive telemetry decoder (GFSK demod + SiK framing + MAVLink parse) — design brief first; zero public IQ,
       needs a recorded capture (no transmit by us).
+- [ ] Analog FPV: validate the detector on Zenodo 19870020 chunk10 (real VTX IQ, HackRF 20 MS/s, `vtx_power_mw`); use its
+      25/600 mW rows to set the shape-ratio/BW expectations; consider more chunks (4.2 TB total) only with user approval.
 - [ ] Analog 5.8 GHz FPV carrier-grid detector on sweeps (F/Raceband grids); video content demod approved for research.
 - [ ] Wi-Fi drones: RF-level detection only in AERIX RF; frame parsing → ESP32 system.
 - [ ] ExpressLRS raster/period validation on real IQ (RFUAV RC set or field recording).
@@ -88,7 +90,9 @@ and independent review before it is "done". Evidence-wording rules apply.
 - [ ] Locate data hosts for CageDroneRF and UAVSig.
 
 ## Receiver / sessions
-- [ ] `RetuneWelchSweep` stitching leaves a +7 dB comb (4 bins) at every 10 MHz step seam (measured in
+- [ ] Re-record 2.4/5.8 GHz baselines with the fixed stitcher (`usable_frac`/`overlap_hz`/`step_hz` also to be persisted
+      into `scan/sweep.py` Baseline meta) and confirm the +7 dB hardware bump is gone (synthetic model reproduced a dip).
+- [x] (fixed 2026-09-19, synthetic-verified) `RetuneWelchSweep` stitching leaves a +7 dB comb (4 bins) at every 10 MHz step seam (measured in
       `sweeps_2026_09_18/base_58.npz`) — coincides with the FPV Band-A lattice. Fix: overlap steps and trim/weight
       passband edges; synthetic test: flat noise floor across steps → no seam. Until then FPV detection masks ±0.75 MHz.
 - [ ] `producer_main` robustness: live `antsdr_proc` runs DO terminate the producer on completion (verified by process

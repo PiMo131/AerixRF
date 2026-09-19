@@ -1,7 +1,7 @@
 # AERIX RF — Project Status (living document)
 
 *Maintained by the architect session; updated with every commit that changes scope, plan or evidence.
-Last update: 2026-09-19 (afternoon). Audience: technical manager. One page; details link to the repo.*
+Last update: 2026-09-19 (evening). Audience: technical manager. One page; details link to the repo.*
 
 ## 1. Scope — what AERIX RF is (and is not)
 
@@ -43,6 +43,12 @@ A stage-1 candidate is never reported as a confirmed drone.
   an operator timeline (`docs/field/positives-protocol.md`) ⏳ next.
 - **G. Firmware trial** — second-SD-card UHD image ✅ booted; 15.36 MS/s sc16 and 20 MS/s sc8 stream clean in
   short runs, one 10-min soak failed (host socket buffer suspected) ⏳ needs a sysctl on the host to conclude.
+- **I. Non-DJI targets (approved 2026-09-19)** — ranked brief with legal flags; user approved passive MAVLink
+  payload decode and video-content demod for research (Wi-Fi frame parsing → ESP32 system). Built today, all
+  synthetic-validated (evidence level 1): SiK deframer (bit-exact vs firmware), MAVLink parser (default-off,
+  7-day retention tag); GFSK demodulator under DSP rework (not yet at spec); analog-FPV carrier-grid detector
+  in test; a public analog-FPV IQ dataset found (Zenodo 19870020) and a 1 GB chunk downloading. TDOA is in
+  scope → the UHD image (timestamps, 2 RX) is the target platform, pending the buffered soak.
 - **H. Stage-1 link-signature rules** — burst extraction + raster/period/cadence tests ✅ built; false-alarm audit on
   1,160 real ambient windows: `hopping` 1.0 % (budget 5 %) and DroneID-cadence 0 after one rule correction ✅;
   the FHSS-grid rules were never triggered by ambient RF (not exercised — needs real hopper positives, e.g. RFUAV RC set).
@@ -97,7 +103,7 @@ positives campaign is the next step, not more training.
 - First campaign measurement: the **Avata (O3) plaintext-decode test** (available). For a guaranteed O2
   reference: Mini 4K / Mini 2 SE / Mini 2 / Mini 3 non-Pro / Mavic Air 2. O4 aircraft for detection-only positives
   and the O4 CRC-identification experiment.
-- One sudo command on this host for the UHD trial: `sudo sysctl -w net.core.rmem_max=50000000 net.core.wmem_max=50000000`.
+- **Blocking on the host owner:** one sudo command for the UHD trial: `sudo sysctl -w net.core.rmem_max=50000000 net.core.wmem_max=50000000`.
 - Answers: is multi-receiver/TDOA in scope (now feasible in UHD mode — the main reason to prefer it)? Field-box
   hardware and disk budget (raw cs16 is ≈177 GB/h, so capture must be event-gated)?
 - Positives campaign: the Avata test first (`docs/field/avata-o3-decode-test.md`), then the ON/OFF protocol
@@ -116,4 +122,4 @@ positives campaign is the next step, not more training.
 `README.md` (status log) · `AERIX_RF_ANTSDR_PROJECT.md` (plan, §0 decisions/questions) ·
 `docs/design/*.md` (architecture memos) · `research/briefs/*.md` (evidence briefs) ·
 `docs/BACKLOG.md` (engineering backlog) · `docs/field/positives-protocol.md` (campaign checklist).
-Tests: 442 passing. Commits on `main`: 30 since the pivot.
+Tests: ≈600 passing. Commits on `main`: 45+ since the pivot.
