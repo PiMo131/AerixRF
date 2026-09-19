@@ -10,8 +10,12 @@ import numpy as np
 
 from aerix_rf.detect.bursts import BurstEvent
 from aerix_rf.detect.raster import (
+    CLUSTER_MAX_MERGE_HZ,
+    CLUSTER_MAX_SPAN_HZ,
+    FREE_PERIOD_RANGE_S,
     analyze_raster,
     cluster_centres,
+    period_test,
 )
 
 
@@ -77,6 +81,128 @@ def test_cluster_centres_excludes_edge_clipped_and_groups_by_gap():
     assert sum(cl.n for cl in clusters) == 3  # clipped event excluded
     sizes = sorted(cl.n for cl in clusters)
     assert sizes == [1, 2]
+
+
+def test_c3_cluster_centres_bounds_span_at_high_event_density():
+    """C3 (docs/design/stage1-rc-positives-2026-09-19.md S3/S4): unbounded
+    single-linkage chaining collapsed a dense, wide event stream into one
+    ~99 MHz cluster in the real-capture diagnosis. 300 events on a 1 MHz
+    grid over 60 MHz with 30 kHz jitter should still resolve into many
+    distinct clusters, none wider than the configured span bound."""
+    rng = np.random.default_rng(21)
+    n_events = 300
+    grid = np.arange(2400.0e6, 2460.0e6, 1.0e6)   # 60 channels, 1 MHz apart
+    centres = rng.choice(grid, size=n_events) + rng.normal(0.0, 30e3, size=n_events)
+    events = [_ev(float(i), 1e-3, float(c), 0.3e6) for i, c in enumerate(centres)]
+
+    clusters = cluster_centres(events)
+    assert len(clusters) >= 55, f"only {len(clusters)} clusters (chained?)"
+    for cl in clusters:
+        span = max(e.centre_hz for e in cl.events) - min(e.centre_hz for e in cl.events)
+        assert span <= CLUSTER_MAX_SPAN_HZ, f"cluster span {span} Hz exceeds bound"
+
+
+def test_c3_sparse_wideband_burst_stays_one_cluster():
+    """C3/independent-review fix #1: three sparse -6 dB centre estimates of
+    ONE wideband (2.4 MHz) emitter, ~1.1 MHz apart, must merge into a single
+    cluster (not be split into a spurious multi-channel hop set). See the
+    ``cluster_centres`` docstring: the merge cap is scaled to
+    ``HOP_MAX_CLUSTER_BW_HZ`` specifically so a real emitter's -6 dB edge
+    jitter (gap ~= bw/2) stays under threshold."""
+    f = 2420.0e6
+    bw = 2.4e6
+    events = [
+        _ev(0.0, 1e-3, f, bw),
+        _ev(0.5, 1e-3, f + 1.1e6, bw),
+        _ev(1.0, 1e-3, f + 2.2e6, bw),
+    ]
+    clusters = cluster_centres(events)
+    assert len(clusters) == 1
+    assert clusters[0].n == 3
+
+
+# --------------------------------------------------------------------------
+# C1 -- period_test degenerate (dt ~= 0) interval handling
+# (docs/design/stage1-rc-positives-2026-09-19.md S3/S4)
+# --------------------------------------------------------------------------
+
+def test_c1_cotemporal_trains_do_not_alias_to_range_top():
+    """Two burst trains co-temporal at every tick (different centres, same
+    t_start) but with irregular (non-periodic) inter-tick gaps used to
+    always alias to the search-range top with R=1.0/passed=True (the C1
+    bug): a set of near-identical dt=0 intervals concentrates the Rayleigh
+    statistic at EVERY trial period. After the fix, those degenerate
+    intervals are dropped before the scan, so this irregular, non-periodic
+    tick pattern must not pass as a period, and in particular must not
+    report the old buggy range-top value as if it were a real period."""
+    rng = np.random.default_rng(42)
+    ticks = sorted(rng.uniform(0.0, 2.0, size=40))
+    events = []
+    for t in ticks:
+        events.append(_ev(float(t), 0.5e-3, 2400.0e6, 0.3e6))
+        events.append(_ev(float(t), 0.5e-3, 2450.0e6, 0.3e6))
+
+    result = analyze_raster(events)
+    assert result.period.passed is False
+    range_top = FREE_PERIOD_RANGE_S[1]
+    old_bug = (
+        result.period.source != "range_top_rejected"
+        and result.period.t_hat_s is not None
+        and abs(result.period.t_hat_s - range_top) / range_top < 0.05
+    )
+    assert not old_bug, (
+        f"period_test aliased to range top: t_hat_s={result.period.t_hat_s}, "
+        f"source={result.period.source}"
+    )
+
+
+def test_c1_genuine_8ms_period_detected():
+    """Positive control for the C1 fix: a genuinely periodic (8 ms, small
+    jitter) single-channel train -- no co-temporal degenerate intervals --
+    must still be detected as periodic, with t_hat within 5%."""
+    rng = np.random.default_rng(43)
+    period_s = 0.008
+    n_events = 30
+    events = []
+    t = 0.0
+    for _ in range(n_events):
+        jitter = rng.normal(0.0, 0.00005)   # 50 us jitter, well under the period
+        events.append(_ev(t + jitter, 0.5e-3, 2440.0e6, 0.3e6))
+        t += period_s
+
+    result = analyze_raster(events)
+    assert result.period.passed is True
+    assert result.period.t_hat_s is not None
+    assert abs(result.period.t_hat_s - period_s) / period_s <= 0.05
+
+
+def test_period_test_frame_pitch_too_coarse():
+    """Independent review fix #3: a live detector's ``frame_dt_s`` coarser
+    than ``FRAME_PITCH_MAX_FRAC_OF_MIN_PERIOD`` (0.5) of the smallest
+    modelled ExpressLRS period (1 ms) can erase every true inter-arrival of a
+    genuinely fast, regular train via the C1 sub-frame dt-filter -- such a
+    result must be reported as unidentifiable (``frame_pitch_too_coarse``,
+    ``passed=False``), not at face value. A fine-enough frame pitch on the
+    same train must still detect the true ~4 ms period."""
+    rng = np.random.default_rng(43)
+    period_s = 0.004
+    n_events = 30
+    events = []
+    t = 0.0
+    for _ in range(n_events):
+        jitter = rng.normal(0.0, 0.00005)   # 50 us jitter, well under the period
+        events.append(_ev(t + jitter, 0.5e-3, 2440.0e6, 0.3e6))
+        t += period_s
+    clusters = cluster_centres(events)
+
+    coarse = period_test(clusters, frame_dt_s=5e-3)
+    assert coarse.passed is False
+    assert coarse.source == "frame_pitch_too_coarse"
+
+    fine = period_test(clusters, frame_dt_s=250e-6)
+    assert fine.passed is True
+    assert fine.t_hat_s is not None
+    assert abs(fine.t_hat_s - period_s) / period_s <= 0.05
 
 
 # --------------------------------------------------------------------------

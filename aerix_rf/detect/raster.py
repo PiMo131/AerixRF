@@ -50,6 +50,24 @@ from aerix_rf.detect.bursts import BurstEvent
 DEFAULT_CLUSTER_TOL_HZ = 100e3          # design S2(a): "cluster centres at 100 kHz"
 CLUSTER_BW_SEPARATION_FRAC = 0.75       # min separation floor: 0.75 * max(BW_i, BW_j)
 
+# C3 fix (docs/design/stage1-rc-positives-2026-09-19.md S3/S4): the single-
+# linkage merge below had no maximum cluster width and no cap on its
+# bandwidth-scaled threshold, so it chains without bound at high event
+# density -- a 20 143-event real capture collapsed into ONE 99.4 MHz-wide
+# cluster. Two independent bounds fix this:
+CLUSTER_MAX_MERGE_HZ = 1.0e6      # absolute cap on the per-pair merge
+                                    # threshold (design doc S4: "~1 MHz"), so
+                                    # one wide/mis-measured occupant's BW can
+                                    # no longer make the bw-scaled threshold
+                                    # (0.75 * BW) arbitrarily large.
+CLUSTER_MAX_SPAN_HZ = 5.0e6       # a cluster may not grow past this centre-
+                                    # to-centre span regardless of how many
+                                    # consecutive pairwise gaps stay under
+                                    # threshold (= 2 * HOP_MAX_CLUSTER_BW_HZ,
+                                    # defined below in the R4 section) -- this
+                                    # is what stops the chain from running
+                                    # across the whole band.
+
 DEFAULT_DELTAS_HZ: tuple[float, ...] = (
     0.6e6, 1.0e6, 1.5e6, 2.0e6, 2.5e6, 5.0e6,
 )
@@ -77,6 +95,28 @@ FREE_PERIOD_STEPS = 400          # log-spaced
 
 N_MIN_PERIOD = 10
 R_MIN_PERIOD = 0.93
+
+# Independent review fix (2026-09-19, finding #3): a live detector's frame
+# pitch (``frame_dt_s``, forwarded to ``period_test`` for the C1 sub-frame
+# dt-filter) can itself be coarser than the fastest period this module
+# models. If it exceeds half of ``min(periods_s)``, the filter can erase a
+# genuinely fast, regular train wholesale (every true inter-arrival falls
+# below ``min_dt``) rather than only removing degenerate co-temporal
+# artefacts -- see ``period_test``'s docstring.
+FRAME_PITCH_MAX_FRAC_OF_MIN_PERIOD = 0.5
+
+# C1 fix (docs/design/stage1-rc-positives-2026-09-19.md S3/S4): a candidate
+# period landing at/near the TOP of the free-search range cannot be told
+# apart from "no bound on the period" -- for any bounded set of inter-burst
+# intervals, the Rayleigh statistic trivially rises as the trial period grows
+# towards the top of the search range (all phases 2*pi*dt/T -> 0), independent
+# of whether real periodicity is present. Reject any winning candidate within
+# one coarse free-search grid step of ``FREE_PERIOD_RANGE_S[1]`` as
+# unidentifiable rather than reporting the range top as a period.
+_FREE_PERIOD_GRID_STEP_RATIO = (
+    (FREE_PERIOD_RANGE_S[1] / FREE_PERIOD_RANGE_S[0]) ** (1.0 / (FREE_PERIOD_STEPS - 1))
+)
+PERIOD_RANGE_TOP_REJECT_S = FREE_PERIOD_RANGE_S[1] / _FREE_PERIOD_GRID_STEP_RATIO
 
 DURATION_BIN_EDGES_S = (0.4e-3, 1e-3, 3e-3, 10e-3)   # 5 bins: <0.4,0.4-1,1-3,3-10,>10 ms
 DURATION_BIN_LABELS = ("lt_0.4ms", "0.4_1ms", "1_3ms", "3_10ms", "gt_10ms")
@@ -275,7 +315,9 @@ class Cluster:
 
 
 def cluster_centres(events: list[BurstEvent], tol_hz: float = DEFAULT_CLUSTER_TOL_HZ,
-                     bw_separation_frac: float = CLUSTER_BW_SEPARATION_FRAC) -> list[Cluster]:
+                     bw_separation_frac: float = CLUSTER_BW_SEPARATION_FRAC,
+                     max_merge_hz: float | None = None,
+                     max_cluster_span_hz: float = CLUSTER_MAX_SPAN_HZ) -> list[Cluster]:
     """Level 1. Group non-``edge_clipped`` bursts into frequency clusters.
 
     Sequential (sorted-by-centre) agglomeration: consecutive events merge
@@ -285,15 +327,49 @@ def cluster_centres(events: list[BurstEvent], tol_hz: float = DEFAULT_CLUSTER_TO
     edge jitter from being split into a fake multi-channel hop set. Events
     with ``edge_clipped`` set are excluded (their centre estimate is
     dwell-edge-biased, not a real channel estimate).
+
+    C3 fix (docs/design/stage1-rc-positives-2026-09-19.md S3/S4): unbounded
+    single-linkage chaining. Two independent bounds are applied on top of the
+    original merge rule, without changing it otherwise:
+      * the per-pair merge threshold is capped at ``max_merge_hz`` (a single
+        wide/mis-measured occupant's bandwidth can no longer make
+        ``bw_separation_frac * BW`` arbitrarily large);
+      * a cluster may not grow past ``max_cluster_span_hz`` measured from its
+        first (lowest-centre) member to the candidate next event, regardless
+        of how many consecutive pairwise gaps stay under threshold -- this is
+        what stops a dense event stream from chaining across the whole band.
+
+    Independent review fix (2026-09-19, finding #1): a FIXED
+    ``max_merge_hz = CLUSTER_MAX_MERGE_HZ`` (1 MHz) overrode the
+    bandwidth-scaled floor (``bw_separation_frac * BW``) for any occupant
+    wider than ~1.33 MHz, so a genuine wideband burst (e.g. 2.4 MHz) sampled
+    by only 2-3 -6 dB centre estimates near its edges (gap ~2.2 MHz) was
+    split into separate clusters -- a spurious multi-cluster "hop set" from
+    ONE emitter. The cap is now scaled up to (at most) the widest occupant
+    this module still treats as a single hop channel
+    (``HOP_MAX_CLUSTER_BW_HZ``), so a real single-emitter's -6 dB edge
+    jitter no longer exceeds the merge threshold; ``max_cluster_span_hz`` is
+    unchanged and remains the only thing that stops unbounded chaining
+    (C3, above).
     """
+    if max_merge_hz is None:
+        # Equivalent to ``max(CLUSTER_MAX_MERGE_HZ, bw_separation_frac *
+        # min(BW, HOP_MAX_CLUSTER_BW_HZ))``: for BW < HOP_MAX_CLUSTER_BW_HZ
+        # the outer ``min(max_merge_hz, bw_separation_frac * BW)`` below
+        # already yields the smaller, per-pair-scaled value, so a constant
+        # ceiling computed once here (rather than re-derived per pair) gives
+        # the same result.
+        max_merge_hz = max(CLUSTER_MAX_MERGE_HZ, bw_separation_frac * HOP_MAX_CLUSTER_BW_HZ)
     usable = sorted((e for e in events if not e.edge_clipped), key=lambda e: e.centre_hz)
     clusters: list[Cluster] = []
     current: list[BurstEvent] = []
     for e in usable:
         if current:
             gap = e.centre_hz - current[-1].centre_hz
-            thresh = max(tol_hz, bw_separation_frac * max(current[-1].bw_6db_hz, e.bw_6db_hz))
-            if gap > thresh:
+            thresh = min(max_merge_hz,
+                         max(tol_hz, bw_separation_frac * max(current[-1].bw_6db_hz, e.bw_6db_hz)))
+            span = e.centre_hz - current[0].centre_hz
+            if gap > thresh or span > max_cluster_span_hz:
                 clusters.append(_make_cluster(current))
                 current = []
         current.append(e)
@@ -427,7 +503,8 @@ class PeriodEvidence:
     passed: bool
     duration_hist: dict[str, int]
     duration_mode: str | None
-    source: str            # "elrs_set" | "free_search" | "none"
+    source: str            # "elrs_set" | "free_search" | "none" | "range_top_rejected"
+                            # | "frame_pitch_too_coarse"
 
 
 def _duration_histogram(durations_s: list[float]) -> dict[str, int]:
@@ -439,70 +516,146 @@ def _duration_histogram(durations_s: list[float]) -> dict[str, int]:
 
 
 def period_test(clusters: list[Cluster], periods_s: tuple[float, ...] = ELRS_PERIODS_S,
-                 n_min: int = N_MIN_PERIOD, r_min: float = R_MIN_PERIOD) -> PeriodEvidence:
+                 n_min: int = N_MIN_PERIOD, r_min: float = R_MIN_PERIOD,
+                 frame_dt_s: float | None = None) -> PeriodEvidence:
     """R2: inter-burst intervals of the pooled channel-cluster set (every
     non-edge-clipped burst across all clusters, time-sorted -- deliberately
     NOT filtered to >=2-visit clusters, so a periodic link that revisits
     almost no individual channel, e.g. BLE, is still testable) are
     near-integer multiples of a packet period T -- span-free, works even
-    though most hops land out of band (design S3). Tested against the
-    ExpressLRS firmware period set plus one free-period search."""
+    though most hops land out of band (design S3).
+
+    ``frame_dt_s``, when known (the live detector's frame pitch), is used to
+    drop degenerate near-zero intervals before the Rayleigh scan (C1 fix,
+    docs/design/stage1-rc-positives-2026-09-19.md S3/S4): bursts that are
+    co-temporal but at different centre frequencies are adjacent in this
+    pooled, time-sorted list and produce ``dt`` at or near 0. If
+    ``frame_dt_s`` is not given, the minimum observed positive event
+    duration is used instead (a burst cannot be shorter than one frame by
+    construction of ``bursts.py``).
+
+    Estimator (rewritten 2026-09-19, see the same design-doc addendum): the
+    previous version scanned a dictionary of candidate periods (the
+    ExpressLRS firmware set, the empirical median, and a log-spaced free
+    search) and reported the LARGEST candidate whose Rayleigh statistic
+    cleared ``r_min``. That alias rule is unsound for ANY sufficiently
+    regular ``dt`` set, not just the degenerate dt~=0 case the dt-filter
+    above targets: identical (or near-identical, low-jitter) intervals give
+    Rayleigh R ~= 1 at EVERY trial period T, because the phase
+    ``2*pi*dt/T`` is the same for every interval regardless of T (a single
+    repeated complex unit vector has magnitude 1 irrespective of the
+    divisor tested). "Largest passing" therefore silently picked the
+    largest set member (or free-search point) that happened to clear
+    ``r_min``, e.g. reporting 20 ms for a genuinely period-8-ms train just
+    because 20 ms was also a "passing" alias and is bigger.
+
+    The fix is to estimate the fundamental FIRST, directly from the data --
+    ``t_hat_0 = median(dt)`` -- and gate pass/fail on the Rayleigh
+    statistic AT THAT ESTIMATE, not on whichever dictionary entry has the
+    numerically largest period. A declared ExpressLRS period is reported
+    (``source="elrs_set"``) only when a member of ``periods_s`` actually
+    lies within 5% of ``t_hat_0``; otherwise the data-anchored estimate
+    itself is reported (``source="free_search"``). An estimate at/near the
+    top of ``FREE_PERIOD_RANGE_S`` is not identifiable from an observation
+    this short and is rejected (``source="range_top_rejected"``) rather than
+    reported as a period.
+
+    Independent review fix (2026-09-19, finding #3): ``frame_dt_s`` gates the
+    sub-frame dt-filter above, but if it is itself coarser than
+    ``FRAME_PITCH_MAX_FRAC_OF_MIN_PERIOD`` (0.5) of the smallest modelled
+    period (``min(periods_s)``), the filter's own quantisation is no longer
+    fine enough to trust: it can as easily erase a genuinely fast, regular
+    train (e.g. a 4 ms cadence sampled at a 5 ms frame pitch has NO surviving
+    ``dt``, since every true inter-arrival is below ``min_dt``) as clean up a
+    real degenerate-zero artefact. The filter is still applied (removing it
+    would reopen the dt~=0 co-temporal-train failure C1 fixed), but any
+    result computed under this condition is marked ``source=
+    "frame_pitch_too_coarse"`` with ``passed=False`` rather than reported at
+    face value, on every return path below."""
     # Pooled across ALL clusters (not filtered to >=2-visit "repeat" clusters):
     # unlike the frequency-lattice test (R1, which needs revisited channels to
     # even define a cluster centre distribution), the *time* periodicity of a
     # link can be genuine even when almost every hop lands on a channel it
     # never revisits (e.g. BLE connection events, each on a fresh 2 MHz data
     # channel) -- filtering those out here would blind the BLE discriminator.
+    frame_pitch_too_coarse = bool(
+        frame_dt_s is not None and frame_dt_s > 0.0 and len(periods_s) > 0
+        and frame_dt_s > FRAME_PITCH_MAX_FRAC_OF_MIN_PERIOD * min(periods_s)
+    )
+
+    def _coarse_source(default: str) -> str:
+        return "frame_pitch_too_coarse" if frame_pitch_too_coarse else default
+
     events = sorted((e for c in clusters for e in c.events), key=lambda e: e.t_start)
     hist = _duration_histogram([e.duration_s for e in events])
     mode = max(hist, key=lambda k: hist[k]) if events else None
 
     if len(events) < 2:
-        return PeriodEvidence(None, 0.0, 1.0, 0, False, hist, mode, "none")
+        return PeriodEvidence(None, 0.0, 1.0, 0, False, hist, mode, _coarse_source("none"))
 
     t = np.array([e.t_start for e in events], dtype=np.float64)
-    dt = np.diff(t)
-    n = len(dt)
+    dt_all = np.diff(t)
 
-    results: dict[float, float] = {}
-    for period in periods_s:
-        r, _ = _rayleigh_stat(dt, period)
-        results[period] = r
-    # The empirical median inter-arrival is always a natural period
-    # hypothesis (the direct, data-anchored estimate of T), and is required
-    # to recover a true period when the observed intervals are (near-)
-    # noise-free: with near-zero jitter across dt, the Rayleigh statistic is
-    # trivially ~1 at EVERY candidate period (a single repeated complex unit
-    # vector has magnitude 1 regardless of the divisor tested), so a blind
-    # numeric grid search with no data-anchored candidate can converge on an
-    # arbitrary small value near the bottom of its search range instead of
-    # the actual fundamental period.
-    median_dt = float(np.median(dt))
-    if median_dt > 0.0:
-        # Concurrent (dt == 0) events -- e.g. merged multi-dwell accumulation
-        # with coincident relative timestamps -- can drive the median to 0,
-        # which is not a valid period candidate (division by zero).
-        results.setdefault(median_dt, _rayleigh_stat(dt, median_dt)[0])
-    free_t = _free_search(dt, FREE_PERIOD_RANGE_S[0], FREE_PERIOD_RANGE_S[1],
-                           FREE_PERIOD_STEPS, log_spaced=True)
-    results.setdefault(free_t, _rayleigh_stat(dt, free_t)[0])
-
-    # R1(c)-style alias handling applied to the time lattice too (module
-    # docstring: "Both lattice tests use the same Rayleigh concentration
-    # statistic"): a true period T also concentrates at submultiples T/2,
-    # T/3, ...; report the LARGEST candidate that clears r_min rather than
-    # whichever happens to have the numerically largest R (ties/near-ties
-    # are the common case for a low-jitter link, and an arbitrary small
-    # alias is not the physical packet period).
-    passing = [(p, r) for p, r in results.items() if r >= r_min]
-    if passing:
-        passing.sort(key=lambda t: t[0], reverse=True)
-        best_t, best_r = passing[0]
+    # C1 fix (a)/(d): drop degenerate near-zero intervals below one frame
+    # period before doing any Rayleigh scan -- see the docstring above.
+    if frame_dt_s is not None and frame_dt_s > 0.0:
+        min_dt = float(frame_dt_s)
     else:
-        best_t = max(results, key=lambda p: results[p])
-        best_r = results[best_t]
-    passed = n >= n_min and best_r >= r_min
-    source = "elrs_set" if best_t in periods_s else "free_search"
+        durations = np.array([e.duration_s for e in events], dtype=np.float64)
+        positive_durations = durations[durations > 0.0]
+        min_dt = float(positive_durations.min()) if positive_durations.size else 1e-9
+    dt = dt_all[dt_all >= min_dt]
+    n = int(len(dt))
+
+    # The minimum-interval-count gate applies AFTER the dt filter --
+    # surviving (non-degenerate) intervals are what the Rayleigh statistic
+    # is actually computed over.
+    if n < n_min:
+        return PeriodEvidence(None, 0.0, 1.0, n, False, hist, mode, _coarse_source("none"))
+
+    # (a) Estimate the fundamental FIRST, directly from the (frame-filtered)
+    # data -- the data-anchored median inter-arrival, not a dictionary/grid
+    # search. All surviving dt are > 0 (filtered by min_dt > 0 above), so
+    # the median is always a strictly positive, well-defined period
+    # candidate.
+    t_hat_0 = float(np.median(dt))
+
+    # C1 fix (d): a candidate at/near the top of the free-search range
+    # cannot be told apart from "no bound on the period" from an
+    # observation this short -- reject rather than report it.
+    if t_hat_0 >= PERIOD_RANGE_TOP_REJECT_S:
+        r0, _ = _rayleigh_stat(dt, t_hat_0)
+        return PeriodEvidence(None, r0, _p_false(n, r0), n, False, hist, mode,
+                               _coarse_source("range_top_rejected"))
+
+    # (b) Compute R AT t_hat_0 and require IT (not some other dictionary
+    # entry) to pass.
+    r0, _ = _rayleigh_stat(dt, t_hat_0)
+    passed = r0 >= r_min
+
+    # (c) Only label the estimate as a declared ExpressLRS period if a set
+    # member actually lies within 5% of t_hat_0 (report that member's exact
+    # value as t_hat_s); otherwise report the data-anchored estimate itself.
+    # (Cosmetic fix, independent review 2026-09-19 #4: a separate
+    # ``p <= 1.5 * t_hat_0`` bound was previously ANDed in here but is
+    # unreachable -- the 5% tolerance above already forces
+    # ``p <= 1.05 * t_hat_0``, strictly inside 1.5x, so the extra guard
+    # could never reject anything. Removed rather than kept as dead code.)
+    best_t = t_hat_0
+    best_r = r0
+    source = "free_search"
+    candidates = [p for p in periods_s if abs(p - t_hat_0) <= 0.05 * t_hat_0]
+    if candidates:
+        best_t = min(candidates, key=lambda p: abs(p - t_hat_0))
+        best_r, _ = _rayleigh_stat(dt, best_t)
+        source = "elrs_set"
+
+    if frame_pitch_too_coarse:
+        # See the docstring note above: the dt-filter itself is untrustworthy
+        # at this frame pitch, so the estimate is reported as unidentifiable
+        # (same treatment as "range_top_rejected") rather than at face value.
+        return PeriodEvidence(None, best_r, _p_false(n, best_r), n, False, hist, mode,
+                               "frame_pitch_too_coarse")
 
     return PeriodEvidence(best_t, best_r, _p_false(n, best_r), n, passed, hist, mode, source)
 
@@ -782,6 +935,7 @@ def analyze_raster(
     cluster_tol_hz: float = DEFAULT_CLUSTER_TOL_HZ,
     deltas_hz: tuple[float, ...] = DEFAULT_DELTAS_HZ,
     periods_s: tuple[float, ...] = ELRS_PERIODS_S,
+    frame_dt_s: float | None = None,
 ) -> RasterResult:
     """Run R1-R5 over one window's (or one accumulated multi-dwell)
     ``BurstEvent`` list and assemble the controlled-vocabulary result.
@@ -793,10 +947,14 @@ def analyze_raster(
     manufacturer identity. Multi-dwell accumulation (R1(e), needed for any
     2 MHz-grid claim) is the caller's responsibility: pass in a ``events``
     list already pooled (in absolute Hz) across dithered dwell centres.
+
+    ``frame_dt_s``, when known, is forwarded to ``period_test`` so it can
+    drop degenerate co-temporal (dt ~= 0) intervals before the R2 Rayleigh
+    scan (C1 fix); see ``period_test``'s docstring.
     """
     clusters = cluster_centres(events, tol_hz=cluster_tol_hz)
     raster_ev = raster_test(clusters, deltas_hz=deltas_hz)
-    period_ev = period_test(clusters, periods_s=periods_s)
+    period_ev = period_test(clusters, periods_s=periods_s, frame_dt_s=frame_dt_s)
     cadence_tags = cadence_discount(clusters, period_ev, events)
     fixhop = fixed_vs_hopping(clusters)
 

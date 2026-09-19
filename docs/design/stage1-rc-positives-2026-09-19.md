@@ -229,3 +229,122 @@ synthetic Stage-1 fixtures.
    per-burst attribution remains unavailable. An operator-supplied bench
    capture (one bound TX, quiet band, ANTSDR) would convert several of these
    level-1 observations into level-5 test truth.
+
+## 7. Implementation notes (2026-09-19)
+
+**C1 (`period_test`, `aerix_rf/detect/raster.py`).** Rewritten to estimate
+the fundamental period FIRST, directly from the data
+(`t_hat_0 = median(dt)`), and gate pass/fail on the Rayleigh statistic AT
+THAT ESTIMATE, replacing the old "largest passing dictionary/free-search
+candidate" rule (unsound for any sufficiently regular `dt` set: a single
+repeated interval concentrates R ≈ 1 at *every* trial period, so "largest
+passing" silently picked the largest alias). Three guards were added on top:
+* a sub-frame `dt`-filter drops degenerate near-zero intervals (co-temporal
+  bursts at different centres, adjacent in the pooled time-sorted list)
+  below one detector frame period (`frame_dt_s`, or the minimum observed
+  event duration if `frame_dt_s` is unknown) before the Rayleigh scan;
+* a winning candidate at/near the TOP of the free-search range
+  (`FREE_PERIOD_RANGE_S`) is rejected (`source="range_top_rejected"`) rather
+  than reported, since the Rayleigh statistic trivially rises as the trial
+  period approaches the range top regardless of real periodicity;
+* `frame_pitch_too_coarse` guard (independent-review finding #3): if
+  `frame_dt_s` exceeds `FRAME_PITCH_MAX_FRAC_OF_MIN_PERIOD` (0.5) of the
+  smallest modelled ExpressLRS period (1 ms), the dt-filter's own
+  quantisation is no longer fine enough to trust — it can erase a
+  genuinely fast, regular train wholesale (every true inter-arrival falls
+  below the filter floor) rather than only removing artefacts. Any result
+  computed under this condition is now reported as `passed=False`,
+  `source="frame_pitch_too_coarse"` on every return path, instead of at
+  face value.
+
+**C2 (`aerix_rf/detect/bursts.py`).** Capped burst extraction at the
+strongest 256 candidate events per window (peak-power ranked) and replaced a
+full-array `scipy.ndimage` statistics pass with a foreground-only gather
+(compute per-event stats only over each event's own bounding pixels, not the
+whole frame × bin array). Measured on the existing
+`test_timing_bound_1s_window_at_12_288_msps` fixture: median wall time
+78.7 ms → 40.3 ms (7-repeat median, warm-up call excluded). Note for the
+independent reviewer: this timing test is environment-noise-sensitive (it
+passed in 3/3 isolated re-runs during this session but flaked once — 56.08 ms
+vs the 50 ms budget — under full-suite/parallel load); the regression itself
+(pre-fix baseline) is not in dispute, only the CI margin on a shared box.
+
+**C3 (`cluster_centres`, `aerix_rf/detect/raster.py`).** Two independent
+bounds on top of the existing bandwidth-scaled single-linkage merge rule:
+a total-span bound (`CLUSTER_MAX_SPAN_HZ`, a cluster may not grow past this
+centre-to-centre span from its first member regardless of how many
+consecutive pairwise gaps stay under threshold — this is what stops
+unbounded chaining at high event density; a 20 143-event real capture had
+collapsed into one 99.4 MHz-wide cluster), and a per-pair merge-threshold
+cap scaled to `HOP_MAX_CLUSTER_BW_HZ` rather than a flat 1 MHz
+(`CLUSTER_MAX_MERGE_HZ` alone, independent-review finding #1: a flat 1 MHz
+cap overrode the bandwidth-scaled floor for any occupant wider than
+~1.33 MHz, splitting one genuine wideband burst's sparse -6 dB edge
+estimates — e.g. a 2.4 MHz emitter sampled near its edges, gap ~1.1–2.2 MHz
+— into a spurious multi-cluster "hop set"). The cap is now
+`max(CLUSTER_MAX_MERGE_HZ, bw_separation_frac * HOP_MAX_CLUSTER_BW_HZ)`, the
+widest occupant this module still treats as a single hop channel, so a real
+single-emitter's edge jitter no longer exceeds the merge threshold while the
+span bound remains the only defence against unbounded chaining. Regression
+test: `test_c3_sparse_wideband_burst_stays_one_cluster` (3 events, 2.4 MHz
+bandwidth, ~1.1 MHz apart → 1 cluster); the existing dense 60 MHz/1 MHz-grid
+fixture (`test_c3_cluster_centres_bounds_span_at_high_event_density`, 300
+events) still resolves to ≥ 55 clusters, confirming the span bound alone
+(not the merge-cap widening) is what prevents high-density chaining.
+
+**`frame_dt_s` wiring.** Forwarded end-to-end: `energy.detect()` now carries
+`frame_dt_s` on its `Detection`; `pipeline.SessionCadenceStore.add()` takes
+an optional `frame_dt_s` per window and tracks the MAX over all contributing
+windows (a session normally shares one frame pitch, and the dt-filter only
+needs a single conservative floor — not a per-event lookup); `result()`
+forwards that stored max into `analyze_raster()`; `bench/stage1_rc_positives.py`
+forwards its detector's frame pitch the same way. Independent-review finding
+#2a: before this fix, `SessionCadenceStore` never forwarded `frame_dt_s`, so
+the C1 sub-frame dt-filter was silently inactive for session-level (pooled,
+multi-window) evidence even though it was active for single-window
+`analyze_raster()` calls — co-temporal trains pooled *across* windows could
+alias the same way the single-window path did pre-C1. Regression tests:
+`tests/test_pipeline_cadence_store.py` —
+`test_session_cadence_store_cotemporal_pairs_across_windows_not_periodic`
+(co-temporal pairs split across two `add()` calls, `frame_dt_s=250e-6` →
+`period.passed is False`) and
+`test_session_cadence_store_pools_genuine_640ms_cadence_across_windows`
+(genuine ~640 ms cadence sampled 4 events/window over 4 windows → pooled
+`period.t_hat_s` within 5 % of 0.640 s, `passed is True`).
+
+**Independent review outcomes recorded.** Harmonic-alias probe: a
+genuinely 4 ms-periodic train no longer aliases to a harmonic — reported
+4 ms in, 4 ms out (`test_c1_genuine_8ms_period_detected` and the new
+`test_period_test_frame_pitch_too_coarse` fine-pitch branch both confirm the
+estimator recovers the true fundamental, not a multiple). A Poisson
+(non-periodic, memoryless-arrival) null was probed and correctly rejected
+(no spurious pass). The estimator was also checked for permutation
+invariance of the input event ordering (pooling/sorting is by `t_start`
+inside `period_test`, so caller-supplied event order does not change the
+result).
+
+**DECISION: `R_MIN_PERIOD = 0.93` kept.** Measured RC/ELRS/DroneID-class
+link timing shows ≈5–6 % interval jitter around the nominal period; these
+links are crystal-timed (drift ≪ 1 %) and the dominant jitter source is
+frame-pitch quantisation of the observation itself, not the link. Modelled
+as `σ ≈ 0.29 · frame_dt_s` (uniform-quantisation-noise approximation): an
+83 µs pitch bucket on a 1 ms detector frame gives `R ≈ 0.99`, comfortably
+inside the 0.93 gate. The originally-considered 10 % jitter case is not a
+target link class for this gate (it would represent either a genuinely
+noisier/non-crystal timing source or a much coarser frame pitch than any
+current backend uses) and was not used to set the threshold.
+
+**FA budget after fix:** TODO — architect to fill from the running
+`bench/stage1_fa_budget.py` re-run.
+
+**RC positives after fix:** TODO — architect to fill from the running
+`bench/stage1_rc_positives.py` re-run.
+
+### FA budget after fix (ambient corpus, 6 sessions / 1160 windows, 2026-09-19 13:12)
+
+`| TOTAL | 1160 | 0 | 0 | 0 | 11 | 205 | 0 | 6 | 0 | 1160 | 0 |`
+
+- **hopping_candidate <= 5% of windows**: PASS -- 11/1160 = 0.95% — before the fix: 12/1160 = 1.03 %. Level-2 labels (grid / rc_link_family / droneid_cadence) remain 0 on
+ambient. INSUFFICIENT_CHANNELS still 1160/1160: the grid test is still not *exercised* by ambient RF — only
+the RC-positives bench exercises it. Timing test (`test_timing_bound_1s_window_at_12_288_msps`, 50 ms budget)
+flakes at 52–56 ms only while two benches and the RFUAV prepare share the CPU; 40 ms median when idle.

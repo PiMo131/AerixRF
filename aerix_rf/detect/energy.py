@@ -120,6 +120,10 @@ class Detection:
                                                               # session-level (cross-window) R3/R1(e)
                                                               # accumulation -- see aerix_rf.pipeline.
                                                               # Not part of the persisted record schema.
+    frame_dt_s: float | None = None  # this window's T1 frame pitch (slice_dt_s), forwarded to
+                                      # SessionCadenceStore so session-level period_test() gets a
+                                      # correct C1 dt-filter floor too (independent review 2026-09-19
+                                      # #2). Not part of the persisted record schema.
 
     def as_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -275,7 +279,7 @@ def detect(spec: Spectrogram, center_freq_mhz: float,
         noise_floor_lin=noise_lin, t0_s=0.0,
     )
     clusters = raster_mod.cluster_centres(events)
-    raster_result = raster_mod.analyze_raster(events)
+    raster_result = raster_mod.analyze_raster(events, frame_dt_s=slice_dt_s)
     wifi_beacon_idx = {t.cluster_index for t in raster_result.cadence_tags
                        if t.tag == "wifi_beacon_like"}
     cadence_ms = _cluster_cadence_ms(clusters, wifi_beacon_idx)
@@ -322,4 +326,5 @@ def detect(spec: Spectrogram, center_freq_mhz: float,
         duty_cycle=duty_cycle,
         stage1=stage1,
         events=events,
+        frame_dt_s=slice_dt_s,
     )

@@ -53,7 +53,16 @@ GATE_DB = 6.0            # arm threshold: floor + this many dB
 HYST_DB = 3.0            # hold threshold: floor + this many dB (hysteresis)
 EDGE_DB = 6.0            # the "-6 dB" in "-6 dB edge midpoint"
 _EPS = 1e-12
-_MAX_EVENTS = 64         # bounded cost per window (mirrors energy.py's cap)
+# C2 fix (docs/design/stage1-rc-positives-2026-09-19.md S3/S4): the old
+# ``_MAX_EVENTS = 64`` was a TIME cut, not a strength cut -- scipy.ndimage.label
+# numbers connected components in raster (time-major) scan order, so "first 64"
+# meant "components found in the first ~0.5% of the window" for any dense
+# capture (3-20 k bursts/s measured on real RC-transmitter IQ). Raised to 256
+# (the empirically working point in the design-doc cap sweep) and the
+# selection is now STRONGEST-256-BY-PEAK-POWER, not first-256-by-label-id, so
+# the retained events are no longer concentrated in a few milliseconds of the
+# window (see ``_channelise``). Still configurable per call site.
+_MAX_EVENTS = 256
 _MAX_REFINE = 16         # 33.3 us refinement is gated to this many bursts
 
 # 4-connectivity (no diagonal): a component can only grow along one axis at a
@@ -159,15 +168,56 @@ def _channelise(power_lin: np.ndarray, floor_lin: np.ndarray,
     objects = find_objects(labelled)
     floor_db = 10.0 * np.log10(np.maximum(floor_lin, _EPS))   # [n_bins], cheap
 
+    # C2 fix (perf revision): the arm-pixel confirmation ("is this component
+    # ever actually armed, not just held?") and the strength ranking used
+    # for the cap are computed for every label in one vectorised pass, so
+    # the per-event Python loop below never repeats a per-component boolean
+    # slice+``.any()`` (``labelled[t_slice, f_slice] == idx`` +
+    # ``high[...][region_mask].any()``). The retained set is the STRONGEST
+    # ``max_events`` (by peak power) of the arm-confirmed components, not
+    # the first ``max_events`` in label-id (time-major) order, so raising
+    # the cap does not concentrate events in a few ms of the window. The
+    # output loop still walks components in their original (time-major) id
+    # order, so the *order* of returned events is unchanged by this
+    # selection -- only which components survive the cap changes, and only
+    # the retained components pay for the (more expensive) per-event
+    # profile/edge-walk below.
+    #
+    # This gather is done via a single ``np.nonzero(low_closed)`` over the
+    # FOREGROUND pixels only, rather than ``scipy.ndimage.sum_labels``/
+    # ``maximum`` over the whole ``[n_frames, n_bins]`` image: those two
+    # ndimage calls each do a full-array pass regardless of how few labels
+    # exist, which costs ~40 ms on a 5000x1024 frame even when the
+    # foreground is a sparse handful of short bursts (<1% of pixels). Cost
+    # here scales with the number of foreground (labelled) pixels instead
+    # of the window size.
+    idx_t, idx_f = np.nonzero(low_closed)
+    labels_flat = labelled[idx_t, idx_f]
+    high_flat = high[idx_t, idx_f]
+    power_flat = power_lin[idx_t, idx_f]
+
+    arm_counts = np.bincount(labels_flat, weights=high_flat.astype(np.float64),
+                              minlength=n_labels + 1)[1:]
+    label_ids = np.arange(1, n_labels + 1)
+    confirmed_ids = label_ids[arm_counts > 0]
+    if confirmed_ids.size == 0:
+        return []
+    if confirmed_ids.size > max_events:
+        peak_all = np.full(n_labels + 1, -np.inf)
+        np.maximum.at(peak_all, labels_flat, power_flat)
+        peak_vals = peak_all[confirmed_ids]
+        top = np.argpartition(-peak_vals, max_events - 1)[:max_events]
+        selected_ids = set(int(i) for i in confirmed_ids[top])
+    else:
+        selected_ids = set(int(i) for i in confirmed_ids)
+
     events: list[BurstEvent] = []
     for idx, obj in enumerate(objects, start=1):
-        if obj is None or len(events) >= max_events:
-            continue
-        t_slice, f_slice = obj
-        region_mask = labelled[t_slice, f_slice] == idx
-        if not high[t_slice, f_slice][region_mask].any():
-            continue  # low-only blip, never confirmed by the arm threshold
+        if obj is None or idx not in selected_ids:
+            continue  # obj is None: not a labelled pixel; not selected:
+                       # either never arm-confirmed, or cut by the cap above
 
+        t_slice, f_slice = obj
         t_start_i, t_stop_i = t_slice.start, t_slice.stop
         f_start_i, f_stop_i = f_slice.start, f_slice.stop
         n_frames = t_stop_i - t_start_i

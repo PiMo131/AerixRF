@@ -63,8 +63,20 @@ class SessionCadenceStore:
     """
     window_s: float = 10.0
     events: list[BurstEvent] = field(default_factory=list)
+    # Independent review fix (2026-09-19 #2a): frame_dt_s was not forwarded
+    # to analyze_raster() here, so period_test()'s C1 sub-frame dt-filter
+    # (docs/design/stage1-rc-positives-2026-09-19.md) was silently inactive
+    # for session-level (multi-window, pooled) evidence -- co-temporal
+    # trains pooled across windows could alias to a near-zero dt just as the
+    # single-window path did before C1. Tracked as the MAX frame_dt_s of all
+    # contributing windows (not per-event; the dt-filter only needs a single
+    # conservative floor, and windows in one session normally share one
+    # frame pitch, so taking the max is a documented, simple, safe choice
+    # rather than a per-event lookup).
+    frame_dt_s: float | None = None
 
-    def add(self, det_events: list[BurstEvent], captured_at: float) -> None:
+    def add(self, det_events: list[BurstEvent], captured_at: float,
+            frame_dt_s: float | None = None) -> None:
         if not det_events:
             return
         shifted = [dc_replace(e, t_start=e.t_start + captured_at, t_end=e.t_end + captured_at)
@@ -72,12 +84,14 @@ class SessionCadenceStore:
         self.events.extend(shifted)
         cutoff = max(e.t_end for e in self.events) - self.window_s
         self.events = [e for e in self.events if e.t_end >= cutoff]
+        if frame_dt_s is not None and frame_dt_s > 0.0:
+            self.frame_dt_s = frame_dt_s if self.frame_dt_s is None else max(self.frame_dt_s, frame_dt_s)
 
     def result(self):
         """Latest session-level ``RasterResult``, or ``None`` if empty."""
         if not self.events:
             return None
-        return raster_mod.analyze_raster(self.events)
+        return raster_mod.analyze_raster(self.events, frame_dt_s=self.frame_dt_s)
 
 
 @dataclass
@@ -239,7 +253,7 @@ def process_window(win: IQWindow, cfg: Config, *, decode: bool = True,
 
     cadence_source = "window"
     if session_cadence is not None:
-        session_cadence.add(det.events, win.captured_at)
+        session_cadence.add(det.events, win.captured_at, det.frame_dt_s)
         sres = session_cadence.result()
         if sres is not None:
             if "droneid_cadence_candidate" in sres.labels and det.morphology != "noise":

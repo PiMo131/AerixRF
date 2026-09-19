@@ -207,7 +207,16 @@ def _window_record(det, model: str, pack_id: str, slice_name: str, mode: str,
                     dwell_select: dict[str, Any] | None = None) -> dict[str, Any]:
     from aerix_rf.detect import raster as raster_mod
 
-    rr = raster_mod.analyze_raster(det.events)
+    # Independent review fix (2026-09-19 #2b): this recomputed
+    # analyze_raster() over det.events without forwarding det.frame_dt_s, so
+    # the C1 sub-frame dt-filter (period_test) was silently inactive here
+    # even though the live energy.detect() path (which produced det.stage1)
+    # already ran it correctly. Passing the same frame_dt_s reproduces
+    # energy.detect()'s own analyze_raster() call exactly, rather than
+    # duplicating/trusting det.stage1's flattened summary (which does not
+    # carry every RasterResult field this record needs, e.g. offset_hz,
+    # aliases, rayleigh_r_debiased, duration_hist).
+    rr = raster_mod.analyze_raster(det.events, frame_dt_s=det.frame_dt_s)
     return {
         "model": model,
         "pack": pack_id,

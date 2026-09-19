@@ -141,6 +141,36 @@ def test_noise_only_yields_zero_events():
     assert events == []
 
 
+def test_c2_event_cap_selects_across_full_time_span():
+    """C2 (docs/design/stage1-rc-positives-2026-09-19.md S3/S4): the old
+    ``_MAX_EVENTS`` cap kept the first N components in label-id (time-major)
+    order, so a dense capture's retained events were confined to the first
+    slice of the window. The fix selects the strongest N by peak power
+    instead, so a dense, amplitude-varied burst stream should still yield
+    events spread across (most of) the window, not just its start."""
+    frame_dt_s = 200e-6
+    n_bursts = 1000
+    cycle_frames = 5   # 1 on-frame + 4 gap-frames per burst
+    n_frames = n_bursts * cycle_frames   # 5000 frames == 1.0 s window
+    frames = np.full((n_frames, N_BINS), FLOOR_LIN)
+
+    rng = np.random.default_rng(11)
+    grid = [k * 1.0e6 for k in range(-5, 5)]
+    peak_db = rng.uniform(15.0, 25.0, size=n_bursts)   # amplitude uncorrelated with time
+    for i in range(n_bursts):
+        a = i * cycle_frames
+        fc = grid[i % len(grid)]
+        peak = FLOOR_LIN * 10 ** (peak_db[i] / 10.0)
+        frames[a:a + 1, _band_mask(fc, 1.0e6)] = peak
+
+    events = detect_bursts(frames, fs=FS, frame_dt_s=frame_dt_s, freqs_hz=FREQS_HZ,
+                            noise_floor_lin=FLOOR_LIN)
+    assert len(events) <= 256
+    window_s = n_frames * frame_dt_s
+    t_span = max(ev.t_start for ev in events) - min(ev.t_start for ev in events)
+    assert t_span >= 0.90 * window_s, f"retained events span only {t_span:.3f}s of {window_s:.3f}s"
+
+
 def test_timing_bound_1s_window_at_12_288_msps():
     fs = 12.288e6
     n_frames = int(round(1.0 / FRAME_DT_S))   # 5000
