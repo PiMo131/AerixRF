@@ -391,12 +391,13 @@ def detect(spec: Spectrogram, center_freq_mhz: float,
     # frequency occupancy -- see ``perbin_noise_floor_lin``'s ``ref_lin``.
     # It is the mean noise power per bin of the UNSMOOTHED array; the boxcar
     # preserves the mean, so it is the right scale for ``lin_for_bursts``.
-    floor_perbin = bursts_mod.perbin_noise_floor_lin(
-        lin_for_bursts, l_eff=l_eff, ref_lin=noise_lin)
+    floor_perbin, floor_excess_db = bursts_mod.perbin_noise_floor_lin(
+        lin_for_bursts, l_eff=l_eff, ref_lin=noise_lin, return_excess=True)
 
     events = bursts_mod.detect_bursts(
         lin_for_bursts, fs=spec.sample_rate, frame_dt_s=slice_dt_s, freqs_hz=freqs_hz_abs,
-        noise_floor_lin=floor_perbin, l_eff=l_eff, t0_s=0.0,
+        noise_floor_lin=floor_perbin, floor_excess_db=floor_excess_db,
+        l_eff=l_eff, t0_s=0.0,
     )
     clusters = raster_mod.cluster_centres(events)
     raster_result = raster_mod.analyze_raster(events, frame_dt_s=slice_dt_s)

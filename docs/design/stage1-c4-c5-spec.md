@@ -597,3 +597,140 @@ the two large `iq=` sessions (899 windows) contribute 1 (0.1 %). More looks buy 
 * `FRAGMENT_MAX_BW_HZ` is hard-coded to the T1 smoothing width (300 kHz). If the
   front-end smoothing changes it must change with it; it should eventually be
   carried on the event or passed from `energy.detect`.
+
+## § FA fix sensitivity 2026-09-19
+
+Review finding on the FA fix (594eed9). Independent reviewer measurement on a
+300 kHz component at 12.288 MS/s / 1024 bins:
+
+* `bw_noise_limited` is True for 100 % of bursts at every SNR <= 13 dB and
+  False at >= 14 dB;
+* the resulting `is_unresolved_fragment` hop-set exclusion dropped 100 % of
+  true bursts at <= 10.5 dB, 18 % at 11 dB, 0 % at >= 12.5 dB.
+
+**Verdict: the 594eed9 rule was an SNR test, not a fragment test.** The two
+conditions it used (`bw_noise_limited`, and a width below the 300 kHz T1
+smoothing kernel) are both consequences of "peak less than `EDGE_DB` = 6 dB
+above the hold threshold", so together they select *weak*, not *fragmented*.
+RC-positives and DroneID work targets 8-10 dB SNR, i.e. exactly the region the
+rule deleted. Not acceptable.
+
+### The missing measurement: occupancy, not strength
+
+A skirt/speckle maximum inside a standing Wi-Fi/video occupant and a weak hop
+burst on an idle bin are indistinguishable by *strength*. They are trivially
+distinguishable by *how long their bins are busy*, and the C4 per-bin floor
+already measures that and then throws it away:
+
+`perbin_noise_floor_lin` estimates each bin's floor as a debiased 25th
+percentile over the window, then clamps/rejects it against the band-wide
+reference `F_ref` (`FLOOR_CLAMP_DB` = 10 dB). The **pre-clamp** ratio
+`10*log10(Q25_debiased / F_ref)` is the discriminant:
+
+| bin | pre-clamp excess |
+|---|---|
+| idle bin carrying a 10 %-duty hop burst | ~0 dB (Q25 is the noise) |
+| bin inside a continuously occupied Wi-Fi/video channel | many dB, usually past the 10 dB clamp so the estimate is *rejected* |
+
+Raw excess alone is still not enough: a *continuously on* narrow emitter also
+lifts its own bins (verified — the original reviewer fixture is a duty-1.0
+tone, and its 300 kHz component reaches 0.58-0.84 MHz of excess >= 3 dB at
+7-18 dB SNR). What separates a fragment from a channel is that the occupied
+run around a fragment is **much wider than any channel this module models**.
+
+### Rule implemented (FA fix 2)
+
+`bursts.perbin_noise_floor_lin(..., return_excess=True)` now also returns the
+pre-clamp per-bin excess in dB (free: the `np.partition` that produces it is
+already paid for). `bursts._occupied_span_hz` converts it, once per window in
+O(n_bins), into the width of the contiguous run of *occupied* bins
+(`FLOOR_OCCUPIED_EXCESS_DB` = 3 dB) containing each bin. Each `BurstEvent`
+records `floor_excess_db` (max over its own footprint, diagnostic) and
+`floor_occupied_span_hz` (at its peak bin).
+
+`raster.is_unresolved_fragment` gains a third, decisive conjunct:
+
+```
+bw_noise_limited  AND  bw_6db_hz < 300 kHz  AND
+floor_occupied_span_hz >= FRAGMENT_MIN_OCCUPIED_SPAN_HZ (1.0 MHz)
+```
+
+1.0 MHz is above the widest hop channel this module models (the 1 MHz FHSS
+raster) and far below the narrowest standing occupant of interest (5 MHz
+analog FPV, 20 MHz Wi-Fi). **Unknown fails open**: an event with no occupancy
+measurement (`floor_occupied_span_hz == 0.0`, the default when a caller does
+not pass `floor_excess_db`) is never a fragment, so the rule can only ever be
+armed by positive occupancy evidence.
+
+Second half of the fix (item (c) of the review): when `bw_noise_limited`, the
+-6 dB midpoint is a coin flip between two noise crossings, but the peak is
+still a real local maximum. `_channelise` now re-estimates `centre_hz` as the
+floor-subtracted power-weighted centroid of the bounded (`CENTROID_MAX_BINS` =
+64) contiguous above-hold run around the peak, and records
+`centre_source = "above_hold_centroid"`. `bw_6db_hz` stays a lower bound and
+stays flagged by `bw_noise_limited`; only the centre is repaired. This is the
+"keep it as a hop-set member with an unreliable bandwidth" branch: a weak
+burst keeps a stable centre for R1/R2 instead of being dropped.
+
+The `wideband_occupancy_spans` / `is_occupancy_masked` half of 594eed9 is
+unchanged (R5 discriminant: a narrow event inside a merged occupancy span >= 4x
+wider is masked, not rejected).
+
+### Sensitivity, measured
+
+Harness `item1_sensitivity_fix2.py` (rerunnable; same fixture family as the
+reviewer's). "Counted" = survives the full `cluster_centres` usable filter
+(not edge-clipped, not an unresolved fragment, not occupancy-masked), 60
+trials/point, 12.288 MS/s / 1024 bins, 300 kHz Gaussian component.
+
+Fixture **hop_train** (4-frame bursts every 40 frames, 10 % duty, isolated
+band — the physical case the acceptance criterion is about):
+
+| SNR dB | detected/60 | frac counted main | frac counted 594eed9 | frac counted fix 2 |
+|---|---|---|---|---|
+| 5 | 9 | 1.00 | 0.00 | 1.00 |
+| 6 | 9 | 1.00 | 0.00 | 1.00 |
+| 7 | 11 | 1.00 | 0.00 | **1.00** |
+| 8 | 14 | 1.00 | 0.00 | 1.00 |
+| 9 | 22 | 1.00 | 0.00 | **1.00** |
+| 10 | 45 | 1.00 | 0.00 | 1.00 |
+| 11 | 60 | 1.00 | 0.03 | 1.00 |
+| 12 | 60 | 1.00 | 0.83 | 1.00 |
+| 14 | 60 | 1.00 | 1.00 | 1.00 |
+| 18 | 60 | 1.00 | 1.00 | 1.00 |
+
+Acceptance (>= 90 % counted at 9 dB, >= 50 % at 7 dB): **PASS**, 100 % at both.
+`floor_occupied_span_hz` is 0.00 MHz at every SNR for this fixture, i.e. the
+rule is not merely inactive by luck — the occupancy evidence it requires is
+genuinely absent. Regression-guarded by
+`tests/test_detect_raster.py::test_hop_member_sensitivity_9db`.
+
+Note on the *detected* column: below ~11 dB the component is not detected in
+every trial at all. That is the arm/hold P_fa threshold, identical on main and
+on the branch, and is a separate (real) sensitivity question from hop-set
+membership — it is why the table reports the counted *fraction of detections*.
+
+The reviewer's original duty-1.0 fixture behaves identically on main and on
+fix 2 (frac_main == frac_fix2 at every SNR). Its apparent collapse above 9 dB
+is `edge_clipped`: a component present in every frame touches both time edges
+by construction, which `cluster_centres` has always excluded. That fixture
+therefore cannot measure this rule above ~8 dB; use `hop_train`.
+
+### False alarms, measured
+
+ANTSDR ambient corpus, 1160 windows, `bench/out/stage1_fa_budget_c4_fix2.md`:
+
+<!-- FA-TOTAL-ROW -->
+
+### Open gaps
+
+* The occupancy discriminant is blind to a standing occupant narrower than
+  1 MHz that fragments (none observed; would need a narrowband continuous
+  emitter with strong spectral ripple).
+* A hopper that dwells >25 % of the window on one bin lifts its own bin's Q25;
+  with a hop set of >= 4 channels each bin's duty is < 25 % and the excess stays
+  ~0 dB, but a 2-channel hopper at 50 % duty per channel would self-flag. The
+  1 MHz span floor protects it (its occupied run is one channel wide), but this
+  is an untested corner.
+* Not yet measured on real weak-hopper IQ: RC-positives at 8-10 dB SNR against
+  a *live* Wi-Fi occupant is still the outstanding validation.

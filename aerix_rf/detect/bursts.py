@@ -144,6 +144,40 @@ class BurstEvent:
                                      # detector artefacts (a lower bound and a
                                      # midpoint of that lower bound), not a
                                      # measured channel. See ``_edge_cross``.
+    floor_excess_db: float = 0.0     # FA fix 2 (2026-09-19): how far this
+                                     # event's OWN bins' pre-clamp per-bin floor
+                                     # estimate (debiased Q25 over the window)
+                                     # sits above the band-wide noise reference
+                                     # ``F_ref``. ~0 dB => the event sits on
+                                     # bins that are IDLE most of the window
+                                     # (a genuine intermittent burst); large =>
+                                     # the bins are continuously occupied, so
+                                     # the event is a local maximum INSIDE a
+                                     # standing occupant (a skirt/speckle
+                                     # fragment). 0.0 when the caller did not
+                                     # supply the excess profile: unknown is
+                                     # treated as "idle" (fail-open, favours
+                                     # sensitivity). See
+                                     # ``raster.is_unresolved_fragment``.
+    floor_occupied_span_hz: float = 0.0  # FA fix 2 (2026-09-19): width of the
+                                     # contiguous run of bins around this
+                                     # event's peak whose per-bin floor is
+                                     # elevated (``floor_excess_db`` >=
+                                     # ``FLOOR_OCCUPIED_EXCESS_DB``), i.e. the
+                                     # width of the STANDING OCCUPANT this
+                                     # event sits inside. ~0 for a burst on an
+                                     # idle bin; ~the channel width for a
+                                     # continuously-on narrow emitter; many MHz
+                                     # for a speckle maximum inside Wi-Fi/video
+                                     # occupancy. 0.0 when unknown.
+    centre_source: str = "edge_midpoint"  # "edge_midpoint" (the -6 dB midpoint)
+                                     # or "above_hold_centroid" -- the
+                                     # power-weighted centroid of the
+                                     # contiguous above-hold run around the
+                                     # peak, used when ``bw_noise_limited``
+                                     # makes the -6 dB midpoint an artefact.
+                                     # ``bw_6db_hz`` stays a LOWER BOUND in
+                                     # that case; only the centre is repaired.
 
     def as_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -204,7 +238,9 @@ def perbin_noise_floor_lin(power_lin: np.ndarray, *, l_eff: float = DEFAULT_L_EF
                             stride: int = FLOOR_STRIDE,
                             min_floor_frames: int = FLOOR_MIN_FRAMES,
                             clamp_db: float = FLOOR_CLAMP_DB,
-                            ref_lin: float | None = None) -> np.ndarray:
+                            ref_lin: float | None = None,
+                            return_excess: bool = False,
+                            ) -> np.ndarray | tuple[np.ndarray, np.ndarray]:
     """Per-bin noise floor, linear MEAN power, ``[n_bins]`` (design doc
     C4(a)).
 
@@ -232,11 +268,21 @@ def perbin_noise_floor_lin(power_lin: np.ndarray, *, l_eff: float = DEFAULT_L_EF
     percentile over bins -- must pass it here. This is a reference for the
     CLAMP only; the per-bin Q25 estimate is unchanged, so real analog
     tilt/roll-off is still tracked per bin.
+
+    ``return_excess`` additionally returns ``excess_db[n_bins]`` =
+    ``10*log10(pre-clamp debiased Q25 / F_ref)``: how far each bin's own
+    quartile sits above the band-wide noise reference BEFORE the clamp
+    rejects it. That is the detector's only direct measurement of "this bin
+    is occupied for most of the window", and it is the discriminant that
+    separates a skirt fragment of a standing occupant from a weak burst on an
+    idle bin (FA fix 2, 2026-09-19). It is returned rather than recomputed
+    because the ``np.partition`` that produces it is the expensive part.
     """
     power_lin = np.asarray(power_lin, dtype=np.float64)
     n_frames, n_bins = power_lin.shape
     if n_frames == 0 or n_bins == 0:
-        return np.zeros(n_bins, dtype=np.float64)
+        z = np.zeros(n_bins, dtype=np.float64)
+        return (z, z.copy()) if return_excess else z
 
     step = max(1, int(stride))
     sub = power_lin[::step]
@@ -252,7 +298,9 @@ def perbin_noise_floor_lin(power_lin: np.ndarray, *, l_eff: float = DEFAULT_L_EF
 
     f_ref = float(ref_lin) if ref_lin is not None else float(np.median(floor))
     if not np.isfinite(f_ref) or f_ref <= 0.0:
-        return np.maximum(floor, _EPS)
+        out = np.maximum(floor, _EPS)
+        return (out, np.zeros(n_bins, dtype=np.float64)) if return_excess else out
+    excess_db = 10.0 * np.log10(np.maximum(floor, _EPS) / f_ref)
     # Outside +/- ``clamp_db`` of the reference the per-bin estimate is
     # REJECTED, and the fallback is the reference itself -- not the rejection
     # boundary. Clipping to the boundary (the first implementation) leaves a
@@ -271,7 +319,8 @@ def perbin_noise_floor_lin(power_lin: np.ndarray, *, l_eff: float = DEFAULT_L_EF
     # choice).
     lo = f_ref * 10.0 ** (-clamp_db / 10.0)
     hi = f_ref * 10.0 ** (clamp_db / 10.0)
-    return np.where((floor < lo) | (floor > hi), f_ref, floor)
+    out = np.where((floor < lo) | (floor > hi), f_ref, floor)
+    return (out, excess_db) if return_excess else out
 
 
 def _edge_cross(profile_db: np.ndarray, freqs_hz: np.ndarray, peak_idx: int,
@@ -317,10 +366,61 @@ def _edge_cross(profile_db: np.ndarray, freqs_hz: np.ndarray, peak_idx: int,
     return float(edge), True, False
 
 
+FLOOR_OCCUPIED_EXCESS_DB = 3.0  # a bin whose pre-clamp per-bin floor sits this
+                            # far above the band noise reference was occupied
+                            # for most of the window (the floor is a debiased
+                            # 25th percentile over time, so >25 % duty starts
+                            # lifting it). 3 dB is ~1.5x the p10-p90 analog
+                            # tilt across the band and well under
+                            # ``FLOOR_CLAMP_DB`` = 10 dB, so a bin whose
+                            # estimate was REJECTED by the clamp (Q25 >> ref,
+                            # continuous occupant) always counts as occupied.
+CENTROID_MAX_BINS = 64    # bound on the above-hold run walked by the centroid
+                            # centre fallback (FA fix 2, 2026-09-19). Same
+                            # discipline as the -6 dB edge walk: a bounded walk
+                            # keeps the per-event cost O(1) in a fully occupied
+                            # band. 64 bins = 768 kHz at 12.288 MS/s / 1024,
+                            # i.e. >2x the 300 kHz T1 smoothing kernel, so a
+                            # resolved RC hop channel is never truncated.
+
+
+def _occupied_span_hz(floor_excess_db: np.ndarray | None,
+                       freqs_hz: np.ndarray,
+                       excess_db: float = FLOOR_OCCUPIED_EXCESS_DB) -> np.ndarray | None:
+    """Per-bin width (Hz) of the contiguous run of OCCUPIED bins containing
+    that bin, or ``None`` when no excess profile was supplied (FA fix 2,
+    2026-09-19).
+
+    "Occupied" = the bin's own pre-clamp per-bin floor estimate sits
+    ``excess_db`` above the band-wide noise reference, which for a debiased
+    25th-percentile-over-time floor means the bin carried energy for a large
+    fraction of the window. The RUN WIDTH is what matters downstream: it
+    answers "how wide is the standing thing my event is sitting inside?" --
+    ~0 for a hop burst on an idle bin, ~one channel for a continuously-on
+    narrow emitter, and many MHz for a speckle maximum inside a Wi-Fi/video
+    occupant. Computed once per window from run boundaries (O(n_bins)), not
+    per event.
+    """
+    if floor_excess_db is None:
+        return None
+    occ = np.asarray(floor_excess_db, dtype=np.float64) >= excess_db
+    n_bins = occ.size
+    out = np.zeros(n_bins, dtype=np.float64)
+    if not occ.any():
+        return out
+    bin_hz = float(abs(freqs_hz[1] - freqs_hz[0])) if freqs_hz.size > 1 else 0.0
+    edges = np.flatnonzero(np.diff(np.concatenate(([False], occ, [False])).astype(np.int8)))
+    for start, stop in zip(edges[0::2], edges[1::2]):
+        out[start:stop] = (stop - start) * bin_hz
+    return out
+
+
 def _channelise(power_lin: np.ndarray, floor_lin: np.ndarray,
                  freqs_hz: np.ndarray, t0_s: float, frame_dt_s: float,
-                 gate_db: float, hyst_db: float, max_events: int) -> list[BurstEvent]:
+                 gate_db: float, hyst_db: float, max_events: int,
+                 floor_excess_db: np.ndarray | None = None) -> list[BurstEvent]:
     n_total_frames, n_bins = power_lin.shape
+    occupied_span_hz = _occupied_span_hz(floor_excess_db, freqs_hz)
     gate_ratio = 10.0 ** (gate_db / 10.0)
     hyst_ratio = 10.0 ** (hyst_db / 10.0)
     floor_row = floor_lin[None, :]
@@ -421,6 +521,32 @@ def _channelise(power_lin: np.ndarray, floor_lin: np.ndarray,
         bw_noise_limited = bool(left_nl or right_nl)
         centre_hz = 0.5 * (left_hz + right_hz)
         bw_hz = right_hz - left_hz
+        centre_source = "edge_midpoint"
+
+        # FA fix 2 (2026-09-19, docs/design/stage1-c4-c5-spec.md "S FA fix
+        # sensitivity 2026-09-19"): when the walk was noise-limited the -6 dB
+        # midpoint is a coin-flip between two threshold crossings of the
+        # noise, but the PEAK is still a real local maximum. Re-estimate the
+        # centre as the power-weighted centroid of the contiguous run of bins
+        # that clear the hold threshold around the peak (floor-subtracted
+        # weights, so the noise pedestal does not pull the centroid). This
+        # keeps a weak-but-real burst usable as a hop-set member with a
+        # STABLE centre; ``bw_6db_hz`` remains a lower bound and stays
+        # flagged by ``bw_noise_limited``.
+        if bw_noise_limited:
+            lo_i = local_peak
+            lo_stop = max(0, local_peak - CENTROID_MAX_BINS)
+            while lo_i - 1 >= lo_stop and profile_db[lo_i - 1] > noise_limit_db[lo_i - 1]:
+                lo_i -= 1
+            hi_i = local_peak
+            hi_stop = min(n_bins - 1, local_peak + CENTROID_MAX_BINS)
+            while hi_i + 1 <= hi_stop and profile_db[hi_i + 1] > noise_limit_db[hi_i + 1]:
+                hi_i += 1
+            w = np.maximum(profile_lin[lo_i:hi_i + 1] - floor_lin[lo_i:hi_i + 1], 0.0)
+            w_sum = float(w.sum())
+            if w_sum > 0.0:
+                centre_hz = float(np.dot(w, freqs_hz[lo_i:hi_i + 1]) / w_sum)
+                centre_source = "above_hold_centroid"
 
         time_clip = (t_start_i == 0) or (t_stop_i == n_total_frames)
         edge_clipped = bool(time_clip or left_clip or right_clip)
@@ -440,6 +566,11 @@ def _channelise(power_lin: np.ndarray, floor_lin: np.ndarray,
             n_frames=int(n_frames),
             edge_clipped=edge_clipped,
             bw_noise_limited=bw_noise_limited,
+            floor_excess_db=(0.0 if floor_excess_db is None
+                              else float(floor_excess_db[f_start_i:f_stop_i].max())),
+            floor_occupied_span_hz=(0.0 if occupied_span_hz is None
+                                     else float(occupied_span_hz[local_peak])),
+            centre_source=centre_source,
         ))
     return events
 
@@ -487,6 +618,7 @@ def detect_bursts(
     frame_dt_s: float,
     freqs_hz: np.ndarray | None = None,
     noise_floor_lin: np.ndarray | float | None = None,
+    floor_excess_db: np.ndarray | None = None,
     t0_s: float = 0.0,
     gate_db: float | None = None,
     hysteresis_db: float | None = None,
@@ -510,7 +642,12 @@ def detect_bursts(
     ``noise_floor_lin`` is the per-bin (or scalar) linear noise floor; if
     omitted it is estimated as the 5th percentile of each bin's power over
     time (a fallback only -- callers that already track a floor should pass
-    it). If ``iq``/``iq_fs`` are given, up to ``max_refine`` bursts (by order
+    it). ``floor_excess_db`` is the matching per-bin pre-clamp floor excess
+    over the band reference (``perbin_noise_floor_lin(..., return_excess=True)``);
+    when supplied it is recorded per event as
+    :attr:`BurstEvent.floor_excess_db` and is what lets the raster layer tell a
+    skirt fragment of a standing occupant from a weak burst on an idle bin.
+    If ``iq``/``iq_fs`` are given, up to ``max_refine`` bursts (by order
     of detection) get a 33.3 us-native duration refinement from a re-STFT of
     their own raw-IQ slice.
 
@@ -541,8 +678,13 @@ def detect_bursts(
 
     floor_lin_arr = _floor_lin(power_lin, noise_floor_lin)
 
+    excess_arr = None
+    if floor_excess_db is not None:
+        excess_arr = np.broadcast_to(
+            np.asarray(floor_excess_db, dtype=np.float64), (n_bins,))
+
     events = _channelise(power_lin, floor_lin_arr, freqs_hz, t0_s, frame_dt_s,
-                          gate_db, hysteresis_db, max_events)
+                          gate_db, hysteresis_db, max_events, excess_arr)
 
     if iq is not None and events:
         floor_lin_scalar = float(floor_lin_arr.mean())

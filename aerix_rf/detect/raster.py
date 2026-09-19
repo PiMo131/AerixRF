@@ -92,6 +92,24 @@ FRAGMENT_MAX_BW_HZ = 300e3        # FA fix 2026-09-19 (docs/design/
                                     # not vote in channel/hop-set reasoning.
                                     # Configurable: must track the front-end's
                                     # frequency smoothing.
+FRAGMENT_MIN_OCCUPIED_SPAN_HZ = 1.0e6  # FA fix 2 (2026-09-19): third and
+                                    # decisive condition on
+                                    # ``is_unresolved_fragment``. The event's
+                                    # peak bin must sit inside a CONTIGUOUS RUN
+                                    # of continuously-occupied bins
+                                    # (``bursts._occupied_span_hz``) at least
+                                    # this wide -- i.e. inside a standing
+                                    # occupant wider than any channel this
+                                    # module models as a hop channel (the widest
+                                    # is the 1 MHz FHSS raster). Without it the
+                                    # rule was a pure SNR test and deleted 100 %
+                                    # of genuine 300 kHz bursts below ~10.5 dB
+                                    # SNR (reviewer measurement, spec S "FA fix
+                                    # sensitivity 2026-09-19"). Configurable;
+                                    # must stay above the widest modelled hop
+                                    # channel and below the narrowest standing
+                                    # occupant of interest (a 5 MHz analog FPV
+                                    # or 20 MHz Wi-Fi channel).
 
 
 CLUSTER_MAX_SPAN_HZ = 5.0e6       # a cluster may not grow past this centre-
@@ -525,12 +543,14 @@ def is_occupancy_masked(event: BurstEvent, spans: list[tuple[float, float]],
 
 
 def is_unresolved_fragment(event: BurstEvent,
-                            max_bw_hz: float | None = None) -> bool:
+                            max_bw_hz: float | None = None,
+                            min_occupied_span_hz: float = FRAGMENT_MIN_OCCUPIED_SPAN_HZ,
+                            ) -> bool:
     """True when ``event``'s bandwidth and centre are detector artefacts
     rather than measurements (FA fix 2026-09-19, see
     ``docs/design/stage1-c4-c5-spec.md``).
 
-    Two conditions must hold together:
+    Three conditions must hold together:
 
     * ``bw_noise_limited`` -- at least one -6 dB edge walk terminated on the
       per-bin noise limit instead of on the -6 dB level, i.e. the peak is less
@@ -541,13 +561,26 @@ def is_unresolved_fragment(event: BurstEvent,
       detector's own frequency resolution, which is impossible for a real
       component: the T1 path smooths with a 300 kHz boxcar, so even a 250 kHz
       RC hop channel measures WIDER than the kernel, never narrower.
+    * ``floor_occupied_span_hz >= FRAGMENT_MIN_OCCUPIED_SPAN_HZ`` -- the event's
+      peak bin sits inside a contiguous run of CONTINUOUSLY OCCUPIED bins
+      (pre-clamp per-bin floor well above the band noise reference) that is
+      wider than any channel this module models. This is the condition that
+      makes the rule a fragment test rather than an SNR test. A skirt/speckle
+      maximum inside a standing Wi-Fi/video occupant sits inside a multi-MHz
+      occupied run by construction; a weak hop burst sits on a bin that is
+      idle for ~99 % of the window (span 0), and even a continuously-on narrow
+      emitter only produces a run about one channel wide. Events carrying no
+      occupancy measurement (``0.0``, the default when the caller did not pass
+      ``floor_excess_db`` to ``detect_bursts``) are therefore never fragments
+      -- unknown fails OPEN, towards sensitivity.
 
     The conjunction matters. ``bw_noise_limited`` alone is far too broad
     (72 % of events on the ANTSDR ambient corpus: every weak-but-real burst
     whose peak sits under ~10 dB over its floor is flagged, genuine hop
     bursts included), while a width test alone would discard narrow bursts
-    that really were resolved. Together they select exactly the events for
-    which the detector holds no evidence of a channel at all.
+    that really were resolved. The first two together are still only an SNR
+    test (measured: every genuine 300 kHz burst below ~10.5 dB SNR satisfies
+    both), which is why the occupancy evidence is required as well.
 
     Evidence level: this is a level-1 measurement-validity gate, not a
     classification. A rejected event is "no channel measured here", never
@@ -556,7 +589,8 @@ def is_unresolved_fragment(event: BurstEvent,
     if max_bw_hz is None:
         max_bw_hz = FRAGMENT_MAX_BW_HZ
     return bool(getattr(event, "bw_noise_limited", False)
-                and event.bw_6db_hz < max_bw_hz)
+                and event.bw_6db_hz < max_bw_hz
+                and getattr(event, "floor_occupied_span_hz", 0.0) >= min_occupied_span_hz)
 
 
 def _repeat_clusters(clusters: list[Cluster]) -> list[Cluster]:

@@ -311,3 +311,193 @@ def test_energy_detect_iq_matches_canonical_fields():
     # The burst list itself is allowed (expected) to differ: the `iq=` path
     # runs a higher-look-count, per-bin-floor T1 pipeline on a finer-grained
     # local spectrogram.
+
+
+# --------------------------------------------------------------------------
+# (f) FA fix 2 (2026-09-19): sensitivity of the hop-set membership gate, the
+#     fail-open behaviour of the fragment rule, and a strong-signal
+#     regression against ``main``.
+#
+#     Context: the first form of ``raster.is_unresolved_fragment`` (bw_noise_
+#     limited AND bw < 300 kHz) was a pure SNR test -- an independent
+#     reviewer measured that it discarded ~100 % of genuine 300 kHz bursts
+#     below ~10.5 dB SNR.  The third conjunct (the event's peak bin must sit
+#     inside a >= 1 MHz CONTINUOUSLY OCCUPIED run) is what turns it back into
+#     a fragment test.  These tests pin that down.
+# --------------------------------------------------------------------------
+
+_SENS_FS = 12.288e6
+_SENS_BINS = 1024
+_SENS_FRAMES = 200
+_SENS_BW_HZ = 300e3           # one T1 frequency-smoothing kernel wide
+_SENS_CENTRE_BIN = _SENS_BINS // 2 + 3   # off-centre: avoid the DC bin
+
+
+def _sens_freqs() -> np.ndarray:
+    return np.fft.fftshift(np.fft.fftfreq(_SENS_BINS, d=1.0 / _SENS_FS))
+
+
+def _gauss_shape(bw_hz: float, centre_bin: int) -> np.ndarray:
+    bin_hz = _SENS_FS / _SENS_BINS
+    sigma_bins = max((bw_hz / 2.3548) / bin_hz, 0.5)   # FWHM -> sigma
+    x = np.arange(_SENS_BINS) - centre_bin
+    return np.exp(-0.5 * (x / sigma_bins) ** 2)
+
+
+_SENS_LOOKS = 8.0             # the T1 path's effective look count: the 300 kHz
+                              # frequency smoothing over ~25 bins gives
+                              # L_eff ~ 8-12 after the Hann correlation
+                              # correction.  Testing at L_eff = 1 would make
+                              # the ARM threshold (~ -ln(P_fa) = 16 dB over the
+                              # mean for a single look) the binding constraint
+                              # instead of the fragment rule, which is not what
+                              # this test is about.
+
+
+def _hop_train_power(snr_db: float, seed: int, looks: float = _SENS_LOOKS) -> np.ndarray:
+    """``looks``-averaged noise plus a 300 kHz component present on ~10 % of
+    frames in short bursts -- the physical case the acceptance criterion is
+    about (a hop dwell, not a continuously-on carrier).  Bursts never touch a
+    time edge, so ``edge_clipped`` does not confound the count; a duty-1.0
+    fixture would, because a component present in every frame IS time-edge
+    clipped and is excluded by ``cluster_centres`` for that reason alone.
+    """
+    rng = np.random.default_rng(seed)
+    power = rng.gamma(shape=looks, scale=1.0 / looks,
+                      size=(_SENS_FRAMES, _SENS_BINS))
+    sig = _gauss_shape(_SENS_BW_HZ, _SENS_CENTRE_BIN) * (10 ** (snr_db / 10.0) - 1.0)
+    on = np.zeros(_SENS_FRAMES, dtype=bool)
+    for k in range(5, _SENS_FRAMES - 5, 40):
+        on[k:k + 4] = True
+    return power + on[:, None] * sig[None, :]
+
+
+def _fraction_counted(snr_db: float, n_trials: int, seed0: int) -> tuple[float, float]:
+    """``(fraction detected, fraction of detected that are counted)``.
+
+    "Counted" = survives the same filter ``raster.cluster_centres`` applies
+    (not edge-clipped, not an unresolved fragment, not occupancy-masked) AND
+    actually lands in a cluster at the true centre.
+    """
+    from aerix_rf.detect import raster as raster_mod
+
+    freqs = _sens_freqs()
+    centre_true = float(freqs[_SENS_CENTRE_BIN])
+    detected = 0
+    counted = 0
+    for trial in range(n_trials):
+        power = _hop_train_power(snr_db, seed0 + trial)
+        floor, excess = bursts_mod.perbin_noise_floor_lin(
+            power, l_eff=_SENS_LOOKS, ref_lin=1.0, return_excess=True)
+        events = bursts_mod.detect_bursts(
+            power, fs=_SENS_FS, frame_dt_s=200e-6, freqs_hz=freqs,
+            noise_floor_lin=floor, floor_excess_db=excess, l_eff=_SENS_LOOKS)
+        cand = [e for e in events if abs(e.centre_hz - centre_true) < 1e6]
+        if not cand:
+            continue
+        detected += 1
+        best = max(cand, key=lambda e: e.peak_db_over_floor)
+        spans = raster_mod.wideband_occupancy_spans(events)
+        if (best.edge_clipped or raster_mod.is_unresolved_fragment(best)
+                or raster_mod.is_occupancy_masked(best, spans)):
+            continue
+        clusters = raster_mod.cluster_centres(events)
+        if any(best in c.events for c in clusters):
+            counted += 1
+    return detected / n_trials, (counted / detected if detected else 0.0)
+
+
+def test_hop_member_sensitivity_9db():
+    """A genuine 300 kHz hop burst must survive the fragment gate at modest
+    SNR.  Acceptance (architect): >= 90 % counted at 9 dB, >= 50 % at 7 dB.
+
+    This is the regression that the FIRST form of the FA fix failed.  With
+    the two-term rule (``bw_noise_limited and bw < 300 kHz``) the measured
+    numbers on this fixture were 0 % counted at 5 dB and 68 % at 6 dB, and on
+    the single-look reviewer fixture 0 % counted everywhere below ~10.5 dB:
+    every burst whose peak sits under ~10 dB over its floor is
+    ``bw_noise_limited`` by construction, and the smoothed width of a 300 kHz
+    component sits right at the 300 kHz threshold.  The third conjunct (peak
+    must sit inside a >= 1 MHz continuously-occupied run) is what makes the
+    rule a fragment test rather than an SNR test.
+    """
+    det_9, frac_9 = _fraction_counted(9.0, n_trials=24, seed0=5000)
+    det_7, frac_7 = _fraction_counted(7.0, n_trials=24, seed0=6000)
+    assert det_9 >= 0.90, f"fixture problem: only {det_9:.2f} detected at 9 dB"
+    assert det_7 >= 0.50, f"fixture problem: only {det_7:.2f} detected at 7 dB"
+    assert frac_9 >= 0.90, f"9 dB: only {frac_9:.2f} of true bursts counted"
+    assert frac_7 >= 0.50, f"7 dB: only {frac_7:.2f} of true bursts counted"
+
+
+def test_fragment_rule_fails_open():
+    """No occupancy information => never a fragment.
+
+    ``floor_occupied_span_hz`` defaults to 0.0, which is what every caller
+    that does not pass ``floor_excess_db`` to ``detect_bursts`` produces
+    (offline replay of older stores, unit fixtures, third-party callers).
+    Unknown must fail OPEN -- towards sensitivity -- because the rule DELETES
+    events, so treating "unmeasured" as "inside a wideband occupant" would
+    silently blind those paths.
+    """
+    from aerix_rf.detect import raster as raster_mod
+
+    common = dict(t_start=0.0, t_end=1e-3, duration_s=1e-3, centre_hz=2.44e9,
+                  bw_6db_hz=120e3, peak_db_over_floor=6.0,
+                  mean_db_over_floor=4.0, n_frames=5, edge_clipped=False,
+                  bw_noise_limited=True)
+
+    unknown = bursts_mod.BurstEvent(**common)
+    assert unknown.floor_occupied_span_hz == 0.0
+    assert not raster_mod.is_unresolved_fragment(unknown)
+
+    # Same event, but measured to sit on bins that are idle most of the
+    # window (a real intermittent burst): still not a fragment.
+    idle = bursts_mod.BurstEvent(**common, floor_occupied_span_hz=0.0,
+                                 floor_excess_db=0.2)
+    assert not raster_mod.is_unresolved_fragment(idle)
+
+    # Only when the peak is measured INSIDE a wide, continuously occupied
+    # run does the rule fire.
+    inside = bursts_mod.BurstEvent(**common, floor_occupied_span_hz=4.0e6,
+                                   floor_excess_db=9.0)
+    assert raster_mod.is_unresolved_fragment(inside)
+
+
+# Median ``bw_6db_hz`` of a 20 dB, 300 kHz component (seeds 4000..4007,
+# scalar floor 1.0) measured with ``git show main:aerix_rf/detect/bursts.py``
+# on 2026-09-19.  Hard-coded rather than recomputed so that this stays a
+# regression against the RELEASED behaviour even after main moves.
+_MAIN_STRONG_BW_HZ = 428315.3
+
+
+def test_strong_component_bw_matches_main_within_5pct():
+    """>= 20 dB regression: the FA-fix-2 changes (per-bin floor excess, the
+    above-hold centroid centre) must not move the measured bandwidth of a
+    strong, well-resolved component.
+
+    The centroid fallback only fires when ``bw_noise_limited`` is set and it
+    only repairs the CENTRE; ``bw_6db_hz`` must be untouched.  A drift here
+    would mean the -6 dB edge walk itself changed, which would invalidate
+    every stored bandwidth in the corpus.
+    """
+    freqs = _sens_freqs()
+    centre_true = float(freqs[_SENS_CENTRE_BIN])
+    bws = []
+    for seed in range(4000, 4008):
+        rng = np.random.default_rng(seed)
+        power = rng.gamma(shape=1.0, scale=1.0, size=(_SENS_FRAMES, _SENS_BINS))
+        power += _gauss_shape(_SENS_BW_HZ, _SENS_CENTRE_BIN)[None, :] * (
+            10 ** (20.0 / 10.0) - 1.0)
+        events = bursts_mod.detect_bursts(
+            power, fs=_SENS_FS, frame_dt_s=200e-6, freqs_hz=freqs,
+            noise_floor_lin=1.0)
+        cand = [e for e in events if abs(e.centre_hz - centre_true) < 1e6]
+        assert cand, f"seed {seed}: strong component not detected"
+        best = max(cand, key=lambda e: e.peak_db_over_floor)
+        bws.append(best.bw_6db_hz)
+
+    median_bw = float(np.median(bws))
+    rel = abs(median_bw - _MAIN_STRONG_BW_HZ) / _MAIN_STRONG_BW_HZ
+    assert rel <= 0.05, (
+        f"strong-component bw drifted {rel * 100:.1f} % from main "
+        f"({median_bw:.0f} Hz vs {_MAIN_STRONG_BW_HZ:.0f} Hz)")
