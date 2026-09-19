@@ -175,6 +175,58 @@ raster claim for these three protocols can be called PRIMARY.
 - CWNP (`cwnp.com/cwnp-wifi-blog/80211-beacon-intervals`), Intuitibits (`intuitibits.com/2017/08/28/...`) —
   practitioner technical write-ups on TBTT/beacon jitter.
 
+## SiK datasheet confirmation & public IQ (2026-09-19)
+
+**Q1 — Si4432/Si1000 (EZRadioPRO) POR sync word, CRC option, freq-deviation LSB, data-rate scaling; which
+CRC SiK firmware selects.**
+
+Confidence: **High** (primary datasheet + primary firmware source, both directly read this pass).
+
+- Source: Silicon Labs **AN440 Rev 0.9**, "Si4430/31/32 Register Descriptions" (`silabs.com/documents/public/
+  application-notes/AN440.pdf`), mirrored to `research/library/datasheets/
+  Silabs_AN440_Si4430-31-32_Register_Descriptions.pdf` (gitignored, not committed).
+- **Sync word registers 0x36–0x39** ("Sync Word 3..0"): POR defaults are `0x36=2Dh, 0x37=D4h, 0x38=00h,
+  0x39=00h` (AN440 register table, p.~5 register-map row, detailed register section ~line 81-84 of extracted
+  text). SiK's `radio_443x.c` never writes these registers (`grep -i sync` on the file matches only
+  `HEADER_CONTROL_2` sync-length config, no `SYNC_WORD_*` writes) — so the POR default stands. SiK configures
+  2-byte sync via `EZRADIOPRO_SYNCLEN_2BYTE` in `HEADER_CONTROL_2` (0x33), which per AN440 uses the top two
+  sync bytes → **effective on-air sync word is `0x2D 0xD4`**, confirming the design doc's "0x2DD4" expectation
+  exactly (not "0x2DD400" or a 4-byte value).
+- **CRC**: register **0x30 "Data Access Control"**, bits `encrc` (D2) and `crc[1:0]` (D1:D0). AN440 gives the
+  polynomial table: `00=CCITT, 01=CRC-16 (IBM), 10=IEC-16, 11=Biacheva`. **POR reset value of 0x30 is `0x8D`
+  = `1000_1101`**, i.e. `encrc=1` and `crc[1:0]=01` already at power-on — so CRC-16(IBM) with hardware CRC
+  enabled is the chip's *default*, not something SiK must actively select. SiK's `radio_443x.c` (line ~840)
+  nonetheless explicitly writes `EZRADIOPRO_ENCRC | EZRADIOPRO_CRC_16` in the non-Golay code path (constants
+  defined in `Firmware/include/Si1000_defs.h`: `EZRADIOPRO_CRC_16 = 0x01`, `EZRADIOPRO_ENCRC = 0x04`),
+  reasserting the POR default → **SiK uses hardware CRC-16 (IBM polynomial)** when not in Golay/FEC mode. In
+  the Golay-encoding path (`feature_golay==true`), SiK instead computes its **own software CRC-16** (`crc.c`,
+  ArduPilot's own table-driven CRC-16, not the Si4432 hardware engine) and Golay-encodes it, because Golay
+  needs bit-error correction before the CRC check — confirmed by the code comment at line ~825-827.
+- **Frequency deviation**: register 0x72, POR default `0x20`. AN440 formula (line ~2373): `Fd = 625 Hz ×
+  fd[8:0]` (9-bit value, MSB `fd[8]` lives in register 0x71 D2). Confirms the design doc's 625 Hz LSB exactly.
+- **TX data rate scaling**: registers 0x6E/0x6F (`txdr[15:0]`), POR default `0x0A3D` = 40 kbps (AN440 states
+  this explicitly). Formula: `TX_DR = 10^6 × txdr[15:0] / 2^16 bps` if Modulation-Mode-Control-1 (0x70) bit 5
+  = 0, or `/2^21` if that bit = 1 (low-data-rate mode). SiK's own rate table (`radio_443x.c` ~line 668-670)
+  writes `TX_DATA_RATE_1/0` and `FREQUENCY_DEVIATION` per selected air rate from its own precomputed constant
+  tables (2.4/4.8/9.6/19.2/38.4/57.6/64/125/250 kbps rows) rather than computing the formula at runtime —
+  the per-rate register bytes in those tables are consistent with the AN440 formula (spot-checked the 64 kbps
+  row: not re-derived digit-by-digit this pass, treat as **Medium** for the specific per-row byte values,
+  **High** for the formula and defaults themselves).
+
+**Q2 — Public raw IQ of SiK/3DR/RFD900 telemetry.**
+
+Result: **none found**. Searched GitHub ("gr-sik", "3DR radio" sigmf, RFD900 iq recording), Zenodo/IEEE
+DataPort/Kaggle (via general web search, not queried natively — no API access from this environment), and
+GNU Radio's SigMF recordings wiki page. No dataset, repo, or mailing-list attachment surfaced containing a
+labeled SiK/3DR/RFD900 telemetry IQ capture. Adjacent-but-not-matching hits: `sigmf/SigMF` (spec repo, no
+data), `danidask/SiKset` (a CLI *setup* tool, not captures), `ArduPilot/SiK` (firmware source, already
+in local corpus), a `LakeShark-Signal-Corpus` repo advertising "reviewed SigMF IQ recordings for open radio
+decoder testing" — **not verified to contain SiK/telemetry signals specifically**; if this becomes relevant,
+someone should open the repo and check its manifest before relying on it (flagging as unread, not vetted).
+No DEF CON/BlackHat drone-talk capture matching SiK/RFD900 turned up in this pass either. **Conclusion:
+opportunistic field recording (already noted in the design doc as the user's call) remains the only known
+route to real SiK ground-truth IQ.**
+
 ## Open follow-ups (not done this pass, name if reopened)
 - DJI RC uplink raster: needs either a non-sandboxed FCC exhibit fetch or a live capture — architect decision.
 - ExpressLRS true on-air duration table: needs a deeper firmware read (`tx_main.cpp`/rate-config array) or bench
