@@ -42,6 +42,9 @@ and independent review before it is "done". Evidence-wording rules apply.
       canonical 15.36 — must yield identical CRC-valid frames. **Session is not on this machine.**
 
 ## Classifier / datasets
+- [ ] DroneRFb-DIR downloaded+verified (63 GB, sha256 in manifest) but is a SPLIT zip set (`twin_droneRF.zip` + `.z01–.z31`):
+      recombine with `zip -s 0 … --out combined.zip` (~63 GB extra), inspect the inner layout, then write the adapter
+      (RF fingerprinting: 6 types × 3 individuals per the dataset brief).
 - [ ] G6 spectral floor: measured exact at ≤7 MHz continuous (70 %), collapses abruptly at 8 MHz (occ 0.70→0.32,
       level 25→11.8 dB, tilt-invariance lost). Analog FPV (6–8 MHz) straddles the edge ⇒ G6 readouts for FPV are
       morphology-only. Fix options: adaptive quiet-bin fraction, occupancy-aware fallback, or wider dwell. (tests in

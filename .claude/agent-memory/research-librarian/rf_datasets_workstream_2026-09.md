@@ -36,10 +36,24 @@ is actually done.
 State as of 2026-09-18 ~06:26 UTC (WILL BE STALE — re-check status.sh):
 - DroneRF (Mendeley): COMPLETE, 23/23 files verified against Mendeley file
   list (`dronerf_filelist.txt` in the old scratchpad), 3.8 GiB.
-- DroneRFb-DIR (SciDB, single 63.6 GiB zip via getZipFile endpoint): IN
-  PROGRESS, was at ~3% actual transfer (not the 100% du implied), ETA
-  ~2.5-4h, single aria2c process running detached (setsid), PID logged at
-  start of pass was 117040 — check it's still alive before assuming dead.
+- DroneRFb-DIR (SciDB, single 63.6 GiB zip via getZipFile endpoint):
+  COMPLETE and VERIFIED as of 2026-09-19. Survived one DNS-outage restart on
+  2026-09-18 (see incident note further down / in the JSON `notes` field).
+  `unzip -t` integrity check passed (32/32 members, no errors). SHA256 of
+  the outer zip: `e0b2d57bf0a46ce85d1e53a345af1b61f77ea1e378811ba187b4b73383aa3a70`
+  (self-computed only, no publisher checksum exists to cross-check against).
+  Moved from `~/rf-datasets/DroneRFb-DIR/original/` to the canonical
+  `~/rf-datasets/dronerfb_dir/original/`; `DroneRFb-DIR` is now a symlink to
+  `dronerfb_dir`. **STRUCTURE GOTCHA — do not extract naively**: the outer
+  zip's only top-level entry is `twin_droneRFa/`, containing 32 files that
+  are themselves a SPLIT/SPANNED zip volume set (`twin_droneRF.zip` +
+  `.z01`..`.z31`, ~2 GiB each). A plain `unzip` of the outer zip will NOT
+  give you the dataset — you must reassemble first, e.g.
+  `zip -s 0 twin_droneRF.zip --out combined.zip && unzip combined.zip`,
+  which needs ~63 GiB of additional free disk (1.5 TB free as of
+  2026-09-19, so fine) and was NOT attempted this pass. Inner file layout
+  (per-drone folders, filenames, metadata) is still unknown — that's the
+  next open item before this dataset is usable.
 - DroneRFa (SciDB, ~570 GB per unverified corpus pointer): NOT STARTED.
   Recommend starting only after DroneRFb-DIR finishes and ≥200GB headroom is
   reconfirmed (disk was 1.6TB free / 5% used at pass start, so there is
