@@ -1044,18 +1044,90 @@ def test_rfuav_adapter_real_mirror():
 
     adapter = ADAPTERS["rfuav"]
     recs = list(adapter.iter_recordings(DATASET_ROOT))
-    assert len(recs) >= 1
+    # Before the "<Drone Folder>" nesting-level fix, this only ever found the
+    # one stray "extracted/DJI MINI4 PRO/" duplicate (17 recordings, all
+    # dji_mini4_pro). Now every archive with a matching .rar (DJI + non-DJI)
+    # is enumerated, so this must span many distinct device_ids.
+    assert len(recs) > 17
+    device_ids = {r.device_id for r in recs}
+    assert "dji_mini4_pro" in device_ids
+    assert "flysky_fs_i6x" in device_ids
+    assert "frsky_x20r" in device_ids
+    # The stray duplicate "extracted/DJI MINI4 PRO/" directory (no matching
+    # "DJI MINI4 PRO.rar") must not double-count DJI_MINI4_PRO.rar's own
+    # content: exactly one recording per (device, VTSBW folder, iq slice).
+    recording_ids = [r.recording_id for r in recs]
+    assert len(recording_ids) == len(set(recording_ids))
 
     rec = recs[0]
     iq, rate_hz, centre_hz, bw_hz = adapter.load_iq(rec)
     assert iq.dtype == np.complex64
     assert rate_hz == pytest.approx(100e6)
-    assert centre_hz == pytest.approx(2.45e9)
     assert np.all(np.isfinite(iq))
     assert np.max(np.abs(iq)) > 0.0  # not a silent/all-zero capture
 
-    labels = adapter.labels(rec)
-    assert labels.scene.manufacturer == "DJI"
+    dji_rec = next(r for r in recs if r.device_id == "dji_mini4_pro")
+    _, dji_rate_hz, dji_centre_hz, _ = adapter.load_iq(dji_rec)
+    assert dji_rate_hz == pytest.approx(100e6)
+    assert dji_centre_hz == pytest.approx(2.45e9)
+    dji_labels = adapter.labels(dji_rec)
+    assert dji_labels.scene.manufacturer == "DJI"
+
+    # A non-DJI RC-transmitter recording (no VTSBW=<N> folder in its own
+    # layout) must still be enumerated with its own XML-declared centre
+    # frequency and get the RC-transmitter-only label, not UNKNOWN.
+    flysky_rec = next(r for r in recs if r.device_id == "flysky_fs_i6x")
+    assert flysky_rec.channel_id is None
+    _, flysky_rate_hz, flysky_centre_hz, _ = adapter.load_iq(flysky_rec)
+    assert flysky_rate_hz == pytest.approx(100e6)
+    assert flysky_centre_hz == pytest.approx(2.44e9)
+    flysky_labels = adapter.labels(flysky_rec)
+    assert flysky_labels.scene.emitter_class == EmitterClass.DRONE_LINK
+    assert flysky_labels.scene.manufacturer == "FlySky"
+    assert flysky_labels.scene.link_role == LinkRole.UPLINK_CONTROL
+    assert flysky_labels.scene.link_family == LinkFamily.FHSS_RC
+
+
+@pytest.mark.skipif(not _RFUAV_REAL_DIR.is_dir(), reason="RFUAV extracted mirror not found under AERIX_RF_DATASET_ROOT")
+def test_rfuav_prepare_dataset_real_two_non_dji_models(tmp_path):
+    """`prepare_dataset("rfuav", limit=2)` on two non-DJI models must yield
+    rows -- the concrete acceptance check for the D-T6 nesting-level fix."""
+
+    from aerix_rf.datasets.adapters import ADAPTERS, RecordingMeta as _RM
+
+    adapter = ADAPTERS["rfuav"]
+    all_recs = list(adapter.iter_recordings(DATASET_ROOT))
+    # First recording from each of two distinct non-DJI, non-Autel
+    # (RC-transmitter-only) device_ids, in encounter order.
+    picked = []
+    seen_devices: set[str] = set()
+    for r in all_recs:
+        if "dji" in r.device_id or "dautel" in r.device_id:
+            continue
+        if r.device_id not in seen_devices:
+            seen_devices.add(r.device_id)
+            picked.append(r)
+        if len(seen_devices) >= 2:
+            break
+    assert len(picked) == 2
+
+    class _FilteredAdapter:
+        dataset_id = adapter.dataset_id
+
+        def iter_recordings(self, root: Path) -> Iterator[RecordingMeta]:
+            return iter(picked[:2])
+
+        def load_iq(self, rec: _RM):
+            return adapter.load_iq(rec)
+
+        def labels(self, rec: _RM):
+            return adapter.labels(rec)
+
+    stats = prepare_dataset(
+        "rfuav", _FilteredAdapter(), root=DATASET_ROOT, limit=2, write_iq=False, write_tensor=False
+    )
+    assert stats.recordings == 2
+    assert stats.windows >= 1
 
 
 @pytest.mark.skipif(not _AERIX_REAL_DIR.is_dir(), reason="AERIX ANTSDR session mirror not found under AERIX_RF_DATASET_ROOT")

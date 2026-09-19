@@ -725,22 +725,56 @@ class AerixSessionAdapter:
 
 # ---------------------------------------------------------------------------
 # RFUAV (this project's local mirror, ~/rf-datasets/rfuav/original) -- one
-# .rar per drone/RC-transmitter model, each containing "<Drone Name>/
-# VTSBW=<N>/pack<K>.xml" (SignalHound-style capture metadata) + raw
-# "pack<K>_<a>-<b>s.iq" 1.0 s slices of one continuous capture. Format
-# verified empirically 2026-09-19 against DJI_MINI4_PRO.rar (the smallest of
-# the 5 complete DJI archives this task covers) -- see
-# ~/rf-datasets/rfuav/original/FORMAT.md for the full evidence trail.
-# Headline facts, all read from the pack's own XML (never a hardcoded
-# constant): DataType="Complex Float", SampleRate=100000000 (100 MS/s),
-# CenterFrequency=2450000000.000 (2.45 GHz), SampleCount=100000000.
-# pack1_0-1s.iq is exactly 800,000,000 bytes == SampleCount * 8 bytes/sample
-# with zero header bytes -- confirmed complex64 (float32 I + float32 Q
-# interleaved) by exact byte-count match, not assumed from the "Complex
-# Float" string alone.
+# .rar per drone/RC-transmitter model. Extracted layout (re-verified
+# 2026-09-19 against DJI_MINI4_PRO.rar, DJI_AVATA2.rar, FLYSKY_FS_I6X.rar,
+# FRSKY_X20R.rar and FUTABA_T14SG.rar -- see
+# ~/rf-datasets/rfuav/original/FORMAT.md for the full evidence trail):
+#
+#   extracted/<ARCHIVE_NAME>/<Drone Name>/[VTSBW=<N>/]pack<K>.xml
+#                                          [VTSBW=<N>/]pack<K>_<a>-<b>s.iq
+#
+# The "<Drone Name>" nesting level (matching the XML's own <Drone> field, but
+# read from the *folder* name -- some archives' <Drone> XML text has a
+# manufacturer typo, e.g. FRSKY_X20R's pack1.xml says
+# "<Drone>FLYSKY X20R</Drone>", so the folder name is the reliable key, not
+# the XML text) is present for EVERY archive, DJI and non-DJI alike. Only
+# the DJI (and Autel) airframe archives add a further "VTSBW=<N>/" level
+# (one pack per video-transmission bandwidth setting); the 31 RC-transmitter
+# archives have no such concept and put pack<K>.xml/.iq directly under
+# "<Drone Name>/". A prior version of this adapter only globbed
+# "<top-level dir>/VTSBW=*/pack*.xml" one level deep, so it silently missed
+# this "<Drone Name>/" nesting entirely for every real per-archive
+# extraction and only ever saw a single stray duplicate manual extraction
+# (a leftover "extracted/DJI MINI4 PRO/" directory with no matching
+# "DJI MINI4 PRO.rar" archive, one nesting level shallower than the other 36)
+# -- see FORMAT.md's "Duplicate/stray directory" section. `iter_recordings`
+# below instead recurses for `pack*.xml` under each archive-name directory
+# and infers the `<Drone Name>` folder relative to wherever the xml actually
+# sits, so it is agnostic to how many levels of nesting a given archive has.
+#
+# Every archive's pack<K>.xml -- RC-transmitter ones included -- carries the
+# same SignalHound-style fields read here (never a hardcoded constant):
+# DataType="Complex Float", SampleRate, CenterFrequency, IFBandwidth,
+# SampleCount. The earlier belief that the 32 non-DJI archives ship with "no
+# XML metadata" was wrong -- they have it, just one directory level
+# shallower (no VTSBW=<N> grouping). Centre frequency is therefore always
+# known per-pack from the XML, not synthesized/guessed: e.g. FLYSKY_FS_I6X
+# and FRSKY_X20R both declare CenterFrequency=2440000000.000 (2.44 GHz,
+# 2.4 GHz ISM), matching their RC-uplink function; DJI_AVATA2's VTSBW=40 pack
+# declares 5760000000.000 (5.76 GHz), its 5.8 GHz video-downlink band.
+#
+# .iq byte-count / dtype check (FORMAT.md): every file checked this pass
+# (DJI_MINI4_PRO, DJI_AVATA2, FLYSKY_FS_I6X, FRSKY_X20R, FUTABA_T14SG) is
+# exactly SampleCount * 8 bytes with zero header bytes -- confirmed complex64
+# (float32 I + float32 Q interleaved) by exact byte-count match for every
+# model checked, not assumed from the "Complex Float" string alone or from
+# the DJI archives only.
 # ---------------------------------------------------------------------------
 
+import logging
 import xml.etree.ElementTree as ET
+
+_rfuav_logger = logging.getLogger(__name__ + ".rfuav")
 
 _RFUAV_IQ_STEM_RE = re.compile(r"^pack(\d+)_(\d+)-(\d+)s$")
 
@@ -801,6 +835,13 @@ class _RfuavLabel:
     model: str
     link_family: LinkFamily
     note: Optional[str] = None
+    # UNKNOWN for the DJI/Autel airframe tables below (an aircraft's own
+    # capture is not asserted uplink vs downlink from the archive name
+    # alone -- see the existing DJI VTSBW comment); UPLINK_CONTROL for the
+    # RC-transmitter-only table, where the recording is, by MODELS.md
+    # category, definitionally a bare control-uplink capture with no
+    # airframe present.
+    link_role: LinkRole = LinkRole.UNKNOWN
 
 
 # manufacturer/model/link_family per extracted top-level folder name (== the
@@ -835,6 +876,188 @@ _RFUAV_DJI_LABELS: dict[str, _RfuavLabel] = {
     "DJI MINI 3": _RfuavLabel("DJI", "mini_3", LinkFamily.UNKNOWN, note=_RFUAV_MINI3_NOTE),
 }
 
+# Non-DJI drone airframe (1 archive, MODELS.md "Non-DJI drone airframe"
+# section): a full aircraft capture, same treatment as the DJI table above
+# (link_role left unknown, not asserted uplink_control), not the
+# RC-transmitter-only table below.
+_RFUAV_AUTEL_SKYLINK_NOTE = (
+    "Autel SkyLink is a proprietary adaptive-hopping link across "
+    "2.4/5.8/5.2 GHz (MODELS.md, Medium evidence: Autel FAQ/product pages "
+    "confirm the tri-band hopping scheme, no public PHY spec found); no "
+    "LinkFamily enum member exists for SkyLink, so this stays unknown "
+    "rather than asserted into an unrelated bucket (e.g. ocusync). Archive "
+    "filename 'DAUTEL' is a naming artifact for Autel Robotics, not a real "
+    "brand (MODELS.md)."
+)
+_RFUAV_AIRFRAME_LABELS: dict[str, _RfuavLabel] = {
+    "DAUTEL EVO NANO": _RfuavLabel(
+        "Autel Robotics", "evo_nano", LinkFamily.UNKNOWN, note=_RFUAV_AUTEL_SKYLINK_NOTE
+    ),
+}
+
+# RC-transmitter-only recordings (31 archives, MODELS.md "RC-transmitter-only
+# recordings" section): a bare control-uplink capture, no airframe present.
+# `link_family` is only asserted (LinkFamily.FHSS_RC -- the taxonomy's one
+# generic FHSS-RC bucket; there is no per-named-protocol enum member for
+# ACCESS/AFHDS2A/AFHDS3/FASST/T-FHSS specifically) for the three
+# manufacturer families MODELS.md documents against a named, if not
+# per-SKU-verified, manufacturer protocol: FrSky ACCESS, FlySky AFHDS2A/3,
+# Futaba FASST/FASSTest/T-FHSS. Every other manufacturer/model in this table
+# is MODELS.md "Low" evidence (protocol name itself unconfirmed against a
+# manufacturer manual, or -- RadioMaster/Jumper -- genuinely
+# module-dependent at capture time) and stays LinkFamily.UNKNOWN rather than
+# guessing a bucket. `link_role` is LinkRole.UPLINK_CONTROL for every row in
+# this table (never guessed per-row): MODELS.md's own category boundary
+# ("RC-transmitter-only") is what licenses this, not a per-model RF
+# observation.
+_RFUAV_RC_TRANSMITTER_ONLY_NOTE = (
+    "RC transmitter recording only; no airframe present in this capture "
+    "(MODELS.md 'RC-transmitter-only recordings' category)."
+)
+
+
+def _rfuav_rc_label(
+    manufacturer: str, model: str, link_family: LinkFamily, evidence_note: str
+) -> _RfuavLabel:
+    return _RfuavLabel(
+        manufacturer,
+        model,
+        link_family,
+        note=f"{_RFUAV_RC_TRANSMITTER_ONLY_NOTE} {evidence_note}",
+        link_role=LinkRole.UPLINK_CONTROL,
+    )
+
+
+_RFUAV_RC_LABELS: dict[str, _RfuavLabel] = {
+    "DEVENTION DEVO": _rfuav_rc_label(
+        "Walkera", "devo", LinkFamily.UNKNOWN,
+        "MODELS.md Low evidence: proprietary 2.4GHz FHSS, exact protocol name (e.g. WK-2401/2801) unconfirmed.",
+    ),
+    "FLYSKY EL 18": _rfuav_rc_label(
+        "FlySky", "el18", LinkFamily.FHSS_RC,
+        "MODELS.md Medium evidence: AFHDS 3.",
+    ),
+    "FLYSKY FS I6X": _rfuav_rc_label(
+        "FlySky", "fs_i6x", LinkFamily.FHSS_RC,
+        "MODELS.md Medium evidence: AFHDS 2A.",
+    ),
+    "FLYSKY NV 14": _rfuav_rc_label(
+        "FlySky", "nv14", LinkFamily.FHSS_RC,
+        "MODELS.md Medium evidence: AFHDS 3.",
+    ),
+    "FRSKY X14": _rfuav_rc_label(
+        "FrSky", "x14", LinkFamily.FHSS_RC,
+        "MODELS.md Medium evidence: ACCESS.",
+    ),
+    "FRSKY X20R": _rfuav_rc_label(
+        "FrSky", "x20r", LinkFamily.FHSS_RC,
+        "MODELS.md Medium evidence: ACCESS. Note: this archive's own pack1.xml "
+        "<Drone> field is mistyped 'FLYSKY X20R' -- the folder name (FrSky, "
+        "correct) is used here, not the XML text.",
+    ),
+    "FRSKY X9DP2019": _rfuav_rc_label(
+        "FrSky", "x9d_plus_2019", LinkFamily.FHSS_RC,
+        "MODELS.md Medium evidence: ACCESS (firmware-upgradeable; also supports legacy ACCST D16).",
+    ),
+    "FUTABA T10J": _rfuav_rc_label(
+        "Futaba", "t10j", LinkFamily.FHSS_RC,
+        "MODELS.md Medium evidence: FASST/FASSTest (2.4GHz).",
+    ),
+    "FUTABA T14SG": _rfuav_rc_label(
+        "Futaba", "t14sg", LinkFamily.FHSS_RC,
+        "MODELS.md Medium evidence: FASSTest/T-FHSS.",
+    ),
+    "FUTABA T16IZ": _rfuav_rc_label(
+        "Futaba", "t16iz", LinkFamily.FHSS_RC,
+        "MODELS.md Medium evidence: T-FHSS.",
+    ),
+    "FUTABA T18SZ": _rfuav_rc_label(
+        "Futaba", "t18sz", LinkFamily.FHSS_RC,
+        "MODELS.md Medium evidence: FASSTest/T-FHSS.",
+    ),
+    "HERELINK HX4": _rfuav_rc_label(
+        "CUAV / CubePilot", "hx4", LinkFamily.UNKNOWN,
+        "MODELS.md Medium evidence: proprietary digital HD control+video link described as "
+        "LTE-like/OFDM by vendor docs, not a hopping FHSS RC protocol -- no PHY spec published.",
+    ),
+    "JR PROPO XG14": _rfuav_rc_label(
+        "JR Propo", "xg14", LinkFamily.UNKNOWN,
+        "MODELS.md Low evidence: DMSS (JR's proprietary 2.4GHz protocol).",
+    ),
+    "JR PROPO XG7": _rfuav_rc_label(
+        "JR Propo", "xg7", LinkFamily.UNKNOWN,
+        "MODELS.md Low evidence: DMSS.",
+    ),
+    "JUMPER T14": _rfuav_rc_label(
+        "Jumper", "t14", LinkFamily.UNKNOWN,
+        "MODELS.md Low evidence: multi-protocol radio, native RF module at capture time not confirmed.",
+    ),
+    "JUMPER TPROV2": _rfuav_rc_label(
+        "Jumper", "t_pro_v2", LinkFamily.UNKNOWN,
+        "MODELS.md Low evidence: commonly ships with internal ExpressLRS (ELRS), not confirmed for this capture.",
+    ),
+    "RADIOLINK AT10 II": _rfuav_rc_label(
+        "Radiolink", "at10_ii", LinkFamily.UNKNOWN,
+        "MODELS.md Low evidence: proprietary 2.4GHz FHSS, exact protocol name unconfirmed.",
+    ),
+    "RADIOLINK AT9S PRO": _rfuav_rc_label(
+        "Radiolink", "at9s_pro", LinkFamily.UNKNOWN,
+        "MODELS.md Low evidence: proprietary 2.4GHz FHSS, exact protocol name unconfirmed.",
+    ),
+    "RADIOMASTER BOXER": _rfuav_rc_label(
+        "RadioMaster", "boxer", LinkFamily.UNKNOWN,
+        "MODELS.md Low evidence: EdgeTX multi-protocol radio, internal module at capture time not confirmed.",
+    ),
+    "RADIOMASTER TX16S": _rfuav_rc_label(
+        "RadioMaster", "tx16s", LinkFamily.UNKNOWN,
+        "MODELS.md Low evidence: EdgeTX multi-protocol radio, internal module at capture time not confirmed.",
+    ),
+    "SIYI FT24": _rfuav_rc_label(
+        "SIYI", "ft24", LinkFamily.UNKNOWN,
+        "MODELS.md Low evidence: proprietary digital HD control+datalink, no PHY spec published.",
+    ),
+    "SIYI MK15": _rfuav_rc_label(
+        "SIYI", "mk15", LinkFamily.UNKNOWN,
+        "MODELS.md Low evidence: proprietary digital HD control+datalink, no PHY spec published.",
+    ),
+    "SIYI MK32": _rfuav_rc_label(
+        "SIYI", "mk32", LinkFamily.UNKNOWN,
+        "MODELS.md Low evidence: proprietary digital HD control+datalink, no PHY spec published.",
+    ),
+    "SKYDROID H12": _rfuav_rc_label(
+        "Skydroid", "h12", LinkFamily.UNKNOWN,
+        "MODELS.md Low evidence: proprietary digital HD control+datalink, no PHY spec published.",
+    ),
+    "SKYDROID T10": _rfuav_rc_label(
+        "Skydroid", "t10", LinkFamily.UNKNOWN,
+        "MODELS.md Low evidence: proprietary digital HD control+datalink, no PHY spec published.",
+    ),
+    "WFLY ET10": _rfuav_rc_label(
+        "WFLY", "et10", LinkFamily.UNKNOWN,
+        "MODELS.md Low evidence: proprietary 2.4GHz protocol, exact name unconfirmed.",
+    ),
+    "WFLY ET16S": _rfuav_rc_label(
+        "WFLY", "et16s", LinkFamily.UNKNOWN,
+        "MODELS.md Low evidence: proprietary 2.4GHz protocol, exact name unconfirmed.",
+    ),
+    "WFLY WFT09SII": _rfuav_rc_label(
+        "WFLY", "wft09s_ii", LinkFamily.UNKNOWN,
+        "MODELS.md Low evidence: proprietary 2.4GHz protocol, exact name unconfirmed.",
+    ),
+    "YUNZHUO H12": _rfuav_rc_label(
+        "Yunzhuo", "h12", LinkFamily.UNKNOWN,
+        "MODELS.md Low evidence: protocol not confirmed; naming overlaps Skydroid H12, possibly rebrand -- unverified.",
+    ),
+    "YUNZHUO H16": _rfuav_rc_label(
+        "Yunzhuo", "h16", LinkFamily.UNKNOWN,
+        "MODELS.md Low evidence: protocol not confirmed.",
+    ),
+    "YUNZHUO H30": _rfuav_rc_label(
+        "Yunzhuo", "h30", LinkFamily.UNKNOWN,
+        "MODELS.md Low evidence: protocol not confirmed.",
+    ),
+}
+
 
 def _rfuav_device_slug(folder_name: str) -> str:
     return re.sub(r"[\s_]+", "_", folder_name.strip()).lower()
@@ -843,73 +1066,143 @@ def _rfuav_device_slug(folder_name: str) -> str:
 class RfuavAdapter:
     """S1 adapter for the local RFUAV mirror
     (``~/rf-datasets/rfuav/original``): per-model ``.rar`` archives
-    extracted to ``original/extracted/<Drone Folder>/VTSBW=<N>/pack<K>.xml``
-    + ``pack<K>_<a>-<b>s.iq``. See the module-level comment above and
+    extracted to ``original/extracted/<ARCHIVE_NAME>/<Drone Folder>/
+    [VTSBW=<N>/]pack<K>.xml`` + ``pack<K>_<a>-<b>s.iq``. See the
+    module-level comment above and
     ``~/rf-datasets/rfuav/original/FORMAT.md`` for the format evidence
-    trail (verified against ``DJI_MINI4_PRO.rar`` only).
+    trail (verified against DJI_MINI4_PRO.rar, DJI_AVATA2.rar,
+    FLYSKY_FS_I6X.rar, FRSKY_X20R.rar, FUTABA_T14SG.rar).
 
     One :class:`RecordingMeta` per ``.iq`` slice (each already ~1.0 s at the
-    source 100 MS/s rate). ``run_id`` groups a pack's slices
-    (``<device_slug>/<VTSBW folder>/pack<K>``) so one continuous multi-second
-    capture is never split across train/val/test. Only the 5 complete DJI
-    archives are labelled via :data:`_RFUAV_DJI_LABELS`; any other extracted
-    folder (e.g. the 32 still-downloading non-DJI RC-transmitter archives)
-    is still enumerated/loadable but gets ``EmitterClass.UNKNOWN`` /
+    source 100 MS/s rate). ``iter_recordings`` recurses for ``pack*.xml``
+    under each top-level ``<ARCHIVE_NAME>`` directory rather than assuming a
+    fixed nesting depth, so it handles both the DJI/Autel airframe layout
+    (an extra ``VTSBW=<N>/`` grouping level per video-bandwidth setting) and
+    the RC-transmitter layout (no such level -- ``pack<K>.xml`` sits
+    directly under the ``<Drone Folder>``). ``run_id`` groups a pack's
+    slices (``<device_slug>/<VTSBW folder>/pack<K>`` when a VTSBW level
+    exists, else ``<device_slug>/pack<K>``) so one continuous multi-second
+    capture is never split across train/val/test. A top-level
+    ``extracted/`` directory whose name does not match any ``<name>.rar``
+    sibling under ``original/`` is skipped (logged, not silent) as a
+    stray/duplicate extraction -- see FORMAT.md.
+
+    Labelling: the 5 DJI airframe archives use :data:`_RFUAV_DJI_LABELS`,
+    the 1 non-DJI airframe (Autel) archive uses
+    :data:`_RFUAV_AIRFRAME_LABELS`, and the 31 RC-transmitter-only archives
+    use :data:`_RFUAV_RC_LABELS` (``emitter_class=DRONE_LINK``,
+    ``link_role=UPLINK_CONTROL`` -- no separate taxonomy value exists for
+    "RC transmitter, no airframe"). Any folder name in none of these three
+    tables still enumerates/loads but gets ``EmitterClass.UNKNOWN`` /
     ``EvidenceLevel.RF_CANDIDATE`` rather than a guessed ``drone_link``
-    label -- see FORMAT.md's "Non-DJI archives" section before extending
-    this table.
+    label.
     """
 
     dataset_id = "rfuav"
     mirror_dir_name = "rfuav"
 
     def iter_recordings(self, root: Path) -> Iterator[RecordingMeta]:
-        base = root / self.mirror_dir_name / "original" / "extracted"
+        original_dir = root / self.mirror_dir_name / "original"
+        base = original_dir / "extracted"
         if not base.is_dir():
             return
-        for model_dir in sorted(p for p in base.iterdir() if p.is_dir()):
-            device_slug = _rfuav_device_slug(model_dir.name)
-            for vtsbw_dir in sorted(model_dir.glob("VTSBW=*")):
-                if vtsbw_dir.with_name(vtsbw_dir.name + ".aria2").exists():
-                    continue  # incomplete: refused per the normalisation memo S1 rule
-                for xml_path in sorted(vtsbw_dir.glob("pack*.xml")):
-                    if xml_path.with_name(xml_path.name + ".aria2").exists():
-                        continue
-                    pack_id = xml_path.stem  # e.g. "pack1"
-                    try:
-                        pack_num = int(pack_id.removeprefix("pack"))
-                    except ValueError:
-                        continue  # unrecognised xml name: skip, don't fail the whole scan
+        # Restricts iteration to directories that actually correspond to one
+        # of this mirror's own `.rar` archives (by stem). Guards against a
+        # stray/duplicate manual extraction whose directory name doesn't
+        # match any archive -- e.g. this mirror's own leftover
+        # "extracted/DJI MINI4 PRO/" (no "DJI MINI4 PRO.rar" sibling; the
+        # real archive is "DJI_MINI4_PRO.rar", extracted to
+        # "extracted/DJI_MINI4_PRO/"), which duplicates DJI_MINI4_PRO.rar's
+        # own content and would otherwise be double-counted (identical
+        # `device_id`/`recording_id`s under the folder-name-based scheme
+        # below). Left empty (no filtering) when `original_dir` has no
+        # `.rar` files at all -- e.g. a synthetic test mirror that only
+        # constructs the `extracted/` tree directly.
+        archive_stems = {p.stem for p in original_dir.glob("*.rar")}
+        for archive_dir in sorted(p for p in base.iterdir() if p.is_dir()):
+            if archive_stems and archive_dir.name not in archive_stems:
+                _rfuav_logger.info(
+                    "RfuavAdapter: skipping extracted/%s -- no matching "
+                    "%s.rar under %s (stray/duplicate extraction)",
+                    archive_dir.name, archive_dir.name, original_dir,
+                )
+                continue
+            if archive_dir.with_name(archive_dir.name + ".aria2").exists():
+                _rfuav_logger.info(
+                    "RfuavAdapter: skipping extracted/%s -- incomplete download (.aria2 sibling)",
+                    archive_dir.name,
+                )
+                continue
+            for xml_path in sorted(archive_dir.rglob("pack*.xml")):
+                if xml_path.with_name(xml_path.name + ".aria2").exists():
+                    _rfuav_logger.info(
+                        "RfuavAdapter: skipping %s -- incomplete download (.aria2 sibling)", xml_path
+                    )
+                    continue
+                pack_dir = xml_path.parent
+                pack_id = xml_path.stem  # e.g. "pack1"
+                try:
+                    pack_num = int(pack_id.removeprefix("pack"))
+                except ValueError:
+                    _rfuav_logger.info(
+                        "RfuavAdapter: skipping %s -- unrecognised pack xml name", xml_path
+                    )
+                    continue
+                # A VTSBW=<N> grouping level is DJI/Autel-airframe-specific
+                # (one pack per video-transmission bandwidth setting); RC-
+                # transmitter archives put pack<K>.xml directly under the
+                # "<Drone Folder>" -- see the module-level comment above.
+                # `folder_name` (used for `_rfuav_device_slug` and for the
+                # label-table lookup in `labels()`) is always the "<Drone
+                # Folder>" name, however many levels of nesting sit above
+                # the pack xml.
+                if pack_dir.name.startswith("VTSBW="):
+                    channel_id: Optional[str] = pack_dir.name
+                    folder_name = pack_dir.parent.name
+                else:
+                    channel_id = None
+                    folder_name = pack_dir.name
+                device_slug = _rfuav_device_slug(folder_name)
+                try:
                     meta = parse_rfuav_pack_xml(xml_path)
-                    run_id = f"{device_slug}/{vtsbw_dir.name}/{pack_id}"
-                    for iq_path in sorted(vtsbw_dir.glob(f"{pack_id}_*-*s.iq")):
-                        if iq_path.with_name(iq_path.name + ".aria2").exists():
-                            continue
-                        m = _RFUAV_IQ_STEM_RE.match(iq_path.stem)
-                        if not m or int(m.group(1)) != pack_num:
-                            continue
-                        recording_id = f"{device_slug}/{vtsbw_dir.name}/{iq_path.stem}"
-                        yield RecordingMeta(
-                            dataset_id=self.dataset_id,
-                            recording_id=recording_id,
-                            device_id=device_slug,
-                            run_id=run_id,
-                            source_paths=(iq_path,),
-                            original_rate_hz=meta.sample_rate_hz,
-                            original_center_freq_hz=meta.center_freq_hz,
-                            original_bw_hz=meta.if_bandwidth_hz,
-                            original_dtype="float32_interleaved",
-                            channel_id=vtsbw_dir.name,
-                            notes=meta.note,
-                            extra={
-                                "folder_name": model_dir.name,
-                                "xml_drone": meta.drone,
-                                "sample_count": meta.sample_count,
-                                "scale_factor": meta.scale_factor,
-                                "reference_snr_level": meta.reference_snr_level,
-                                "serial_number": meta.serial_number,
-                            },
+                except (ValueError, TypeError, AttributeError) as exc:
+                    _rfuav_logger.info(
+                        "RfuavAdapter: skipping %s -- failed to parse pack xml (%s)", xml_path, exc
+                    )
+                    continue
+                channel_part = f"{channel_id}/" if channel_id else ""
+                run_id = f"{device_slug}/{channel_part}{pack_id}"
+                for iq_path in sorted(pack_dir.glob(f"{pack_id}_*-*s.iq")):
+                    if iq_path.with_name(iq_path.name + ".aria2").exists():
+                        _rfuav_logger.info(
+                            "RfuavAdapter: skipping %s -- incomplete download (.aria2 sibling)", iq_path
                         )
+                        continue
+                    m = _RFUAV_IQ_STEM_RE.match(iq_path.stem)
+                    if not m or int(m.group(1)) != pack_num:
+                        continue
+                    recording_id = f"{device_slug}/{channel_part}{iq_path.stem}"
+                    yield RecordingMeta(
+                        dataset_id=self.dataset_id,
+                        recording_id=recording_id,
+                        device_id=device_slug,
+                        run_id=run_id,
+                        source_paths=(iq_path,),
+                        original_rate_hz=meta.sample_rate_hz,
+                        original_center_freq_hz=meta.center_freq_hz,
+                        original_bw_hz=meta.if_bandwidth_hz,
+                        original_dtype="float32_interleaved",
+                        channel_id=channel_id,
+                        notes=meta.note,
+                        extra={
+                            "folder_name": folder_name,
+                            "xml_drone": meta.drone,
+                            "sample_count": meta.sample_count,
+                            "scale_factor": meta.scale_factor,
+                            "reference_snr_level": meta.reference_snr_level,
+                            "serial_number": meta.serial_number,
+                        },
+                    )
 
     def load_iq(
         self, rec: RecordingMeta
@@ -927,7 +1220,12 @@ class RfuavAdapter:
         return iq, rec.original_rate_hz, rec.original_center_freq_hz, rec.original_bw_hz
 
     def labels(self, rec: RecordingMeta) -> LabelsGroup:
-        label = _RFUAV_DJI_LABELS.get(rec.extra["folder_name"].upper())
+        folder_key = rec.extra["folder_name"].upper()
+        label = (
+            _RFUAV_DJI_LABELS.get(folder_key)
+            or _RFUAV_AIRFRAME_LABELS.get(folder_key)
+            or _RFUAV_RC_LABELS.get(folder_key)
+        )
         if label is None:
             inst = LabelInstance(
                 emitter_class=EmitterClass.UNKNOWN,
@@ -941,12 +1239,17 @@ class RfuavAdapter:
         inst = LabelInstance(
             emitter_class=EmitterClass.DRONE_LINK,
             link_family=label.link_family,
-            # VTSBW almost certainly abbreviates "video transmission signal
-            # bandwidth" (consistent with OcuSync's selectable 10/20/40 MHz
-            # video-downlink channel width), but no README/paper text inside
-            # the archive confirms this -- see FORMAT.md -- so link_role is
-            # left unknown rather than asserted as downlink_video.
-            link_role=LinkRole.UNKNOWN,
+            # For the DJI/Autel airframe tables: VTSBW almost certainly
+            # abbreviates "video transmission signal bandwidth" (consistent
+            # with OcuSync's selectable 10/20/40 MHz video-downlink channel
+            # width), but no README/paper text inside the archive confirms
+            # this -- see FORMAT.md -- so link_role stays unknown rather
+            # than asserted as downlink_video. For the RC-transmitter table,
+            # `label.link_role` is UPLINK_CONTROL (see
+            # `_RFUAV_RC_LABELS`/`_rfuav_rc_label` above) -- licensed by
+            # MODELS.md's own "RC-transmitter-only" category boundary, not a
+            # per-model RF observation.
+            link_role=label.link_role,
             manufacturer=label.manufacturer,
             model=label.model,
             individual_id=str(rec.extra.get("serial_number") or "unknown"),
