@@ -256,7 +256,100 @@ schedule inside one session** - same room, same receiver state, operator-logged 
 positives and background share both scene and front-end state and the chamber-vs-ambient shortcut dies.
 Record `gain.mode`, `gain.db`, `rx_rf_bandwidth` and antenna port per capture while doing it.
 
-## 6. Open items
+## 6. RFUAV results 2026-09-19
+
+Full RFUAV corpus prepared at canonical 15.36 MS/s (`~/rf-datasets/rfuav/prepared/index.jsonl`,
+`dataset_id = rfuav`): 349 windows, 37 models (5 DJI + 32 RC transmitters), all scene-truth
+`drone_link` (evidence level 5) — RFUAV carries no native background class. Full inventory:
+`bench/out/dataset_inventory_2026-09-19.md`. Sample rate 15.36 MS/s for all 349 windows; 8 centre
+frequencies across 2.4/5.8 GHz; 343/349 windows are the full 1.0 s, 6 are truncated tails
+(0.03–0.81 s, one <100 ms and therefore below the G3/G5 validity floor).
+
+**Training run** (`bench/out/model_v2_rfuav_2026-09-19{,.md}`, log
+`bench/out/train_v2_rfuav_2026-09-19.log`): positives = `rfuav` (349 rows), negatives =
+`aerix_antsdr_ambient_2026_09_18` (449 rows after the session-rate-deficit exclusion). Group split
+70/15/15 → train 635 / val 109 / test 54. `logreg` chosen (val PR-AUC 0.9996 vs gboost 0.9996).
+Held-out-group test recall 0.759 (PFA `nan` — no background rows fell in the test split by chance).
+
+**Tier A (in-dataset, RFUAV model hold-out)** and **Tier D (ANTSDR leave-one-session-out PFA)** run
+via `bench/benchmark_features_v2.py --zenodo-dataset rfuav ...` (RFUAV substituted into the "Zenodo"
+slot: it is the same role — a group-held-out `drone_link`-only positive set — this is a deliberate
+reuse of the existing tier machinery, not a new tier). Full report:
+`bench/out/benchmark_features_v2_rfuav_2026-09-19.md` (log:
+`bench/out/benchmark_features_v2_rfuav_2026-09-19.log`, wall time 184.8 s).
+
+* **Tier A**, 37 model groups: recall (logreg) min 0.429 / median 1.000 / max 1.000, 90 %
+  group-bootstrap CI [1.000, 1.000]; recall (gboost) min 0.143 / median 1.000 / max 1.000. Lowest
+  per-model recalls: `siyi_ft24` 0.429, `jumper_t14` 0.571, `dautel_evo_nano` 0.538 (logreg only —
+  gboost gets 1.000 on all three), `frsky_x14` 0.714, `skydroid_h12` 0.750. PR-AUC against the
+  reserved ANTSDR negative pool is ≥0.805 in every group. Most non-DJI RC groups have only 1 recording
+  (`n_pos` 4–9), so a held-out "group" is usually a single pack file — high recall here mostly says
+  the classifier separates RFUAV RC-link windows from ANTSDR Wi-Fi-ambient windows, not that it
+  generalises across independent recordings of the same model.
+* **Tier D**, 5 ANTSDR sessions: 4 sessions PFA 0.000 (logreg) / FA-per-hour 0; one session
+  (`fac0aacf...`) PFA 1.000 / FA-per-hour 3600 for both models — this is the same receiver-state
+  confound already on record in §5.1 (elevated, flattened noise floor with no external energy — a
+  front-end/AGC state change, not a scene change), reproduced unchanged with the RFUAV-trained
+  classifier. It is not new evidence about RFUAV; it confirms the boundary the classifier has learned
+  is still sensitive to ANTSDR front-end state.
+* **Tier B** (RUB) and **Tier C** (HackRF): see §4 cross-receiver holdout below and the pre-existing
+  Tier-C BLOCKED status (still no local HackRF sessions).
+
+**Receiver-ID probe / confound verdict.** `bench/receiver_id_probe.py --dataset rfuav --dataset
+aerix_antsdr_ambient_2026_09_18` (`bench/out/receiver_id_probe_rfuav_vs_antsdr_2026-09-19.md`):
+unrestricted probe (dataset_id as receiver-ID proxy) — 798 rows, 57 groups, 5/5 folds valid (no
+guard drops) — **balanced accuracy 0.6473 (best of logreg/gboost), margin +0.1473 over chance
+(0.50) → CONDITIONAL** (pass ≤ chance+0.10, conditional ≤ chance+0.25). Per-fold recall for the
+`rfuav` class is 0.84–1.00 in every fold, i.e. the probe reliably tells "this window is RFUAV" from
+"this window is ANTSDR ambient" using nothing but `features_v2`. Top permutation-importance
+features are `g5_sb13_p90_p50` and `g1_sb03_median` — the same class of noise-fluctuation-scale /
+per-bin-level features flagged as the leak path in §1.6 Q4.
+
+The **label-matched probe could not be run** for this pairing: `rfuav` contributes only
+`drone_link` rows and `aerix_antsdr_ambient_2026_09_18` contributes only `background` rows, so there
+is no shared label across the two receivers to isolate the device confound from the content
+confound — the exact same structural gap already on record for the RFUAV↔ANTSDR pair in the
+Zenodo↔ANTSDR case (§2, §5.4). **This means the confound question is not resolved, only bounded**:
+the unrestricted CONDITIONAL result shows the two corpora are separable by receiver-fingerprint-like
+features at well above chance; it does not by itself prove the drone-vs-background boundary from
+§6's Tier A/training runs is receiver identity rather than emitter content, but it is the same
+warning sign §5.3/§5.4 already raised, now reproduced on a second, much larger positive corpus.
+A `--dataset rfuav --dataset aerix_antsdr_ambient_2026_09_18 --dataset rub_dronesecurity` run was
+also attempted (`bench/out/receiver_id_probe_rfuav_2026-09-19.md`) but is **INCONCLUSIVE**: RUB
+contributes only 2 usable rows, which trips the per-fold guard (`<5` rows of a class) on every fold
+for both probe variants.
+
+**Verdict for this run, stated plainly:** the RFUAV-vs-ANTSDR Tier A/training recall numbers above
+must be read together with a CONDITIONAL (not PASS) receiver-ID probe. A CONDITIONAL/near-CONDITIONAL
+probe means part of the apparent drone-vs-background separation could be receiver fingerprint rather
+than emitter content; per §2 this is not an automatic FAIL, but no cross-receiver or field-PD claim
+may be drawn from the RFUAV-vs-ANTSDR numbers alone — they remain evidence level 2 at best, same as
+every other number in this document, and the honest generalisation evidence is the cross-receiver
+holdout below, not the in-corpus Tier A recall.
+
+**Cross-receiver holdout (§3.2 Tier C's honest substitute for this pass).** The `model_v2_rfuav_2026-09-19`
+bundle (trained on RFUAV positives + ANTSDR negatives) was scored, unmodified, against two datasets
+it never saw in training, each captured by a different third-party receiver
+(`bench/out/cross_receiver_holdout_2026-09-19.json`):
+
+| test set | receiver | windows | groups (device) | recall |
+|---|---|---:|---:|---:|
+| `zenodo_drone_rf_video_2020` | third-party SDR, anechoic chamber | 16 | 10 | **0.875** (14/16) |
+| `rub_dronesecurity` | third-party SDR, DJI O2 DroneID fragments | 2 | 2 | **0.500** (1/2) |
+
+Zenodo per-group recall is 1.000 on 8/10 device groups; the two misses are
+`DJI_phantom_4_pro_plus_2G` (0/1) and `Parrot_mambo_2G_control` (0/1). RUB recall rests on 2 windows
+total (`mavic_air_2` miss, `mini_2` hit) — not enough to estimate a rate. This is the only
+generalisation-flavoured number available today, and it is weak evidence even by this document's own
+standard: n=16 and n=2 respectively, both from anechoic or pre-segmented sources, both scored with a
+CONDITIONAL receiver-ID probe on the training pair. **Evidence-level statement:** these are public
+third-party-receiver recordings scored by a classifier trained on our own receiver's ambient
+negatives; at most this supports "features_v2 + this training pair generalise to some unseen DJI
+recordings from other receivers" as a probabilistic (level 2) statement — it is not validated
+deterministic decode (level 4) and it is not drawn from operator-witnessed truth (level 5) on our own
+hardware. Nothing in this section identifies a drone in the field.
+
+## 7. Open items
 
 * `[USER]` ANTSDR-captured **drone positives** with operator truth — the single highest-value capture we
   can make. Without them Tier D is PFA-only and no PD claim exists for our receiver.
@@ -270,7 +363,7 @@ Record `gain.mode`, `gain.db`, `rx_rf_bandwidth` and antenna port per capture wh
 * Zenodo Fs is now confirmed 120 MS/s (2.44 GHz) / 200 MS/s (5.8 GHz) in the manifest — the older
   "~60 MS/s" inference in the normalisation memo is superseded.
 
-## 7. Files likely affected
+## 8. Files likely affected
 
 `aerix_rf/classify/features_v2.py` (new), `aerix_rf/classify/train/features.py` (kept as `features_v1`,
 frozen), `aerix_rf/classify/train/data.py` + `train.py` (emit `model_features_version`),
