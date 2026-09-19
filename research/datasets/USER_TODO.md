@@ -80,22 +80,35 @@ Steps:
   1.3 TB, first fetch the much smaller Roboflow curated subset as a trial,
   and get explicit disk-budget sign-off from the architect.
 
-## RFUAV — remaining RC-transmitter files (no account needed, fast-follow)
+## RFUAV — remaining RC-transmitter files — DOWNLOAD STARTED 2026-09-19
 
-Resolved 2026-09-19: RFUAV's top-level raw data is 36 per-model `.rar` files
-totaling 109.2GB (measured via `curl -s "https://huggingface.co/api/datasets/kitofrank/RFUAV/tree/main"`),
-not the 299GB spectrogram-image figure shown on the HF dataset card (that figure
-only counts the `ImageSet-AllDrones-MatlabPipeline`/`ValidationSet_5Drones` image
-folders). The 5 DJI files (~43GB) were started automatically this pass — see
-`research/datasets/manifest.json` id `rfuav_dji_subset`. The remaining 31 files are
-**RC transmitter units, not drone airframes** (FlySky, FrSky, Futaba, JR Propo,
-Jumper, RadioMaster, Radiolink, SIYI, Skydroid, WFLY, Yunzhuo, Herelink, Devention,
-Dautel — ~66GB total). To pull them: reuse the URL pattern
-`https://huggingface.co/datasets/kitofrank/RFUAV/resolve/main/<urlencoded filename>`
-(anonymous, no auth needed, confirmed working this pass) with `aria2c -x4 -s4 -c`,
-same as `~/rf-datasets/manifests/rfuav_dji_subset_urls.txt`. Not started — lower
-priority than the DJI subset for AERIX's current O3/O4 workstream, but useful later
-for the non-DJI RC-link detector.
+RFUAV's top-level raw data is **37** per-model `.rar` files totaling ~109.2GB
+(measured via `curl -s "https://huggingface.co/api/datasets/kitofrank/RFUAV/api/tree/main"`;
+corrects the prior pass's "36 files" count), not the 299GB spectrogram-image figure
+shown on the HF dataset card (that figure only counts the
+`ImageSet-AllDrones-MatlabPipeline`/`ValidationSet_5Drones` image folders). The 5 DJI
+files (~43GB) completed and were size-verified byte-exact against the HF tree listing
+this pass — see `research/datasets/manifest.json` id `rfuav_dji_subset`.
+
+The remaining **32** files (not 31 as previously estimated) are **RC transmitter
+units, not drone airframes** (DAUTEL, DEVENTION, FlySky x3, FrSky x3, Futaba x4,
+Herelink, JR Propo x2, Jumper x2, RadioMaster x2, Radiolink x2, SIYI x3, Skydroid x2,
+WFLY x3, Yunzhuo x3 — 66.2GB total) — download started automatically 2026-09-19
+10:02 UTC via detached `aria2c` (`-x4 -s4 -j3 -c`, resumable), see
+`research/datasets/manifest.json` id `rfuav_nondji_subset` and
+`~/rf-datasets/manifests/rfuav_nondji_download.log` / `rfuav_nondji_urls.txt`.
+No manual action needed unless the download stalls (check with
+`pgrep -af aria2c` and the log's progress lines — re-run the same `aria2c -i
+~/rf-datasets/manifests/rfuav_nondji_urls.txt -c -x4 -s4 -j3` command to resume
+if it dies).
+
+**unrar now available**: installed 2026-09-19 via
+`micromamba install -n base -c conda-forge unrar -y` (was absent from both
+`~/.local/bin` and every micromamba env before this). Binary is at
+`~/.local/share/mamba/bin/unrar` in the `base` env (active by default). Neither
+this subset nor `rfuav_dji_subset` has been extracted/inspected yet — that is
+still the next open step before RFUAV's actual IQ format/sample rate can be
+confirmed.
 
 ## Large open datasets intentionally not yet started (no account needed, just budget/time)
 

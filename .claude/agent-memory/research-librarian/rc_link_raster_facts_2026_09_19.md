@@ -60,3 +60,27 @@ in §5's `ble_connection_like` rule — don't invent a new feature request aroun
 measurement paper found). Suggested to `rf-dsp-specialist` via the brief: make the beacon-
 interval tolerance asymmetric (tighter early bound, looser late bound) instead of symmetric
 ±2% — flagged as a design suggestion, not a hard number (no percentile table exists).
+
+## DIY-Multiprotocol-TX-Module firmware closes the FlySky/DSM/FrSky hop-table gap
+`pascallanger/DIY-Multiprotocol-TX-Module` GitHub `master` branch is a real, shipping open firmware that transmits
+these protocols from actual radio ICs (A7105 for FlySky AFHDS2A, CYRF6936 for Spektrum DSM2/DSMX, CC2500 for
+FrSky D/X) — its channel-selection and packet-timing code is PRIMARY evidence, not reverse-engineering inference.
+Fetched+read (raw GitHub, 2026-09-19): `AFHDS2A_a7105.ino`, `DSM_cyrf6936.ino`, `FrSkyX_cc2500.ino`,
+`FrSkyD_cc2500.ino`, `A7105_SPI.ino`. Mirrored at `research/library/rc_firmware/diy_multiprotocol/` (gitignored).
+Full extracted tables are in `research/briefs/rc-link-raster-facts.md` under "DIY-Multiprotocol primary tables
+(2026-09-19)" — don't re-derive, just cite that section. Key numbers for quick recall:
+- **AFHDS2A**: 16 hop channels out of a 164-channel universe (`band_no*41+1+(rnd%41)`, min spacing 5 units),
+  fixed **3850 µs** RF packet period (~260 Hz) — this is NOT the same as the 50-400 Hz servo-refresh field in the
+  settings packet, don't conflate them.
+- **Spektrum DSM2/DSMX**: frame period is **11 ms** (8-11 channel, high-rate mode) or **22 ms** (default,
+  3-12 channels); DSM2_SFC variant uses 16.5 ms. Hop-channel selection is bind-ID-keyed table lookup
+  (`DSMR_ID_FREQ[]`), not simple arithmetic — confirmed to exist, not fully traced line-by-line.
+- **FrSky D and X**: both use **47 hop channels**, fixed **9000 µs (9 ms, ~111 Hz)** RF packet period. FrSkyX adds
+  a bind-derived `chanskip` stride (visit order through the 47 channels varies per bind) instead of FrSkyD's fixed
+  +1 step. Don't mistake FrSkyX's region-variant sub-state timings (4000/5200/4200/3400 µs, LBT vs FCC telemetry/CCA
+  windows) for the main packet period — those are inside one 9 ms frame, not the frame period itself.
+- **Not resolved this pass** (still COMMUNITY-grade or open): the actual MHz-per-channel-register-step for A7105
+  (AFHDS2A) and CC2500 (FrSky D/X) — would need a datasheet cross-reference against the `*_A7105_regs[]` init
+  tables in `A7105_SPI.ino` or the CC2500 base-frequency registers (not fetched). If asked for absolute-frequency
+  raster (not just hop-count/period) for these three protocols, this is the next thing to fetch, not a re-read of
+  what's already mirrored.

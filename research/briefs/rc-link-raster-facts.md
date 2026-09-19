@@ -81,6 +81,86 @@ contention-induced delay in busy environments.
 one-directional — flag this as a design suggestion to `rf-dsp-specialist`, not a hard number (no measured percentile
 table exists to set the late-side bound precisely).
 
+## DIY-Multiprotocol primary tables (2026-09-19)
+
+**Question:** does the open-source DIY-Multiprotocol-TX-Module firmware (`pascallanger/DIY-Multiprotocol-TX-Module`,
+GitHub, `master` branch) contain primary channel/hop-table and packet-timing facts for FlySky AFHDS2A, Spektrum
+DSM2/DSMX, and FrSky D/X? **Yes** — this firmware transmits these protocols from real hardware (A7105/CYRF6936/CC2500
+radio ICs), so its channel-selection and timing code is a **PRIMARY, directly-quotable source** for the OTA raster,
+upgrading all three rows below from COMMUNITY/UNKNOWN. Grade: **PRIMARY (open firmware implementing the protocol)**.
+Mirrored locally at `research/library/rc_firmware/diy_multiprotocol/{AFHDS2A_a7105.ino, DSM_cyrf6936.ino,
+FrSkyX_cc2500.ino, FrSkyD_cc2500.ino, A7105_SPI.ino}` (fetched raw from GitHub `master`, 2026-09-19; gitignored, not
+committed to the repo per project policy on raw library files).
+
+### FlySky AFHDS2A (A7105, `AFHDS2A_a7105.ino`)
+- **Hop set size:** 16 channels (`AFHDS2A_NUMFREQ = 16`), selected per-bind from a 164-channel universe.
+- **Channel derivation (`AFHDS2A_calc_channels()`):** `band_no = ((idx<<1 | (idx>>1)&1) + rx_tx_addr[3]) & 3` (i.e.
+  a 4-way band selection keyed off the low byte of the bound TX address), then
+  `next_ch = band_no*41 + 1 + (rnd>>idx) % 41` — channel range **1..164** (A7105 channel-register units, not raw
+  MHz), with a minimum spacing of 5 channel-units enforced between any two of the 16 selected channels
+  (`if(distance<5) retry`). `rnd` is address-derived, so the hop set is fixed per bound TX/RX pair, not
+  re-randomized per session — matches the known AFHDS2A behaviour that a given transmitter always reuses the same
+  16-channel set after binding.
+- **Channel-to-frequency mapping:** register-level only (`A7105_WriteReg(A7105_0F_PLL_I/CHANNEL, channel)`), LO base
+  programmed to 2400 MHz (`bip=0x4b // 2400MHz (default)` in `A7105_AdjustLOBaseFreq()`). The exact channel-unit-to-
+  MHz step was **not resolved from source this pass** (would need the A7105 datasheet's channel-spacing register
+  cross-referenced against the `FLYSKY_A7105_regs[]`/`AFHDS2A_A7105_regs[]` init tables in `A7105_SPI.ino`, budget did
+  not allow); the commonly-cited 1 MHz/channel-unit step for A7105 FlySky variants is a **COMMUNITY** figure, not
+  confirmed here — do not upgrade that specific number to PRIMARY.
+- **Packet period:** fixed **3850 µs air-interface cycle** (`return 3850-AFHDS2A_WRITE_TIME;` / `return 3850;` in the
+  state machine, i.e. ~259.7 Hz RF packet rate) — independent of the AFHDS2A_PACKET_SETTINGS servo-refresh-rate field
+  (50-400 Hz, user-configurable, encoded in packet payload, not the RF cadence itself). **Do not conflate the
+  50-400 Hz "refresh rate" setting with the fixed ~3850 µs RF packet period** — a common confusion point.
+
+### Spektrum DSM2/DSMX (CYRF6936, `DSM_cyrf6936.ino`)
+- **Frame period:** two hardware-supported cadences selected by channel count and a mode flag
+  (`MODE_11MS_BIT_MASK`): **11 ms** (channel counts 8-11, high-rate/high-channel-count mode) and **22 ms** (default,
+  3-12 channels, lower rate) — comments in source: "22+11ms for 3..7 channels", "22ms for 8..12 channels", "11ms for
+  8..11 channels". DSM2_SFC variant uses a distinct **16500 µs (16.5 ms)** period (`DSM2_SFC_PERIOD = 16500`).
+  `DSM_CH1_CH2_DELAY = 4010 µs` is the fixed intra-frame gap between the channel-1 and channel-2 sub-packet writes
+  within one frame (DSM transmits 2 packets per frame on 2 different channels for diversity/redundancy).
+- **Hop-channel derivation:** channel selection is **not** a simple arithmetic hop formula like AFHDS2A/FrSky — it
+  uses a bind-time pseudo-random-derived channel table (`DSMR_ID_FREQ[row][...]` lookup keyed by a bind ID, plus a
+  `tmpch[]` candidate-selection loop enforcing minimum spacing between the two active channels, mirrored at
+  `hopping_frequency[0]`/`[1]`). Full table-generation algorithm was visible in source but not fully traced this
+  pass (719-line file, budget-limited) — sufficient to confirm PRIMARY existence of a hop table, not to reproduce it
+  byte-for-byte here.
+- **Bind channel:** fixed at CYRF channel `0x0D` (13) for the bind phase (`DSM_BIND_CHANNEL`), separate from the
+  post-bind hop set.
+
+### FrSky D and FrSky X (CC2500, `FrSkyD_cc2500.ino` / `FrSkyX_cc2500.ino`)
+- **Hop set size:** **47 channels** for both D and X variants — `hopping_frequency[counter % 47]` (FrSkyD) and
+  `hopping_frequency_no = (hopping_frequency_no + FrSkyX_chanskip) % 47` (FrSkyX, which additionally uses a
+  bind-derived `FrSkyX_chanskip` stride instead of a fixed +1 step, so the visit *order* through the 47 channels is
+  session/bind-specific even though the *set size* is always 47).
+- **Packet period:** fixed **9000 µs (9 ms, ~111 Hz)** RF frame rate for both D and X in the common case
+  (`return 9000;` / `telemetry_set_input_sync(9000);` in both files). FrSkyD has one shortened observed interval,
+  `7500 µs` on a specific telemetry sub-state (`FRSKY_DATA4`); FrSkyX has region-variant sub-timings (LBT vs FCC:
+  4000/5200/4200/3400 µs) for internal telemetry/CCA windows, not the main 9 ms hop cadence itself — **do not treat
+  the 4000-5200 µs values as the packet period**, they are sub-state timings inside the 9 ms frame.
+- **Channel-to-frequency mapping:** written directly to the CC2500 `CHANNR` register per hop
+  (`CC2500_WriteReg(CC2500_0A_CHANNR, hopping_frequency[...])`); actual MHz-per-register-step depends on the
+  CC2500 base-frequency/channel-spacing register config, which was **not traced this pass** (same limitation as
+  AFHDS2A above) — treat any specific MHz-spacing claim for FrSky D/X as still COMMUNITY until the CC2500 config
+  table is read.
+
+### Net effect on the design-doc raster table
+FlySky AFHDS2A, Spektrum DSM2/DSMX, and FrSky D/X all move from **COMMUNITY/UNKNOWN → PRIMARY** for hop-set size and
+RF packet period (the two facts most directly useful for a blind cadence/hop-count Stage-1 discriminator). The
+channel-to-RF-frequency step size for all three remains **COMMUNITY-grade or unresolved** — a live capture or a
+deeper register-table read (A7105/CC2500 datasheet cross-reference) is still needed before any absolute-frequency
+raster claim for these three protocols can be called PRIMARY.
+
+### Sources (this addendum)
+- GitHub `pascallanger/DIY-Multiprotocol-TX-Module`, `master` branch, fetched raw 2026-09-19:
+  - `Multiprotocol/AFHDS2A_a7105.ino` — https://raw.githubusercontent.com/pascallanger/DIY-Multiprotocol-TX-Module/master/Multiprotocol/AFHDS2A_a7105.ino
+  - `Multiprotocol/DSM_cyrf6936.ino` — https://raw.githubusercontent.com/pascallanger/DIY-Multiprotocol-TX-Module/master/Multiprotocol/DSM_cyrf6936.ino
+  - `Multiprotocol/FrSkyX_cc2500.ino` — https://raw.githubusercontent.com/pascallanger/DIY-Multiprotocol-TX-Module/master/Multiprotocol/FrSkyX_cc2500.ino
+  - `Multiprotocol/FrSkyD_cc2500.ino` — https://raw.githubusercontent.com/pascallanger/DIY-Multiprotocol-TX-Module/master/Multiprotocol/FrSkyD_cc2500.ino
+  - `Multiprotocol/A7105_SPI.ino` — https://raw.githubusercontent.com/pascallanger/DIY-Multiprotocol-TX-Module/master/Multiprotocol/A7105_SPI.ino (register init tables only, channel-spacing not resolved)
+- GitHub repo file listing via `api.github.com/repos/pascallanger/DIY-Multiprotocol-TX-Module/contents/Multiprotocol`
+  (used to find the correct FrSky filename set).
+
 ## Sources
 - NDSS'23 Schiller et al. (`research/library/.../ndss2023_f217_paper.pdf` reference; re-fetched+`pdftotext`'d this
   pass from `ndss-symposium.org`), full text scanned for FCC/hop/channel mentions.
@@ -99,4 +179,10 @@ table exists to set the late-side bound precisely).
 - DJI RC uplink raster: needs either a non-sandboxed FCC exhibit fetch or a live capture — architect decision.
 - ExpressLRS true on-air duration table: needs a deeper firmware read (`tx_main.cpp`/rate-config array) or bench
   measurement.
-- FlySky AFHDS2A: needs a multiprotocol-TX-module firmware source read (not attempted this pass).
+- ~~FlySky AFHDS2A: needs a multiprotocol-TX-module firmware source read~~ — DONE 2026-09-19, see "DIY-Multiprotocol
+  primary tables" addendum above (hop-set-size and packet-period now PRIMARY; MHz-per-channel-step still open).
+- A7105/CC2500 channel-register-to-MHz step size (affects AFHDS2A, FrSky D/X absolute frequency raster): needs a
+  datasheet cross-reference against `A7105_SPI.ino`'s `*_A7105_regs[]` init tables / the CC2500 base-freq registers
+  in `CC2500_SPI.ino` (not fetched this pass) — or a live capture measuring actual hop spacing.
+- Spektrum DSM2/DSMX bind-derived hop-table generation algorithm (`DSMR_ID_FREQ[]` lookup + `tmpch[]` selection
+  loop in `DSM_cyrf6936.ino`): PRIMARY existence confirmed, full derivation not traced line-by-line this pass.

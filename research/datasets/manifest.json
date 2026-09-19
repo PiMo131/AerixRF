@@ -525,6 +525,23 @@
       "center_frequency_bands": "not confirmed this pass - needs extraction + read",
       "curation_rationale": "Full RFUAV top-level raw set is 36 files / 109.2 GB (measured via HF API tree listing this pass), exceeding the 100GB budget. Curated to the 5 DJI files (~43GB) as highest priority for AERIX's O3/O4 overlap probe. Remaining 31 RC-transmitter-vendor files (FlySky/FrSky/Futaba/JR Propo/Jumper/RadioMaster/Radiolink/SIYI/Skydroid/WFLY/Yunzhuo/Herelink/Devention/Dautel, ~66GB) documented as a fast-follow in USER_TODO.md, not started.",
       "related_brief": "research/briefs/datasets-and-signatures-plan.md"
+    },
+    {
+      "dataset_id": "rfuav_nondji_subset",
+      "dataset_name": "RFUAV - non-DJI RC transmitter/airframe subset (curated by research-librarian)",
+      "source": "Hugging Face kitofrank/RFUAV, top-level per-model .rar files",
+      "license": "not confirmed on HF dataset card this pass - inherit rfuav entry caveat until checked",
+      "access_status": "open (anonymous resolve URL, confirmed working 2026-09-19)",
+      "download_status": "in_progress",
+      "size_expected": "~66.2 GB (32 files: DAUTEL EVO NANO, DEVENTION DEVO, FLYSKY EL18/FS I6X/NV14, FRSKY X14/X20R/X9DP2019, FUTABA T10J/T14SG/T16IZ/T18SZ, Herelink Hx4, JR PROPO XG14/XG7, JUMPER T14/TProV2, RadioMaster BOXER/TX16S, Radiolink AT10 II/AT9S Pro, SIYI FT24/MK15/MK32, SKYDROID H12/T10, WFLY ET10/ET16S/WFT09SII, YUNZHUO H12/H16/H30)",
+      "size_downloaded": "in progress, started 2026-09-19 10:02 UTC via detached aria2c (PID 334846, see ~/rf-datasets/manifests/rfuav_nondji_download.log); -x4 -s4 -j3 -c, ETA roughly 1.5-2h at observed ~10MiB/s aggregate",
+      "signal_format": "raw per-unit .rar archives (RC transmitter/handheld-controller captures, NOT airframes despite dataset framing on some HF card text - internal IQ format/sample rate not yet verified, needs extraction + read once unrar is available)",
+      "drone_models": "N/A - these are RC transmitter/ground-control units, not aircraft: FlySky, FrSky, Futaba, JR Propo, Jumper, RadioMaster, Radiolink, SIYI, Skydroid, WFLY, Yunzhuo, Herelink, Devention, Dautel brands",
+      "center_frequency_bands": "not confirmed this pass - needs extraction + read",
+      "curation_rationale": "Fast-follow to rfuav_dji_subset per USER_TODO.md - completes the RFUAV top-level raw set (37 files / ~109.2GB total: 5 DJI already downloaded + these 32). Corrects prior count of '31 non-DJI files' recorded 2026-09-18 in USER_TODO.md to the actual HF tree listing of 32 (39 total file entries minus 5 DJI minus README.md minus .gitattributes = 32). Useful for non-DJI RC-link detector work (FlySky/FrSky/etc. RF fingerprinting).",
+      "extraction_note": "unrar CLI installed 2026-09-19 via `micromamba install -n base -c conda-forge unrar -y` into ~/.local/share/mamba/bin/unrar (base env, active by default) - was previously absent from both ~/.local/bin and any micromamba env. Adapter should use this path or activate base env before extracting any .rar in this dataset or rfuav_dji_subset.",
+      "related_brief": "research/briefs/non-dji-targets.md",
+      "local_path": "rfuav"
     }
   ]
 }

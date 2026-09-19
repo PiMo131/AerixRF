@@ -274,3 +274,36 @@ aria2c restart):
   a fully-dead process leaves the same-looking stale progress line as a
   merely-stalled one, only the process list and .out/.log mtime distinguish
   them.**
+
+Update 2026-09-19 (RFUAV non-DJI subset download + unrar install):
+- **All 5 previously-downloaded RFUAV DJI files verified byte-exact** against the
+  HF `api/tree/main` listing (DJI_AVATA2.rar 11409316020, DJI_FPV_COMBO.rar
+  14998447951, DJI_MAVIC3_PRO.rar 5159757084, DJI_MINI3.rar 6484836469,
+  DJI_MINI4_PRO.rar 4945879172 — all match exactly). No re-download needed.
+- **RFUAV top-level file count corrected again**: HF tree API returns 39 file
+  entries total (not 36/37 as prior passes estimated) = .gitattributes + README.md
+  + 5 DJI .rar + **32** non-DJI .rar (not 31). Always re-count from the live
+  `curl -s "https://huggingface.co/api/datasets/kitofrank/RFUAV/tree/main"` JSON
+  rather than trusting a remembered count.
+- Started the 32 non-DJI RC-transmitter/airframe files (~66.2GB: DAUTEL,
+  DEVENTION, FlySky x3, FrSky x3, Futaba x4, Herelink, JR Propo x2, Jumper x2,
+  RadioMaster x2, Radiolink x2, SIYI x3, Skydroid x2, WFLY x3, Yunzhuo x3) via
+  detached `aria2c -c -x4 -s4 -j3 -k1M` (PID 334846 at launch), input file
+  `~/rf-datasets/manifests/rfuav_nondji_urls.txt`, log
+  `~/rf-datasets/manifests/rfuav_nondji_download.log`. URL pattern: HF resolve
+  URLs redirect through `us.aws.cdn.hf.co/xet-bridge-us/...` (Hugging Face's Xet
+  storage backend) — this is normal, not an error, do not treat the redirect
+  itself as a failure signal. Observed aggregate throughput ~10-11 MiB/s early
+  on; at that rate full completion is ~1.5-2h from the 2026-09-19 10:02 UTC
+  start. New manifest entry `rfuav_nondji_subset` in both
+  `research/datasets/manifest.json` and `~/rf-datasets/manifests/datasets.json`.
+- **unrar was absent everywhere** (`~/.local/bin`, all micromamba envs) before
+  this pass. Installed via `micromamba install -n base -c conda-forge unrar -y`
+  — now at `~/.local/share/mamba/bin/unrar` in the `base` env (active by
+  default per `micromamba env list`). Neither RFUAV subset has been extracted
+  yet; that + confirming actual internal IQ format/sample rate is still open
+  for whoever picks up RFUAV adapter work next.
+- `research/datasets/USER_TODO.md`'s RFUAV section was rewritten to reflect
+  "download started, no manual action needed" instead of "not started" —
+  re-read that file (not this memory) for the current authoritative status
+  since download state changes fast and this memory note will go stale.
