@@ -44,7 +44,9 @@ and independent review before it is "done". Evidence-wording rules apply.
 ## Non-DJI (approved 2026-09-19)
 - [ ] SiK/MAVLink passive telemetry decoder (GFSK demod + SiK framing + MAVLink parse) — design brief first; zero public IQ,
       needs a recorded capture (no transmit by us).
-- [ ] Analog FPV: validate the detector on Zenodo 19870020 chunk10 (real VTX IQ, HackRF 20 MS/s, `vtx_power_mw`); use its
+- [ ] Analog FPV: Zenodo 19870020 chunk10 = 3 sweeps at 1240 MHz / 25 mW (1.2 GHz analog video) → validates FM-video shape
+      + dwell confirmation, NOT the 5.8 GHz grid; another chunk (hundreds of GB) needed for 5.8 GHz — user approval.
+- [ ] Analog FPV (old note): validate the detector on Zenodo 19870020 chunk10 (real VTX IQ, HackRF 20 MS/s, `vtx_power_mw`); use its
       25/600 mW rows to set the shape-ratio/BW expectations; consider more chunks (4.2 TB total) only with user approval.
 - [ ] Analog 5.8 GHz FPV carrier-grid detector on sweeps (F/Raceband grids); video content demod approved for research.
 - [ ] Wi-Fi drones: RF-level detection only in AERIX RF; frame parsing → ESP32 system.

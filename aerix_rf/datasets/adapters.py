@@ -957,10 +957,249 @@ class RfuavAdapter:
         return LabelsGroup(scene=inst, window=inst)
 
 
+# ---------------------------------------------------------------------------
+# Zenodo 19870020 -- "FPV Analogue Video IQ Dataset" (analog_fpv_public,
+# Workstream D, T7). HackRF One wideband frequency-SWEEP captures: 100 MHz
+# .. 5.98 GHz on a 20 MHz grid (295 tuned frequencies), 10 contiguous
+# 65536-sample dwell blocks per frequency before retuning, 20 MS/s,
+# interleaved float32 I/Q already unit-scale (complex64 view, no further
+# scaling) -- see ~/rf-datasets/analog_fpv_public/original/FORMAT.md for the
+# byte-count / value-range / spectrum verification evidence trail (checked
+# against `chunk10.zip` only).
+#
+# The shared top-level `iq_recording_meta.csv` gives one row of ground truth
+# per *sweep* (one `iq.bin`): `drone_freq` (the VTX carrier in MHz, or the
+# literal string "none" for a no-TX control sweep), `vtx_power_mw`,
+# `distance _m`, `environment`, free-text `notes`. Its header is malformed
+# (`vtx_power_mw\,distance _m` -- a literal unescaped backslash before a
+# comma) and is repaired before parsing; see FORMAT.md.
+#
+# `RecordingMeta` granularity is one *dwell* (10 contiguous blocks at one
+# `center_freq`), NOT one per `iq.bin`: a sweep's `drone_freq` ground truth
+# is only true for the dwell(s) actually tuned to that frequency -- a sweep
+# spends 294/295 of its dwells tuned far from the VTX. Treating the whole
+# sweep as a single recording would force one wrong label across the file
+# (either a false-positive TX label on 294 background dwells, or discarding
+# real background data by calling the whole sweep "unknown"). This is a
+# deliberate deviation from a literal "one recording per IQ file" reading;
+# see the handback report.
+# ---------------------------------------------------------------------------
+
+_ANALOG_FPV_RATE_HZ = 20_000_000.0
+_ANALOG_FPV_BYTES_PER_SAMPLE = 8  # complex64: 2 x float32
+# A dwell's tuned `center_freq` (Hz, integer in the sweep's own metadata.csv)
+# is matched to the sweep-level `drone_freq` (MHz, float, possibly
+# fractional) within this tolerance before calling it "the TX dwell".
+_ANALOG_FPV_FREQ_MATCH_TOL_HZ = 1.0
+
+
+@dataclass(frozen=True)
+class _AnalogFpvSweepMeta:
+    sweep_id: str
+    drone_freq_hz: Optional[float]  # None == "none" (no-TX control sweep)
+    vtx_power_mw: float
+    distance_m: str
+    environment: str
+    notes: str
+
+
+def _parse_analog_fpv_meta_csv(path: Path) -> dict[str, _AnalogFpvSweepMeta]:
+    """Parse the dataset's shared `iq_recording_meta.csv`, repairing its
+    malformed header (see the module-comment above and FORMAT.md): splitting
+    naively on `,` gives 13 tokens for 13 data columns once a stray trailing
+    backslash is stripped from each token."""
+
+    import csv
+
+    out: dict[str, _AnalogFpvSweepMeta] = {}
+    with open(path, newline="") as f:
+        reader = csv.reader(f)
+        header = [h.strip().rstrip("\\").strip() for h in next(reader)]
+        for row in reader:
+            if not row or not row[0].strip():
+                continue
+            rec = dict(zip(header, row))
+            drone_freq_raw = (rec.get("drone_freq") or "none").strip()
+            drone_freq_hz = (
+                None if drone_freq_raw.lower() == "none" else float(drone_freq_raw) * 1e6
+            )
+            distance_m = (rec.get("distance_m") or rec.get("distance _m") or "").strip()
+            sweep_id = (rec.get("iq_folder") or "").strip()
+            if not sweep_id:
+                continue
+            out[sweep_id] = _AnalogFpvSweepMeta(
+                sweep_id=sweep_id,
+                drone_freq_hz=drone_freq_hz,
+                vtx_power_mw=float(rec.get("vtx_power_mw") or 0),
+                distance_m=distance_m,
+                environment=(rec.get("environment") or "").strip(),
+                notes=(rec.get("notes") or "").strip(),
+            )
+    return out
+
+
+def _iter_analog_fpv_dwells(path: Path) -> Iterator[tuple[int, int, int]]:
+    """Group a sweep's per-block `metadata.csv` (`timestamp,center_freq,
+    offset_bytes,num_samples`) into contiguous same-`center_freq` runs.
+    Yields ``(center_freq_hz, first_offset_bytes, total_samples)`` per run,
+    in file order. Contiguity (no gap between blocks) is verified by byte
+    arithmetic, not assumed."""
+
+    import csv
+
+    with open(path, newline="") as f:
+        reader = csv.DictReader(f)
+        rows = [
+            (int(r["center_freq"]), int(r["offset_bytes"]), int(r["num_samples"]))
+            for r in reader
+        ]
+    i = 0
+    n = len(rows)
+    while i < n:
+        freq, off0, _ = rows[i]
+        j = i
+        while j < n and rows[j][0] == freq:
+            j += 1
+        last_off, last_ns = rows[j - 1][1], rows[j - 1][2]
+        total_samples = (last_off - off0) // _ANALOG_FPV_BYTES_PER_SAMPLE + last_ns
+        yield freq, off0, total_samples
+        i = j
+
+
+class AnalogFpvZenodoAdapter:
+    """S1 adapter for the local Zenodo 19870020 mirror
+    (``~/rf-datasets/analog_fpv_public/original``): ``chunk<N>.zip`` archives
+    extracted to ``original/extracted/chunk<N>/chunk<N>/sweep_<ts>/{metadata.csv,
+    iq.bin}``, cross-referenced against the shared ``iq_recording_meta.csv``.
+    See the module-level comment above and
+    ``~/rf-datasets/analog_fpv_public/original/FORMAT.md``.
+    """
+
+    dataset_id = "analog_fpv_public"
+    mirror_dir_name = "analog_fpv_public"
+
+    def iter_recordings(self, root: Path) -> Iterator[RecordingMeta]:
+        base = root / self.mirror_dir_name / "original"
+        meta_csv = base / "iq_recording_meta.csv"
+        extracted = base / "extracted"
+        if not meta_csv.is_file() or not extracted.is_dir():
+            return
+        sweep_meta = _parse_analog_fpv_meta_csv(meta_csv)
+        for chunk_dir in sorted(p for p in extracted.iterdir() if p.is_dir()):
+            for sweep_dir in sorted(chunk_dir.glob("*/sweep_*")):
+                if not sweep_dir.is_dir():
+                    continue
+                meta = sweep_meta.get(sweep_dir.name)
+                if meta is None:
+                    continue  # sweep on disk but absent from the shared CSV: skip, never guess
+                iq_path = sweep_dir / "iq.bin"
+                dwell_csv = sweep_dir / "metadata.csv"
+                if not iq_path.is_file() or not dwell_csv.is_file():
+                    continue
+                run_id = f"{chunk_dir.name}/{sweep_dir.name}"
+                for center_hz, off0, n_samples in _iter_analog_fpv_dwells(dwell_csv):
+                    is_tx_freq = (
+                        meta.drone_freq_hz is not None
+                        and abs(center_hz - meta.drone_freq_hz) < _ANALOG_FPV_FREQ_MATCH_TOL_HZ
+                    )
+                    device_id = (
+                        f"vtx_{meta.vtx_power_mw:.0f}mw"
+                        if meta.drone_freq_hz is not None
+                        else "no_tx"
+                    )
+                    notes = (
+                        f"analog_fpv_public sweep dwell; sweep drone_freq="
+                        f"{meta.drone_freq_hz!r} Hz; vtx_power_mw={meta.vtx_power_mw}; "
+                        f"distance_m={meta.distance_m}; environment={meta.environment}"
+                    )
+                    if meta.notes:
+                        notes += f"; dataset_notes={meta.notes}"
+                    yield RecordingMeta(
+                        dataset_id=self.dataset_id,
+                        recording_id=f"{run_id}/f{center_hz}",
+                        device_id=device_id,
+                        run_id=run_id,
+                        source_paths=(iq_path,),
+                        original_rate_hz=_ANALOG_FPV_RATE_HZ,
+                        original_center_freq_hz=float(center_hz),
+                        # No declared IF/anti-alias bandwidth narrower than
+                        # the sample rate is documented (see FORMAT.md).
+                        original_bw_hz=_ANALOG_FPV_RATE_HZ,
+                        original_dtype="float32_interleaved",
+                        channel_id=f"f{center_hz}",
+                        notes=notes,
+                        extra={
+                            "offset_bytes": off0,
+                            "n_samples": n_samples,
+                            "is_tx_freq": is_tx_freq,
+                            "drone_freq_hz": meta.drone_freq_hz,
+                            "vtx_power_mw": meta.vtx_power_mw,
+                            "no_tx_sweep": meta.drone_freq_hz is None,
+                        },
+                    )
+
+    def load_iq(
+        self, rec: RecordingMeta
+    ) -> tuple[np.ndarray, float, Optional[float], Optional[float]]:
+        off0 = int(rec.extra["offset_bytes"])
+        n_samples = int(rec.extra["n_samples"])
+        raw = np.fromfile(
+            rec.source_paths[0], dtype="<f4", count=n_samples * 2, offset=off0
+        )
+        if raw.size != n_samples * 2:
+            raise ValueError(
+                f"AnalogFpvZenodoAdapter: {rec.source_paths[0]} yielded "
+                f"{raw.size} float32 values at offset {off0}, expected "
+                f"{n_samples * 2} (2 * n_samples={n_samples}) -- dwell "
+                "grouping from metadata.csv may not match iq.bin's actual length"
+            )
+        iq = raw.view(np.complex64)
+        return iq, rec.original_rate_hz, rec.original_center_freq_hz, rec.original_bw_hz
+
+    def labels(self, rec: RecordingMeta) -> LabelsGroup:
+        if rec.extra["no_tx_sweep"]:
+            # Dataset's own no-TX control sweep: every dwell in it is
+            # confirmed background by the dataset's own ground truth.
+            inst = LabelInstance(
+                emitter_class=EmitterClass.BACKGROUND,
+                link_family=LinkFamily.NOT_APPLICABLE,
+                link_role=LinkRole.NOT_APPLICABLE,
+                activity=Activity.OFF,
+                evidence_level=EvidenceLevel.OPERATOR_TRUTH,
+                label_source=LabelSource.DATASET_METADATA,
+            )
+            return LabelsGroup(scene=inst, window=inst)
+        if rec.extra["is_tx_freq"]:
+            inst = LabelInstance(
+                emitter_class=EmitterClass.DRONE_LINK,
+                link_family=LinkFamily.ANALOG_FPV,
+                link_role=LinkRole.DOWNLINK_VIDEO,
+                individual_id=f"vtx_{rec.extra['vtx_power_mw']:.0f}mw",
+                activity=Activity.UNKNOWN,
+                evidence_level=EvidenceLevel.OPERATOR_TRUTH,
+                label_source=LabelSource.DATASET_METADATA,
+            )
+            return LabelsGroup(scene=inst, window=inst)
+        # A dwell from a TX sweep, but tuned away from `drone_freq`: the
+        # dataset never explicitly asserts "no signal here", only "the VTX
+        # is at drone_freq" -- absence at this other frequency is this
+        # adapter's own frequency-separation inference, not a dataset label.
+        inst = LabelInstance(
+            emitter_class=EmitterClass.BACKGROUND,
+            link_family=LinkFamily.NOT_APPLICABLE,
+            link_role=LinkRole.NOT_APPLICABLE,
+            activity=Activity.UNKNOWN,
+            evidence_level=EvidenceLevel.PROBABILISTIC_CLASSIFICATION,
+            label_source=LabelSource.HEURISTIC_INFERENCE,
+        )
+        return LabelsGroup(scene=inst, window=inst)
+
+
 ADAPTERS: dict[str, Adapter] = {
     ZenodoDroneRF2020Adapter.dataset_id: ZenodoDroneRF2020Adapter(),
     RubDroneSecurityAdapter.dataset_id: RubDroneSecurityAdapter(),
     RfuavAdapter.dataset_id: RfuavAdapter(),
+    AnalogFpvZenodoAdapter.dataset_id: AnalogFpvZenodoAdapter(),
     "aerix_antsdr_ambient_2026_09_18": AerixSessionAdapter(
         dataset_id="aerix_antsdr_ambient_2026_09_18"
     ),
