@@ -37,7 +37,9 @@ decodable Remote ID at all. It is posted to `/v1/rf-detections:batch` and stored
   OcuSync), ~10 MHz OFDM bandwidth, FHSS signature → `detection_probability`. Keys on signal
   *shape*, so it catches even encrypted O4 and analog FPV. Needs no training.
 - **Stage 2 — classify** (`classify/model.py`, `classify/train/`): `signature_class`. Rule-based
-  today; a scikit-learn model trained on real datasets drops in behind the same interface.
+  today; a scikit-learn model trained on real datasets drops in behind the same interface. The
+  `--human`/log status line's `cls=` field can read `uas_link`: a probabilistic (evidence level 2)
+  "this is some UAS RF link" call with unknown family/manufacturer, never an identity claim.
 - **Stage 3 — DJI DroneID decode** (`decode/`): best-effort serial + drone/operator GPS for
   OcuSync ≤ 2.0. Full chain: ZC sync, resample, CFO, OFDM demod, equalize, QPSK, LTE descramble,
   de-rate-match, LTE Turbo decode (max-log-MAP), CRC24A gate, DJI frame parse. Synthetic-verified

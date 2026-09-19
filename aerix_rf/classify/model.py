@@ -4,7 +4,14 @@ Stage 1 (``detect.energy``) only describes RF *shape* (``Detection.morphology``)
 This module turns that shape -- plus, when a trained bundle is available, the
 spectrogram itself -- into an identity claim in the stage-2 vocabulary::
 
-    dji_ocusync   wifi_uas   analog_fpv   other_uas   non_uas   unknown
+    dji_ocusync   wifi_uas   analog_fpv   other_uas   non_uas   uas_link
+    background    unknown
+
+``uas_link`` is a family/manufacturer-agnostic stage-2 (probabilistic
+classification, evidence level 2) label produced only by a features_v2
+bundle's "drone_link" prediction -- "RF classified as a UAS link;
+family/manufacturer unknown". It is never an identity claim and is never
+promoted to a specific family (e.g. dji_ocusync) without further evidence.
 
 Entry points (all return a ``Classification``):
 
@@ -52,7 +59,8 @@ log = logging.getLogger("aerix.rf.classify")
 _PKG_ROOT = Path(__file__).resolve().parents[2]      # .../aerix-rf
 DEFAULT_MODEL_PATH = _PKG_ROOT / "models" / "signature.joblib"
 
-STAGE2_CLASSES = ("dji_ocusync", "wifi_uas", "analog_fpv", "other_uas", "non_uas", "unknown")
+STAGE2_CLASSES = ("dji_ocusync", "wifi_uas", "analog_fpv", "other_uas", "non_uas",
+                  "uas_link", "background", "unknown")
 
 # features_v2 wiring (docs/design/features-and-benchmark.md S4 F4). The live
 # pipeline's active feature extractor is selected by $AERIX_RF_FEATURES ("v1"
@@ -74,6 +82,15 @@ ABSTAIN_THRESHOLD = 0.5
 
 # Model / dataset labels -> stage-2 vocabulary. Anything not listed maps to
 # "unknown" (the raw label is still carried in Classification.model_label).
+#
+# "uas_link" (from a features_v2 bundle's "drone_link" label) is a STAGE-2
+# EVIDENCE LEVEL 2 (probabilistic classification) label, never an identity
+# claim: it means "RF classified as a UAS link; family/manufacturer unknown".
+# It must never be presented as equivalent to a family/manufacturer label
+# (dji_ocusync etc.) or to a stage-3 protocol decode. "background" (features_v2
+# negative class) is a genuine stage-2 outcome distinct from "unknown" (no
+# model / abstained / rule "no claim") and from "non_uas" (rule-based noise
+# call) -- it is kept as its own canonical label rather than aliased.
 LEGACY_LABELS = {
     "dji_ocusync": "dji_ocusync",
     "wifi_drone": "wifi_uas",       # train/data.py CLASSES
@@ -81,6 +98,8 @@ LEGACY_LABELS = {
     "noise": "non_uas",
     "drone": "other_uas",           # binary models (to_binary)
     "unknown": "unknown",
+    "drone_link": "uas_link",       # features_v2 / train_v2.py binary_label positive class
+    "background": "background",     # features_v2 / train_v2.py binary_label negative class
     **{c: c for c in STAGE2_CLASSES},
 }
 

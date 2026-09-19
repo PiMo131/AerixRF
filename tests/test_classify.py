@@ -308,10 +308,34 @@ def test_canonical_label_covers_dataset_and_stage2_labels():
     for raw, want in (("wifi_drone", "wifi_uas"), ("fpv_analog", "analog_fpv"),
                       ("noise", "non_uas"), ("drone", "other_uas"),
                       ("dji_ocusync", "dji_ocusync"), ("unknown", "unknown"),
-                      ("something_else", "unknown")):
+                      ("something_else", "unknown"),
+                      ("drone_link", "uas_link"), ("background", "background")):
         assert clsmodel.canonical_label(raw) == want
     for c in clsmodel.STAGE2_CLASSES:
         assert clsmodel.canonical_label(c) == c
+
+
+@pytest.mark.parametrize("raw,want", [
+    ("dji_ocusync", "dji_ocusync"),
+    ("wifi_drone", "wifi_uas"),
+    ("fpv_analog", "analog_fpv"),
+    ("noise", "non_uas"),
+    ("drone", "other_uas"),
+    ("unknown", "unknown"),
+    ("something_else", "unknown"),
+])
+def test_canonical_label_v1_mappings_are_byte_identical(raw, want):
+    """features_v2's drone_link/background addition must not disturb any
+    pre-existing (v1 dataset / rule-vocabulary) mapping."""
+    assert clsmodel.canonical_label(raw) == want
+
+
+def test_canonical_label_v2_bundle_labels_are_generic_uas_link_not_identity():
+    # "drone_link" (features_v2 positive class) -> the generic, family-agnostic
+    # stage-2 label, never one of the identity buckets (dji_ocusync etc.).
+    assert clsmodel.canonical_label("drone_link") == "uas_link"
+    assert clsmodel.canonical_label("background") == "background"
+    assert "uas_link" in clsmodel.STAGE2_CLASSES and "background" in clsmodel.STAGE2_CLASSES
 
 
 # --- ML path: abstain, sample-rate mismatch, corrupt model ---------------------

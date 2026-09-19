@@ -34,6 +34,8 @@ _STAGE2_TO_CONTRACT = {
     "analog_fpv": "fpv_analog",
     "non_uas": "noise",
     "other_uas": "unknown",     # the v1 enum has no "some drone" bucket
+    "uas_link": "unknown",      # features_v2 generic UAS-link call; v1 enum has no bucket for it
+    "background": "unknown",    # features_v2 negative class; v1 enum has no "background" bucket
     "unknown": "unknown",
     # legacy / contract labels pass straight through
     "wifi_drone": "wifi_drone",
