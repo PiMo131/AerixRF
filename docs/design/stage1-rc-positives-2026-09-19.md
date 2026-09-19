@@ -426,3 +426,18 @@ Grid hits at 1024-pt full band are resolution-limited by definition (bin 97.7 kH
 because the branch predates the C5 guard; treat them as "the lattice statistic exceeded threshold", not as grid
 evidence. The RC-bench control (100 ANTSDR ambient windows) is drawn from the noisier session, hence higher rates
 than the 1160-window FA bench.
+
+### Fable gate (2026-09-19 late) — verdict: PROCEED AFTER ANSWERS, option A′
+
+Merge `wip/stage1-c4` with the per-bin floor as default and the scalar floor kept as a named fallback for field
+A/B (a flag defaulting to the old estimator would keep storing bandwidths known to be 15–50× wrong). Gates, all on
+existing data: (i) ≥20 dB edge-walk regression test; (ii) level-2 fires on RFUAV must lie on the transmitter's
+actual channels/grid (a FAIL here flips to HOLD); (iii) fragment rule must not exclude real RC bursts that land
+inside an active Wi-Fi channel (RFUAV crowded-band data has this case). Also: (iv) characterise the 46 ambient
+hopping windows — BLE/Zigbee hoppers are *correct* level-1 labels, not FA; only fragments/spurs count against the
+budget; budget is **≤ 5 % in every session and level-2 = 0**, not a corpus mean; main's 0.95 % is not a validated
+baseline. Corpus mix (X310 positives vs E200 negatives) is fit only for a relative decision — never quote the
+ambient rate as a field rate. First own-receiver RC capture: paired RC-on/RC-off windows in the same session and
+room with the in-room Wi-Fi AP on; measure bw vs known modulation width, grid spacing and burst duration vs known
+values, fraction of hops tagged fragment inside the active Wi-Fi channel, detection vs SNR by distance, RC-off
+hopping rate as in-session FA.

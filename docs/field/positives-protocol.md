@@ -38,3 +38,11 @@ transition are labelled `transition` and excluded from training.
 
 ## Safety / scope
 Receive-only. No transmit, no link interference. Fly only where legal; hover/motors-on is optional.
+
+## Addendum 2026-09-19 — RC-transmitter capture (Stage-1 validation)
+
+Paired RC-on / RC-off windows in the same session and room; keep the in-room Wi-Fi AP ON so the fragment rule is
+exercised. Record the transmitter model and protocol mode. Metrics to extract afterwards: measured −6 dB bandwidth vs
+the link's known modulation width; hop grid spacing and burst duration vs known values; fraction of hops tagged
+fragment when they fall inside the active Wi-Fi channel; detection rate vs SNR (vary distance); RC-off hopping rate as
+the honest in-session false-alarm rate. Ask before the session: which RC link first, and can the AP stay on?
