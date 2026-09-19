@@ -90,6 +90,16 @@ class Config:
     local_token: str = ""              # shared secret for the LAN API
     mdns_name: str = "aerix-rf"
 
+    # --- decode gates ---
+    decode_third_party_mavlink: bool = False  # default OFF: gates
+                                        # aerix_rf.decode.sik.mavlink parsing of
+                                        # third-party MAVLink fields recovered
+                                        # from SiK links (docs/design/
+                                        # sik-mavlink-passive-decode.md S3).
+                                        # Decoded positions/sysid are personal
+                                        # data (retention_class="personal_7d").
+                                        # env AERIX_RF_DECODE_THIRD_PARTY_MAVLINK
+
     # --- runtime ---
     sim: bool = False                  # use the synthetic IQ source (no hardware)
 
@@ -125,5 +135,8 @@ class Config:
             local_port=_envi("AERIX_RF_LOCAL_PORT", cls.local_port),
             local_token=_envs("AERIX_RF_LOCAL_TOKEN", cls.local_token),
             mdns_name=_envs("AERIX_RF_MDNS_NAME", cls.mdns_name),
+            decode_third_party_mavlink=_envb(
+                "AERIX_RF_DECODE_THIRD_PARTY_MAVLINK", cls.decode_third_party_mavlink
+            ),
             sim=_envb("AERIX_RF_SIM", cls.sim),
         )
