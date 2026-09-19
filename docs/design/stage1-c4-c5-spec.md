@@ -242,3 +242,170 @@ Receive-only throughout.
   bound transmitter (would be level-5 test truth).
 * `L_freq_eff` under a Hann window with the 300 kHz boxcar is estimated (≈ size/1.5); measure it
   empirically on AWGN in `test_noise_only_window_false_pixel_rate` and pin the constant.
+
+## § Implementation reconciliation 2026-09-19
+
+Review of the uncommitted C4/C3b implementation against this spec, by the RF/DSP
+specialist. Evidence level unchanged: everything here is level-1 morphology quality.
+Five test failures; four distinct root causes, all in the *spec* or in a spec-to-code
+translation, not in the builders' mechanics. `spectrogram.compute` default output is
+still bit-exact (`test_compute_looks1_bit_exact_vs_head` passes, and it diffs against
+`git show HEAD:` rather than against itself).
+
+### R1 — `L_freq_eff = W/1.5` is wrong; the correct model is Hann adjacent-bin correlation
+
+The spec asserted that a `W`-bin boxcar over a Hann-windowed STFT yields
+`L_freq_eff = W/1.5` (the ENBW factor). That is the *resolution* penalty, not the
+*variance* reduction. Adjacent Hann bins are power-correlated, so
+
+```
+L_freq_eff(W) = W^2 / (W + 2*rho2*(W-1)),   rho2 = |rho(1)|^2 ~= 0.48
+```
+
+Measured on 3905 x 1024 white-noise STFT frames (Hann, hop >= fft, so frames are
+independent), `L_hat = mean^2/var` over bins 100..900:
+
+| W | 1 | 3 | 5 | 9 | 15 | 20 | 25 | 31 |
+|---|---|---|---|---|---|---|---|---|
+| measured `L_hat` | 1.00 | 1.85 | 2.85 | 4.86 | 7.91 | 10.46 | 13.02 | 16.11 |
+| model above | 1.00 | 1.83 | 2.78 | 4.76 | 7.76 | 10.28 | 12.83 | 15.90 |
+| old `W/1.5` | 0.67 | 2.00 | 3.33 | 6.00 | 10.00 | 13.33 | 16.67 | 20.67 |
+
+At the 15.36/12.288 MS/s dwell (`W = 25`) the old estimate gave `L_eff = 16.7` where the
+truth is 13.0: the arm threshold came out 0.45 dB low and the **measured** arm-pixel rate
+was 1.7e-5 against the 1e-6 target (17x), hold 5.9e-3 against 2e-3 (3x). Fixed:
+`energy._l_freq_eff()` implements the model; `_L_FREQ_EFF_HANN_DIVISOR` is replaced by
+`_L_FREQ_ADJ_BIN_RHO2 = 0.48`. `rho2` is an empirical constant measured here, not a
+first-principles derivation — flagged as such in the code.
+
+The `threshold_db_for_pfa` arithmetic itself is correct: `L=1 -> arm +11.40 / hold +7.93`,
+`L=4 -> +7.27 / +4.83`, `L=13 -> +4.63 / +2.98`. The spec's reference table is slightly
+off at `L=13` (it said arm +4.3 dB; the Gamma inversion gives +4.63 dB) and at `L=4`
+hold (+5.1 vs +4.83). Treat the code, not the table, as authoritative.
+
+### R2 — the -6 dB edge walk was unbounded below the noise floor
+
+`test_narrowband_bw_perbin_floor_within_2x_of_truth` measured a **median**
+`bw_6db_hz` of 12.288 MHz (the whole captured band) on a window containing only
+300 kHz bursts. Cause: `_edge_cross` walked until `profile_db < peak - 6 dB` or the
+array ended. For a marginal component (peak less than 6 dB above its own hold
+threshold, e.g. a 1-frame noise-driven component) the -6 dB level lies **under the
+noise floor**, so the walk never crossed and returned the band edge; a few dozen such
+components then dominated the median. This is not specific to the per-bin floor — it
+was latent before C4 and the corrected `l_eff` only changes how many marginal
+components exist.
+
+Fix: `_edge_cross` takes an optional per-bin `stop_db` profile; `_channelise` passes
+`floor_db + hysteresis_db`. The walk stops at `max(peak - EDGE_DB, floor_db[j] + hyst_db)`
+and interpolates to whichever limit bound. Rationale: a -6 dB edge cannot be measured
+below the noise; the widest defensible claim is the width down to the detector's own
+hold level. For any component clearing its hold threshold by >= `EDGE_DB` the bound
+never binds, so strong bursts are unaffected. `edge_clipped` semantics are unchanged
+(it still means "ran off the frequency/time edge of the array"), so no downstream
+consumer (`wifi_like_wideband`, `_wideband_events`, `cluster_centres`' `usable` filter)
+changes meaning.
+
+### R3 — the clamp reference, and clamping to the boundary instead of to the reference
+
+Two separate defects, both in C4(a) as specified.
+
+**(a) `F_ref = median over bins` is invalid above 50 % band occupancy.** A 16 MHz
+emitter in a 20 MHz capture puts the median ON the signal: every idle bin is clamped
+*up* to `F_ref - 10 dB` (the detector goes noise-blind) and the occupant's own bins sit
+~0 dB over their floor, so it fragments into speckle. `perbin_noise_floor_lin` now takes
+`ref_lin`; `energy.detect` passes its existing scalar `noise_lin`, which is estimated
+either from non-burst **time** slices (bursty branch) or from the 5th percentile over
+bins (continuous branch) and therefore survives up to ~95 % frequency occupancy. The
+per-bin Q25 estimate is unchanged — `ref_lin` governs the clamp only, so analog tilt is
+still tracked per bin. The median-over-bins default is retained for standalone callers
+and its validity limit is documented in the docstring.
+
+**(b) A rejected bin must fall back to the reference, not to the rejection boundary.**
+`np.clip` left a continuously occupied bin with a floor exactly `CLAMP_DB` above true
+noise, so the occupant's detection margin is `(its SNR - 10 dB)`: a 15 dB continuous
+wideband emitter was left ~4.9 dB over its own floor, i.e. right at the +5.6 dB arm
+threshold, and speckled across the whole window. The spec's claim that "clamped bins
+stay armed for the whole window" only holds for occupants above `CLAMP_DB + arm_db`
+(~15.6 dB) — it is false in the 10-15 dB range that matters. Once the clamp binds we
+have positive evidence the bin's own estimate is contaminated, so the best remaining
+estimate is the band-wide reference itself: `np.where((floor < lo) | (floor > hi), f_ref, floor)`.
+The low side is treated identically (a notch/dead bin gets the higher `F_ref`, the
+fewer-false-alarm choice).
+
+`tests/test_stage1_c4.py::test_perbin_floor_clamped_at_full_occupancy` asserted the old
+boundary behaviour (`floor[0] == F_ref + CLAMP_DB`) and was rewritten to assert the new
+one (`floor[0] == F_ref`, within 0.5 dB of true noise, and >= 10 dB below the occupied
+bin's own Q25 — i.e. still not self-blinded). Justification: the assertion encoded an
+implementation detail that this reconciliation shows to be wrong; the *requirement*
+(occupied bins must not self-blind) is asserted more strongly than before.
+`test_perbin_floor_bounded_but_biased_near_75pct_occupancy` is unaffected (its bias is
+inside the rejection radius, so that bin keeps its own estimate).
+
+### R4 — C3b vs the sparse-wideband merge requirement: resolved by the split point, not by a new rule
+
+The conflict is real but narrower than it looked. Both requirements are satisfied by
+`0.75 * pair_bw` alone; the flat cap only had to stop the *pre-existing*
+`CLUSTER_MAX_MERGE_HZ = 1 MHz` floor from bridging a full 1 MHz grid step (note
+`gap > thresh` is strict, so a pair exactly 1.0 MHz apart merged). The builders applied
+the 333 kHz cap to every pair with `pair_bw <= HOP_MAX_CLUSTER_BW_HZ = 2.5 MHz`, which
+swept in the 2.4 MHz single-emitter case and re-broke the independent-review fix.
+
+Decision: the grid cap applies only when `pair_bw <= min(DEFAULT_DELTAS_HZ)` (1.0 MHz).
+A burst wider than the smallest grid step under test cannot be a channel on that grid,
+so the anti-grid-bridging cap has no purpose for it (and such events are excluded from
+the hop-set count anyway). With that split point:
+
+* 2.4 MHz pair, 1.1 MHz gap -> cap `max(1e6, 0.75*2.5e6) = 1.875 MHz`, thresh
+  `0.75*2.4 = 1.8 MHz` > 1.1 MHz -> merges (one emitter, as the review requires);
+* 0.3 MHz pair, 1.0 MHz gap -> cap 333 kHz, thresh `max(tol, 0.225) <= 0.225 MHz`
+  < 1.0 MHz -> stays split (two channels of the 1 MHz grid, as C3b requires).
+
+**Rejected alternative: condition on time overlap.** The three sparse samples in
+`test_c3_sparse_wideband_burst_stays_one_cluster` are at t = 0.0/0.5/1.0 s — they are
+*not* co-temporal, so a co-temporality rule would not have separated the two cases. A
+BW-only rule does, provided the split point is the grid step rather than the hop-channel
+BW ceiling. Neither test was weakened.
+
+### R5 — residual: continuous-occupant skirt speckle (not fully fixed; new work item C6)
+
+After R1-R3 the 16 MHz continuous emitter is correctly emitted as a single 3842-frame,
+16.05 MHz event with the whole band's floor at the true noise level. But ~16 bins in its
+spectral **skirt** still have a per-bin Q25 biased 2-10 dB high by the emitter itself
+(inside the rejection radius, so not rejected), leaving the emitter marginally armed
+there and producing ~229 short fragment events, one cluster of which (56 events,
+31 kHz wide, at the +8 MHz edge) yielded a spurious window `cadence_ms = 2.6 ms`.
+
+This is intrinsic to any per-bin floor: there is always a transition band where
+`signal/floor` passes through the arm threshold. It cannot be removed by a *global*
+clamp reference, and frequency-domain gap bridging does not help (measured: 1718 -> 1184
+labels at 1-bin closing, 607 at 3-bin — the fragments are genuinely disconnected).
+
+Interim fix at the evidence layer, which is where the false claim actually mattered:
+`energy._is_fragment_of_wideband()` suppresses a window-level `cadence_ms` when the
+dominant cluster is concurrent with, and within `0.75 x BW` of, an event at least
+`4 x` wider. That is a defensible rule on its own terms (a cadence claim requires
+resolved, separated bursts, not fragments of one occupant), not a test-specific patch.
+
+**C6 (proposed, for the architect to schedule):** replace the single global clamp
+reference with a frequency-**local** robust reference — a running low quantile of the
+per-bin floor over a window specified in **Hz** (~2 MHz), with a tighter rejection
+radius (~3 dB). That would reject skirt bins as well as interior bins. It cannot be
+done under the current unit tests: `test_perbin_floor_tracks_tilted_noise` uses a 10 dB
+tilt across 64 bins (~8 dB/MHz), far steeper than any real analog response, and any
+local reference narrower than the array fails it. C6 therefore needs the tilt test
+re-specified in Hz/MHz-per-MHz terms first.
+
+### Files changed
+
+`aerix_rf/detect/bursts.py`, `aerix_rf/detect/energy.py`, `aerix_rf/detect/raster.py`,
+`tests/test_stage1_c4.py` (one assertion, justified in R3). `aerix_rf/dsp/spectrogram.py`,
+`aerix_rf/pipeline.py`, `bench/stage1_rc_positives.py` unchanged by this reconciliation.
+
+### Open evidence gaps
+
+* `rho2 = 0.48` is measured on synthetic white noise through this exact STFT path only.
+* The arm/hold P_fa targets are now *correct by construction* but their real-corpus
+  consequence is unmeasured: `bench/stage1_fa_budget.py` must be rerun (all four root
+  causes change the armed-pixel rate, and R3 raises sensitivity on occupied bins).
+* Acceptance items 1 (RFUAV bandwidth truth, 3 slices), 2 (cluster counts 19-75) and
+  3 (ambient FA) are not verified here — no bench was run.

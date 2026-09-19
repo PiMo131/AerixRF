@@ -47,6 +47,7 @@ from typing import Any
 import numpy as np
 from scipy.ndimage import uniform_filter1d
 
+from ..dsp import spectrogram as spectrogram_mod
 from ..dsp.spectrogram import Spectrogram
 from . import bursts as bursts_mod
 from . import raster as raster_mod
@@ -102,6 +103,45 @@ MIN_CLUSTER_EVENTS_FOR_CADENCE = 4   # >= 3 intervals (design S4/T3)
 # narrowband burst into its neighbours.
 _T1_FREQ_SMOOTH_HZ = 300e3
 
+# C4(a)/(b) (docs/design/stage1-c4-c5-spec.md): the T1 frequency-smoothing
+# boxcar above restores independent samples under a Hann window. The design
+# doc's estimate was ``L_freq_eff = W / 1.5``; that is measurably wrong.
+# Adjacent Hann bins are power-correlated, so for a W-bin boxcar
+#   L_freq_eff(W) = W**2 / (W + 2*rho2*(W-1)),  rho2 = |rho(1)|**2,
+# with rho(k>=2) negligible. Measured on 3905 x 1024 white-noise STFT frames
+# (Hann, hop >= fft): W = 3/5/9/15/20/25/31 -> L_hat = 1.85/2.85/4.86/7.91/
+# 10.46/13.02/16.11, which the model above reproduces to <2% at rho2 = 0.48.
+# The old W/1.5 gave 16.7 where the truth is 13.0 at W = 25 (the 15.36 MS/s
+# dwell), i.e. an arm threshold ~0.45 dB low and ~17x the target arm-pixel
+# P_fa; at W = 3 (the 100 MS/s bench column) it gave 2.0 vs a true 1.85. This, together with any detector-local time-domain
+# ``looks`` averaging (see ``_detector_local_looks`` below), gives the
+# effective look count ``l_eff`` that ``threshold_db_for_pfa`` and
+# ``perbin_noise_floor_lin`` need to stay P_fa-correct across receiver
+# modes (a fixed dB gate is 6+ dB wrong between a 20-bin-smoothed 15.36 MS/s
+# dwell and a 3-bin-smoothed 100 MS/s bench capture). Not independently
+# calibrated against real data yet (open evidence gap, design doc "Open
+# evidence gaps"); flagged as an estimate, not a measured constant.
+_L_FREQ_ADJ_BIN_RHO2 = 0.48
+
+# C4(c): detector-local L-look averaging of contiguous, non-overlapping FFTs
+# within one detector frame (design doc C4(c)). Free at the canonical rate
+# (``hop`` is already >= ``fft_size`` there) -- raises time coverage without
+# growing ``frame_dt_s``. Used ONLY here, from a caller-supplied ``iq``; the
+# canonical ``Spectrogram`` passed into ``detect()`` (PNG / ML tensor /
+# snr_db / occupied_bw_mhz / duty_cycle / peak_freq_mhz / score) is never
+# touched.
+MAX_DETECTOR_LOOKS = 8
+
+
+def _l_freq_eff(smooth_bins: int) -> float:
+    """Effective independent-look count contributed by the T1 frequency
+    boxcar of ``smooth_bins`` bins over a Hann-windowed STFT. See
+    ``_L_FREQ_ADJ_BIN_RHO2``."""
+    w = max(1, int(smooth_bins))
+    if w == 1:
+        return 1.0
+    return float(w * w / (w + 2.0 * _L_FREQ_ADJ_BIN_RHO2 * (w - 1)))
+
 
 @dataclass
 class Detection:
@@ -137,7 +177,40 @@ def _burst_runs(bursts: np.ndarray) -> list[tuple[int, int]]:
     return list(zip(starts[:_MAX_BURST_RUNS].tolist(), stops[:_MAX_BURST_RUNS].tolist()))
 
 
-def _cluster_cadence_ms(clusters: list, wifi_beacon_cluster_idx: set[int] | None = None) -> float | None:
+# A narrow cluster that is concurrent with, and sits inside/at the skirt of,
+# a MUCH wider simultaneously-active event is a fragment set of that one
+# occupant, not an independent burst train (design evidence discipline: a
+# cadence claim requires resolved, separated bursts). A continuous wideband
+# emitter's spectral skirt always contains a few bins where the per-bin floor
+# is partly biased onto the emitter itself, so the emitter is only marginally
+# armed there and breaks into short fragments whose inter-fragment spacing is
+# a detector artefact. See docs/design/stage1-c4-c5-spec.md
+# "S Implementation reconciliation 2026-09-19".
+CADENCE_FRAGMENT_BW_RATIO = 4.0      # "much wider" = this many x the cluster BW
+CADENCE_FRAGMENT_PROXIMITY = 0.75    # x the wide event's BW, centre-to-centre
+
+
+def _is_fragment_of_wideband(cluster, events: list) -> bool:
+    """True if ``cluster`` looks like fragments of a concurrent, much wider
+    occupant (see ``CADENCE_FRAGMENT_BW_RATIO``)."""
+    if not events or cluster.n == 0:
+        return False
+    min_bw = CADENCE_FRAGMENT_BW_RATIO * max(cluster.bw_hz, 1.0)
+    times = [(e.t_start, e.t_end) for e in cluster.events]
+    need = 0.5 * len(times)
+    for w in events:
+        if w.bw_6db_hz < min_bw:
+            continue
+        if abs(cluster.centre_hz - w.centre_hz) > CADENCE_FRAGMENT_PROXIMITY * w.bw_6db_hz:
+            continue
+        n_overlap = sum(1 for t0, t1 in times if t0 < w.t_end and t1 > w.t_start)
+        if n_overlap >= need:
+            return True
+    return False
+
+
+def _cluster_cadence_ms(clusters: list, wifi_beacon_cluster_idx: set[int] | None = None,
+                         events: list | None = None) -> float | None:
     """Window-level cadence (design T3): only reported from a single channel
     cluster's OWN burst stream when it holds >= 3 intervals -- never from the
     whole-band envelope (that was the old ``_estimate_cadence_ms`` bug: ambient
@@ -162,6 +235,8 @@ def _cluster_cadence_ms(clusters: list, wifi_beacon_cluster_idx: set[int] | None
     if dominant.n < MIN_CLUSTER_EVENTS_FOR_CADENCE:
         return None
     if wifi_beacon_cluster_idx and dominant_idx in wifi_beacon_cluster_idx:
+        return None
+    if events is not None and _is_fragment_of_wideband(dominant, events):
         return None
     t = np.array(sorted(e.t_start for e in dominant.events))
     dt = np.diff(t)
@@ -202,7 +277,14 @@ def _morphology(*, snr_db: float, occupied_bw_mhz: float, n_occupied: int,
 
 def detect(spec: Spectrogram, center_freq_mhz: float,
            snr_threshold_db: float = 8.0, occupied_bw_ref_mhz: float = 10.0,
-           gain_db: float = 40.0) -> Detection:
+           gain_db: float = 40.0, *, iq: np.ndarray | None = None,
+           max_looks: int = MAX_DETECTOR_LOOKS) -> Detection:
+    """``iq`` (optional, keyword-only): the same raw IQ ``spec`` was computed
+    from. When given, the T1/T2 burst/raster pipeline below additionally
+    averages up to ``max_looks`` contiguous FFTs per detector frame
+    (design doc C4(c)) -- a detector-local product that never changes
+    ``spec``/the canonical representation itself. Omit it (the default) to
+    keep today's single-look behaviour exactly."""
     power_db = spec.power_db                      # [T, F]
     n_time, n_freq = power_db.shape
     bin_hz = spec.sample_rate / n_freq
@@ -240,6 +322,11 @@ def detect(spec: Spectrogram, center_freq_mhz: float,
     peak_bin = int(np.argmax(sig_psd))
     peak_freq_mhz = center_freq_mhz + spec.freqs_hz[peak_bin] / 1e6
 
+    # C4(d) (docs/design/stage1-c4-c5-spec.md): deliberately left on the
+    # scalar ``noise_floor``/``noise_lin`` estimated above, NOT the per-bin
+    # C4(a) floor used for the T1/T2 burst pipeline below -- these three
+    # fields feed the stage-2 classifier's existing feature contract, and
+    # changing their estimator is out of this change's scope.
     occupied = sig_psd > (noise_floor + 6.0)
     n_occupied = int(np.count_nonzero(occupied))
     occupied_bw_mhz = float(n_occupied * bin_hz / 1e6)
@@ -270,19 +357,52 @@ def detect(spec: Spectrogram, center_freq_mhz: float,
     # and hop-raster/period/cadence-discount evidence, replacing the old
     # power-centroid "hop spread" heuristic. Absolute Hz so cluster centres
     # are meaningful across windows/dwells (session accumulation, R1(e)).
+    #
+    # C4(c): detector-local L-look averaging, ONLY for this pipeline -- see
+    # ``MAX_DETECTOR_LOOKS``'s docstring. ``n_looks`` stays 1 (no-op) unless
+    # the caller passed ``iq`` and the canonical ``hop`` actually has room for
+    # more than one contiguous fft_size-length look.
+    n_looks = 1
+    lin_local = lin
+    if iq is not None and hop:
+        n_looks = max(1, min(max_looks, int(hop) // n_freq))
+        if n_looks > 1:
+            local_spec = spectrogram_mod.compute(
+                iq, spec.sample_rate, fft_size=n_freq, hop=hop,
+                remove_dc=True, looks=n_looks,
+            )
+            lin_local = np.power(10.0, local_spec.power_db.astype(np.float64) / 10.0)
+
     freqs_hz_abs = center_freq_mhz * 1e6 + spec.freqs_hz
     smooth_bins = max(1, int(round(_T1_FREQ_SMOOTH_HZ / bin_hz)))
-    lin_for_bursts = uniform_filter1d(lin, size=smooth_bins, axis=1, mode="nearest") \
-        if smooth_bins > 1 else lin
+    lin_for_bursts = uniform_filter1d(lin_local, size=smooth_bins, axis=1, mode="nearest") \
+        if smooth_bins > 1 else lin_local
+
+    # C4(a)/(b): per-bin (not scalar) noise floor and the matching P_fa-
+    # targeted gate/hold margins. ``l_eff`` = (detector-local time looks) x
+    # (frequency-smoothing looks) -- see ``_L_FREQ_EFF_HANN_DIVISOR``'s
+    # docstring for the caveat that the frequency term is an estimate.
+    l_freq_eff = _l_freq_eff(smooth_bins)
+    l_eff = float(n_looks) * l_freq_eff
+    # ``ref_lin``: the band-wide clamp reference must NOT be the median over
+    # bins when one emitter can occupy most of the band. ``noise_lin`` above
+    # is estimated either from non-burst TIME slices or (continuous case)
+    # from the 5th percentile over bins, so it survives up to ~95%
+    # frequency occupancy -- see ``perbin_noise_floor_lin``'s ``ref_lin``.
+    # It is the mean noise power per bin of the UNSMOOTHED array; the boxcar
+    # preserves the mean, so it is the right scale for ``lin_for_bursts``.
+    floor_perbin = bursts_mod.perbin_noise_floor_lin(
+        lin_for_bursts, l_eff=l_eff, ref_lin=noise_lin)
+
     events = bursts_mod.detect_bursts(
         lin_for_bursts, fs=spec.sample_rate, frame_dt_s=slice_dt_s, freqs_hz=freqs_hz_abs,
-        noise_floor_lin=noise_lin, t0_s=0.0,
+        noise_floor_lin=floor_perbin, l_eff=l_eff, t0_s=0.0,
     )
     clusters = raster_mod.cluster_centres(events)
     raster_result = raster_mod.analyze_raster(events, frame_dt_s=slice_dt_s)
     wifi_beacon_idx = {t.cluster_index for t in raster_result.cadence_tags
                        if t.tag == "wifi_beacon_like"}
-    cadence_ms = _cluster_cadence_ms(clusters, wifi_beacon_idx)
+    cadence_ms = _cluster_cadence_ms(clusters, wifi_beacon_idx, events=events)
 
     stage1 = {
         "labels": list(raster_result.labels),

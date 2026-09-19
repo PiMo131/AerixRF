@@ -60,6 +60,20 @@ CLUSTER_MAX_MERGE_HZ = 1.0e6      # absolute cap on the per-pair merge
                                     # one wide/mis-measured occupant's BW can
                                     # no longer make the bw-scaled threshold
                                     # (0.75 * BW) arbitrarily large.
+CLUSTER_GRID_MERGE_CAP_HZ = 333e3  # C3b fix (docs/design/stage1-c4-c5-spec.md
+                                    # C4(d)): with true (post-C4) burst
+                                    # bandwidths of a few hundred kHz, a fixed
+                                    # 1 MHz merge radius merges adjacent
+                                    # channels of the very 1 MHz grid this
+                                    # module tests for. Capped at
+                                    # min(DEFAULT_DELTAS_HZ)/3 = 200 kHz's
+                                    # sibling for the 1 MHz grid specifically
+                                    # (1.0 MHz / 3): a merge radius under 1/3
+                                    # of the smallest grid step under test
+                                    # cannot, by construction, bridge one grid
+                                    # step even in the worst case (two bursts
+                                    # sitting right at the inner edges of
+                                    # adjacent channels).
 CLUSTER_MAX_SPAN_HZ = 5.0e6       # a cluster may not grow past this centre-
                                     # to-centre span regardless of how many
                                     # consecutive pairwise gaps stay under
@@ -366,8 +380,34 @@ def cluster_centres(events: list[BurstEvent], tol_hz: float = DEFAULT_CLUSTER_TO
     for e in usable:
         if current:
             gap = e.centre_hz - current[-1].centre_hz
-            thresh = min(max_merge_hz,
-                         max(tol_hz, bw_separation_frac * max(current[-1].bw_6db_hz, e.bw_6db_hz)))
+            pair_bw = max(current[-1].bw_6db_hz, e.bw_6db_hz)
+            # C3b (docs/design/stage1-c4-c5-spec.md C4(d)): a NARROW pair
+            # (candidate hop-channel bursts, the case the grid test actually
+            # runs on) additionally never merges past 1/3 of the smallest
+            # channel grid under test (``CLUSTER_GRID_MERGE_CAP_HZ``) -- with
+            # true (post-C4) burst bandwidths of a few hundred kHz, the old
+            # fixed 1 MHz cap merged adjacent channels of the very 1 MHz grid
+            # being tested for.
+            #
+            # "Narrow" here means ``pair_bw <= min(DEFAULT_DELTAS_HZ)``, NOT
+            # ``<= HOP_MAX_CLUSTER_BW_HZ`` (2.5 MHz). A burst WIDER than the
+            # smallest grid step under test cannot be a channel on that grid
+            # at all, so the anti-grid-bridging cap has no purpose for it,
+            # while applying it anyway re-broke the independent-review fix
+            # below: one 2.4 MHz emitter sampled by 2-3 -6 dB centre
+            # estimates ~1.1 MHz apart was split into a spurious
+            # multi-cluster "hop set". With this split point both
+            # requirements hold simultaneously, and no time-overlap test is
+            # needed (the sparse samples of one emitter are NOT co-temporal,
+            # so a co-temporality rule would not have separated the cases):
+            #   * 2.4 MHz pair, 1.1 MHz gap -> cap 1.875 MHz, thresh
+            #     0.75*2.4 = 1.8 MHz > 1.1 MHz  -> merges (one emitter);
+            #   * 0.3 MHz pair, 1.0 MHz gap  -> cap 333 kHz, thresh
+            #     max(tol, 0.225) = 0.1-0.225 MHz < 1.0 MHz -> stays split
+            #     (two channels of the 1 MHz grid).
+            grid_relevant = pair_bw <= min(DEFAULT_DELTAS_HZ)
+            pair_cap = CLUSTER_GRID_MERGE_CAP_HZ if grid_relevant else max_merge_hz
+            thresh = min(pair_cap, max(tol_hz, bw_separation_frac * pair_bw))
             span = e.centre_hz - current[0].centre_hz
             if gap > thresh or span > max_cluster_span_hz:
                 clusters.append(_make_cluster(current))

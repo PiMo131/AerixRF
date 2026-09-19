@@ -262,7 +262,7 @@ def _process_one_iq(iq: np.ndarray, fs_hz: float, center_freq_hz: float,
 
     out = []
     spec_full = spectrogram.compute(iq, sample_rate=fs_hz, fft_size=1024)
-    det_full = energy.detect(spec_full, center_freq_mhz=center_freq_hz / 1e6)
+    det_full = energy.detect(spec_full, center_freq_mhz=center_freq_hz / 1e6, iq=iq)
     out.append(_window_record(det_full, model, pack_id, slice_name, "full_band", fs_hz, center_freq_hz))
 
     # Dwell emulation: re-centre on this window's OWN highest-occupancy 10 MHz
@@ -277,7 +277,7 @@ def _process_one_iq(iq: np.ndarray, fs_hz: float, center_freq_hz: float,
     dwell_iq = resample.apply_chain(mixed, chain, in_rate_hz=fs_hz)
     dwell_center_hz = center_freq_hz + peak_offset_hz
     spec_dwell = spectrogram.compute(dwell_iq, sample_rate=resample.CANONICAL_RATE_HZ, fft_size=1024)
-    det_dwell = energy.detect(spec_dwell, center_freq_mhz=dwell_center_hz / 1e6)
+    det_dwell = energy.detect(spec_dwell, center_freq_mhz=dwell_center_hz / 1e6, iq=dwell_iq)
     out.append(_window_record(det_dwell, model, pack_id, slice_name, "dwell",
                                resample.CANONICAL_RATE_HZ, dwell_center_hz,
                                dwell_select=dwell_select))

@@ -58,12 +58,26 @@ _DC_BLANK_BINS = 1
 
 
 def compute(iq: np.ndarray, sample_rate: float, fft_size: int = 1024,
-            hop: int | None = None, remove_dc: bool = True) -> Spectrogram:
+            hop: int | None = None, remove_dc: bool = True,
+            looks: int = 1) -> Spectrogram:
     """STFT of complex IQ -> [time, freq] dB power matrix (two-sided, centred).
 
     ``hop`` defaults to a value that caps the frame count (see module docstring);
     pass an explicit ``hop`` to force a specific time resolution. ``remove_dc``
     suppresses the receiver's DC spike (see ``_DC_BLANK_BINS``).
+
+    ``looks`` (design doc ``stage1-c4-c5-spec.md`` C4(c)): average the power
+    of ``looks`` contiguous, non-overlapping ``fft_size``-point FFTs into each
+    reported time frame instead of one. This is a chi-squared-tightening,
+    detector-local product only -- ``looks=1`` (the default) reproduces
+    today's output bit-for-bit, and this argument MUST NOT be used to change
+    the canonical 1024/Hann/hop-512 representation or the ML tensor path
+    (``aerix_rf/datasets/tensor.py``); only ``aerix_rf.detect.energy`` may
+    pass ``looks > 1``. ``looks`` is silently clamped to
+    ``max(1, hop // fft_size)`` so the frame pitch (``hop``) never grows to
+    accommodate it -- ``frame_dt_s`` for the caller is therefore unchanged;
+    only the last few frames near the end of ``iq`` may be dropped if there
+    are not enough trailing samples for a full ``looks``-wide frame.
     """
     iq = np.asarray(iq, dtype=np.complex64)
     if remove_dc and iq.size:
@@ -76,14 +90,30 @@ def compute(iq: np.ndarray, sample_rate: float, fft_size: int = 1024,
         hop = max(fft_size // 2, -(-n // _TARGET_FRAMES))
 
     win = _window(fft_size)
-    frames = np.lib.stride_tricks.sliding_window_view(iq, fft_size)[::hop]
-    # frames * win is a fresh temp, so pocketfft may overwrite it in place.
-    spec = sfft.fft(frames * win, axis=1, workers=-1, overwrite_x=True)
-    spec = sfft.fftshift(spec, axes=1)
+    looks = max(1, int(looks))
+    looks = min(looks, max(1, hop // fft_size))
+
+    if looks == 1:
+        # Bit-identical to the pre-``looks`` code path.
+        frames = np.lib.stride_tricks.sliding_window_view(iq, fft_size)[::hop]
+        # frames * win is a fresh temp, so pocketfft may overwrite it in place.
+        spec = sfft.fft(frames * win, axis=1, workers=-1, overwrite_x=True)
+        spec = sfft.fftshift(spec, axes=1)
+        scale = np.float32(1.0 / (fft_size * fft_size))
+        power = (spec.real * spec.real + spec.imag * spec.imag) * scale
+    else:
+        starts = np.arange(0, n - fft_size + 1, hop)
+        starts = starts[starts + looks * fft_size <= n]
+        base_view = np.lib.stride_tricks.sliding_window_view(iq, fft_size)
+        look_idx = starts[:, None] + (np.arange(looks)[None, :] * fft_size)
+        sub_frames = base_view[look_idx]                    # [n_starts, looks, fft_size]
+        spec = sfft.fft(sub_frames * win, axis=2, workers=-1, overwrite_x=True)
+        spec = sfft.fftshift(spec, axes=2)
+        scale = np.float32(1.0 / (fft_size * fft_size))
+        power_per_look = (spec.real * spec.real + spec.imag * spec.imag) * scale
+        power = power_per_look.mean(axis=1)                 # [n_starts, fft_size]
 
     # Power (float32 throughout; python-scalar ops do not upcast under NEP 50).
-    scale = np.float32(1.0 / (fft_size * fft_size))
-    power = (spec.real * spec.real + spec.imag * spec.imag) * scale
     power_db = (10.0 * np.log10(power + np.float32(1e-12))).astype(np.float32, copy=False)
     if remove_dc and fft_size >= 8:
         c = fft_size // 2

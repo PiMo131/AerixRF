@@ -47,12 +47,43 @@ from typing import Any
 
 import numpy as np
 import scipy.fft as sfft
+from scipy import stats
 from scipy.ndimage import find_objects, label
 
-GATE_DB = 6.0            # arm threshold: floor + this many dB
-HYST_DB = 3.0            # hold threshold: floor + this many dB (hysteresis)
+GATE_DB = 6.0            # arm threshold: floor + this many dB (fixed-dB fallback /
+                          # explicit-override path -- see ``threshold_db_for_pfa``)
+HYST_DB = 3.0            # hold threshold: floor + this many dB (hysteresis; ditto)
 EDGE_DB = 6.0            # the "-6 dB" in "-6 dB edge midpoint"
 _EPS = 1e-12
+
+# C4 (docs/design/stage1-c4-c5-spec.md S(b)): the gate/hold operating point is
+# specified as a false-arm-pixel PROBABILITY, not a fixed dB margin, because a
+# fixed dB gate is mode-dependent (the number of independent looks entering
+# ``detect_bursts`` varies with the receiver's frequency-smoothing width and
+# any detector-local time averaging -- see ``energy.py``'s ``_T1_FREQ_SMOOTH_HZ``
+# and ``looks``). ``threshold_db_for_pfa`` converts a target P_fa + the
+# effective look count into the dB-over-mean-floor margin that achieves it.
+ARM_PFA = 1e-6            # ~0.3 false arm pixels per 2000x1024 window
+HOLD_PFA = 2e-3           # ~4000 hold pixels; only those 4-connected to an arm
+                           # pixel survive to become an event
+DEFAULT_L_EFF = 1.0        # single-look fallback when the caller does not know
+                           # its own effective look count
+
+# C4(a): per-bin noise floor estimator constants.
+FLOOR_CLAMP_DB = 10.0      # +/- this many dB around the band-wide (median-over-
+                           # -bins) reference; measured per-bin p10-p90 floor
+                           # spread over a 100 MHz span is 6-7 dB, so this
+                           # covers real analog tilt/roll-off but not a
+                           # 20-30 dB occupied (e.g. Wi-Fi) channel, which is
+                           # the point: such a bin stays armed and surfaces as
+                           # its own (wide, edge-clipped) event instead of
+                           # self-blinding.
+FLOOR_QUANTILE = 0.25      # 25th percentile: tolerates up to 75% occupancy
+                           # (a busy Wi-Fi channel or continuous downlink),
+                           # vs 50% for the median -- see the design doc.
+FLOOR_STRIDE = 4           # decimate frames before the percentile to hold the
+                           # estimator inside the ~4-8 ms cost budget.
+FLOOR_MIN_FRAMES = 256     # do not decimate below this many frames.
 # C2 fix (docs/design/stage1-rc-positives-2026-09-19.md S3/S4): the old
 # ``_MAX_EVENTS = 64`` was a TIME cut, not a strength cut -- scipy.ndimage.label
 # numbers connected components in raster (time-major) scan order, so "first 64"
@@ -128,20 +159,146 @@ def _floor_lin(power_lin: np.ndarray, noise_floor_lin: np.ndarray | float | None
     return np.broadcast_to(arr, (power_lin.shape[1],)).astype(np.float64)
 
 
+def _q25_bias(l_eff: float) -> float:
+    """``Q25(L) = gamma.ppf(0.25, a=L) / L``: the ratio of the 25th-percentile
+    of an ``L``-look-averaged exponential (Gamma(L, 1/L)-mean-normalised)
+    power estimate to its true mean. Dividing a measured 25th percentile by
+    this constant debiases it back to the mean noise power. ``L=1`` gives
+    ``-ln(0.75) = 0.2877`` (the single-look, no-averaging case); ``L=4``
+    gives ``0.6339``. Non-integer ``l_eff`` (a smoothing-bin or looks count
+    that is not an exact integer) is handled by the continuous Gamma
+    distribution, which coincides with the Erlang sum-of-exponentials CDF at
+    integer ``L``."""
+    l_eff = max(float(l_eff), _EPS)
+    return float(stats.gamma.ppf(FLOOR_QUANTILE, a=l_eff) / l_eff)
+
+
+def threshold_db_for_pfa(pfa: float, l_eff: float) -> float:
+    """dB-over-mean-floor margin ``T`` such that
+    ``P(pixel power >= floor * 10**(T/10)) == pfa`` for an ``l_eff``-look
+    power estimate (Gamma(l_eff, 1/l_eff)-mean-normalised). Inverts the Gamma
+    survival function: ``x = gamma.isf(pfa, a=l_eff) / l_eff``,
+    ``T_db = 10*log10(x)``. At ``l_eff=1`` this reduces to the familiar
+    single-look exponential tail ``P_fa = exp(-x)``.
+
+    Replaces a hard-coded dB gate (design doc C4(b)): a fixed dB margin is
+    mode-dependent -- the number of independent looks entering
+    ``detect_bursts`` varies with frequency smoothing / detector-local time
+    averaging -- so the operating point is specified as a P_fa target and the
+    dB margin solved for at runtime instead.
+    """
+    l_eff = max(float(l_eff), _EPS)
+    pfa = float(np.clip(pfa, 1e-300, 1.0 - 1e-15))
+    x = stats.gamma.isf(pfa, a=l_eff) / l_eff
+    return float(10.0 * np.log10(max(x, _EPS)))
+
+
+def perbin_noise_floor_lin(power_lin: np.ndarray, *, l_eff: float = DEFAULT_L_EFF,
+                            stride: int = FLOOR_STRIDE,
+                            min_floor_frames: int = FLOOR_MIN_FRAMES,
+                            clamp_db: float = FLOOR_CLAMP_DB,
+                            ref_lin: float | None = None) -> np.ndarray:
+    """Per-bin noise floor, linear MEAN power, ``[n_bins]`` (design doc
+    C4(a)).
+
+    Estimator: the 25th percentile of each bin's power over a
+    stride-decimated frame subset (``np.partition``, not a full sort, to
+    stay inside the cost budget), debiased to the mean via ``_q25_bias``,
+    then clamped to +/- ``clamp_db`` of the band-wide (median-over-bins)
+    reference ``F_ref``. The clamp is mandatory, not optional: a bin occupied
+    more than 75% of the window (continuous Wi-Fi/video downlink) has its own
+    25th percentile sitting ON the signal, so it is pulled back to
+    ``F_ref +/- clamp_db`` instead of being trusted -- this keeps the bin
+    armed so the occupant still surfaces as its own (wide, edge-clipped)
+    event rather than self-blinding the detector.
+
+    ``ref_lin`` overrides the band-wide clamp reference ``F_ref``. The
+    default (``None``) uses the median over bins, which is only valid while
+    LESS THAN HALF the band is occupied. A single wideband occupant (analog
+    FPV video, a 16-20 MHz downlink in a 20 MHz capture) puts the median ON
+    the signal: every idle bin is then clamped UP to ``F_ref - clamp_db``
+    (detector goes noise-blind) and the occupant's own bins sit ~0 dB over
+    their floor, so the emitter fragments into speckle instead of one
+    continuous wideband event. Callers that already hold a band-wide noise
+    estimate immune to frequency occupancy -- ``energy.detect``'s
+    ``noise_lin``, taken either from non-burst TIME slices or from the 5th
+    percentile over bins -- must pass it here. This is a reference for the
+    CLAMP only; the per-bin Q25 estimate is unchanged, so real analog
+    tilt/roll-off is still tracked per bin.
+    """
+    power_lin = np.asarray(power_lin, dtype=np.float64)
+    n_frames, n_bins = power_lin.shape
+    if n_frames == 0 or n_bins == 0:
+        return np.zeros(n_bins, dtype=np.float64)
+
+    step = max(1, int(stride))
+    sub = power_lin[::step]
+    if sub.shape[0] < min(min_floor_frames, n_frames):
+        sub = power_lin  # too few decimated frames: use the full (bounded) set
+
+    k = int(np.clip(round(FLOOR_QUANTILE * (sub.shape[0] - 1)), 0, sub.shape[0] - 1))
+    part = np.partition(sub, k, axis=0)
+    q25 = part[k]
+
+    bias = _q25_bias(l_eff)
+    floor = q25 / max(bias, _EPS)
+
+    f_ref = float(ref_lin) if ref_lin is not None else float(np.median(floor))
+    if not np.isfinite(f_ref) or f_ref <= 0.0:
+        return np.maximum(floor, _EPS)
+    # Outside +/- ``clamp_db`` of the reference the per-bin estimate is
+    # REJECTED, and the fallback is the reference itself -- not the rejection
+    # boundary. Clipping to the boundary (the first implementation) leaves a
+    # bin whose Q25 sat on a continuous occupant with a floor exactly
+    # ``clamp_db`` above the true noise, so the occupant's detection margin
+    # is (its SNR - clamp_db): a 15 dB continuous wideband emitter was left
+    # ~5 dB over its own floor, i.e. right at the arm threshold, and
+    # fragmented into 1-frame speckle across the whole window (spurious
+    # "hopping"/cadence from ONE continuous emitter). Once the clamp binds we
+    # have positive evidence the bin's own estimate is contaminated, and the
+    # best remaining estimate of its noise power is the band-wide reference;
+    # real analog tilt/roll-off (6-7 dB p10-p90) never reaches the rejection
+    # radius, so tilt tracking is unaffected. The low side is treated the
+    # same way (a bin >clamp_db BELOW the reference is a notch/dead bin;
+    # using the higher F_ref there is the conservative, fewer-false-alarm
+    # choice).
+    lo = f_ref * 10.0 ** (-clamp_db / 10.0)
+    hi = f_ref * 10.0 ** (clamp_db / 10.0)
+    return np.where((floor < lo) | (floor > hi), f_ref, floor)
+
+
 def _edge_cross(profile_db: np.ndarray, freqs_hz: np.ndarray, peak_idx: int,
-                 thresh_db: float, direction: int) -> tuple[float, bool]:
+                 thresh_db: float, direction: int,
+                 stop_db: np.ndarray | None = None) -> tuple[float, bool]:
     """Walk from ``peak_idx`` in ``direction`` (+1/-1) until ``profile_db``
     drops below ``thresh_db``; return the interpolated crossing frequency and
-    whether the walk instead ran off the array (a frequency-edge clip)."""
+    whether the walk instead ran off the array (a frequency-edge clip).
+
+    ``stop_db`` (``[n_bins]``, optional) is a per-bin NOISE-LIMIT profile
+    (the caller passes ``floor_db + hysteresis_db``): the walk also stops
+    where the profile falls below it. Rationale -- a -6 dB edge cannot be
+    measured below the noise. When a component's peak is less than
+    ``EDGE_DB`` above its own hold threshold (a weak or single-frame
+    component), the -6 dB level lies UNDER the noise floor, the walk never
+    crosses it, and the unbounded version ran to the band edge and reported
+    ``bw_6db_hz`` = the whole captured band. That is how a handful of
+    marginal components ended up dominating the median measured bandwidth of
+    a window containing only 300 kHz bursts. Stopping at the noise limit
+    reports the width down to the noise instead, which is the widest claim
+    the data supports. For any component whose peak clears its hold
+    threshold by >= ``EDGE_DB`` the -6 dB crossing is reached first and this
+    bound never binds."""
     n = profile_db.shape[0]
     i = peak_idx
     bin_hz = float(freqs_hz[1] - freqs_hz[0]) if n > 1 else 0.0
     while 0 <= i + direction < n:
         j = i + direction
-        if profile_db[j] < thresh_db:
+        limit = thresh_db if stop_db is None else max(thresh_db, float(stop_db[j]))
+        if profile_db[j] < limit:
             # Linear interpolation between i (>= thresh) and j (< thresh).
             span = profile_db[i] - profile_db[j]
-            frac = 0.0 if span <= 0 else (profile_db[i] - thresh_db) / span
+            frac = 0.0 if span <= 0 else (profile_db[i] - limit) / span
+            frac = min(max(frac, 0.0), 1.0)
             f = freqs_hz[i] + direction * frac * bin_hz
             return float(f), False
         i = j
@@ -167,6 +324,10 @@ def _channelise(power_lin: np.ndarray, floor_lin: np.ndarray,
         return []
     objects = find_objects(labelled)
     floor_db = 10.0 * np.log10(np.maximum(floor_lin, _EPS))   # [n_bins], cheap
+    # Noise limit for the -6 dB edge walk: below this a bin is not part of
+    # any burst by the detector's own hold criterion, so the walk must not
+    # continue through it (see ``_edge_cross``'s ``stop_db``).
+    noise_limit_db = floor_db + hyst_db
 
     # C2 fix (perf revision): the arm-pixel confirmation ("is this component
     # ever actually armed, not just held?") and the strength ranking used
@@ -233,8 +394,10 @@ def _channelise(power_lin: np.ndarray, floor_lin: np.ndarray,
         peak_db = profile_db[local_peak]
         thresh_db = peak_db - EDGE_DB
 
-        left_hz, left_clip = _edge_cross(profile_db, freqs_hz, local_peak, thresh_db, -1)
-        right_hz, right_clip = _edge_cross(profile_db, freqs_hz, local_peak, thresh_db, +1)
+        left_hz, left_clip = _edge_cross(profile_db, freqs_hz, local_peak, thresh_db, -1,
+                                          stop_db=noise_limit_db)
+        right_hz, right_clip = _edge_cross(profile_db, freqs_hz, local_peak, thresh_db, +1,
+                                            stop_db=noise_limit_db)
         centre_hz = 0.5 * (left_hz + right_hz)
         bw_hz = right_hz - left_hz
 
@@ -303,8 +466,11 @@ def detect_bursts(
     freqs_hz: np.ndarray | None = None,
     noise_floor_lin: np.ndarray | float | None = None,
     t0_s: float = 0.0,
-    gate_db: float = GATE_DB,
-    hysteresis_db: float = HYST_DB,
+    gate_db: float | None = None,
+    hysteresis_db: float | None = None,
+    arm_pfa: float = ARM_PFA,
+    hold_pfa: float = HOLD_PFA,
+    l_eff: float = DEFAULT_L_EFF,
     max_events: int = _MAX_EVENTS,
     iq: np.ndarray | None = None,
     iq_fs: float | None = None,
@@ -325,6 +491,16 @@ def detect_bursts(
     it). If ``iq``/``iq_fs`` are given, up to ``max_refine`` bursts (by order
     of detection) get a 33.3 us-native duration refinement from a re-STFT of
     their own raw-IQ slice.
+
+    ``gate_db``/``hysteresis_db`` are the explicit-override path (design doc
+    C4(b)): pass them (e.g. the module constants ``GATE_DB``/``HYST_DB``) to
+    force a fixed dB margin as before. Left at their default (``None``), the
+    margin is instead solved from a target false-arm/false-hold pixel
+    probability (``arm_pfa``/``hold_pfa``) and the caller's effective look
+    count ``l_eff`` via ``threshold_db_for_pfa`` -- a fixed dB gate is
+    mode-dependent (the number of independent looks varies with frequency
+    smoothing / detector-local time averaging), so the operating point is a
+    P_fa target, not a hard-coded margin.
     """
     power_lin = np.asarray(power_lin, dtype=np.float64)
     if power_lin.ndim != 2:
@@ -335,6 +511,11 @@ def detect_bursts(
     if freqs_hz is None:
         freqs_hz = np.fft.fftshift(np.fft.fftfreq(n_bins, d=1.0 / fs))
     freqs_hz = np.asarray(freqs_hz, dtype=np.float64)
+
+    if gate_db is None:
+        gate_db = threshold_db_for_pfa(arm_pfa, l_eff)
+    if hysteresis_db is None:
+        hysteresis_db = threshold_db_for_pfa(hold_pfa, l_eff)
 
     floor_lin_arr = _floor_lin(power_lin, noise_floor_lin)
 

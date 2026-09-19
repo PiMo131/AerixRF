@@ -246,7 +246,8 @@ def process_window(win: IQWindow, cfg: Config, *, decode: bool = True,
     center_mhz = win.center_freq_hz / 1e6
 
     spec = spectrogram.compute(win.iq, win.sample_rate, cfg.fft_size)
-    det = energy.detect(spec, center_mhz, cfg.snr_threshold_db, cfg.occupied_bw_ref_mhz, cfg.gain_db)
+    det = energy.detect(spec, center_mhz, cfg.snr_threshold_db, cfg.occupied_bw_ref_mhz, cfg.gain_db,
+                        iq=win.iq)
     cls = classify_model.classify_window(spec, det, center_mhz,
                                          iq=win.iq, sample_rate=win.sample_rate)
     plausible = det.score >= cfg.score_threshold
