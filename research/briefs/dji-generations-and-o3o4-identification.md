@@ -149,3 +149,45 @@ Ranked. Each has a machine-testable acceptance criterion.
 - **RESEARCH NEEDED:** any second, independent source (not leegang12) reporting a successful CRC check on
   an O4 DroneID frame. Currently single-source and load-bearing for our whole O4 plan.
 - Still open from the PHY brief: pilots-vs-no-pilots; 24-bit CRC poly/init; de-rate-matching K/N/D/E.
+
+---
+
+## Q1 verification (2026-09-19)
+
+Verified against DJI's own product/spec/FAQ/announcement pages (retrieved via web search + one direct
+fetch, 2026-09-19). Method note: results below come from DJI-hosted pages surfaced by search snippets
+(dji.com spec/FAQ/announcement pages), with one page (`mini-3/specs`) directly fetched to confirm exact
+wording. Treat as **primary-source confirmed** unless flagged otherwise; upgrades grade from B-VENDOR to
+**A-PRIMARY** for the rows below.
+
+| Aircraft | DJI-stated transmission system | Source URL | Agrees with brief's analyst claim? |
+|---|---|---|---|
+| Mavic 2 Pro / Zoom | "OcuSync 2.0" | dji.com/media-center/announcements/dji-introduces-mavic-2-pro-and-mavic-2-zoom | Yes |
+| Mavic Air 2 | "OcuSync 2.0" | dji.com Mavic Air 2 spec/marketing copy (OcuSync 2.0, 2.4/5.8 GHz, 10 km) | Yes |
+| Mini 2 | "OcuSync 2.0" | dji.com/media-center/announcements/dji-mini-2; dji.com/support/product/mini-2 | Yes |
+| Mavic Mini | "Enhanced Wi-Fi" | dji.com/mavic-mini/specs | Yes |
+| Mini SE | "Enhanced Wi-Fi" (same system as Mavic Mini, "Mavic Mini built in the Mini 2 shell") | dji.com Mini SE marketing / mini-2-se comparison content | Yes — confirms brief's "unresolved DroneID-emission" caveat still stands (Wi-Fi link, not OcuSync) |
+| Mini 2 SE | "Enhanced Wi-Fi transmission has been upgraded to **DJI O2**" | dji.com/mini-2-se/faq, dji.com/mini-2-se/specs | Yes |
+| Mini 3 (non-Pro) | **"Video Transmission System: DJI O2"** (exact spec-sheet field, direct fetch) | dji.com/mini-3/specs | Yes — matches brief's A-FIELD finding; DJI page independently confirms O2 |
+| Mini 4K | "Enhanced Wi-Fi transmission has been upgraded to DJI O2" (same FAQ family as Mini 2 SE) | dji.com/mini-2-se/faq (Mini 4K | Mini 2 SE shared page) | Yes |
+| Air 2S | "The DJI Air 2S uses **O3**" | dji.com/media-center/announcements/dji-air-2s-launch; dji.com/support/product/air-2s | Yes — confirms brief's correction that Air 2S is O3, not O2 |
+| Mini 3 Pro | "O3 transmission system" (12 km FCC) | dji.com/media-center/announcements/dji-mini-3-pro-global-announcement; dji.com/support/product/mini-3-pro | Yes |
+| DJI FPV | "DJI FPV system uses **O3**" | dji.com/media-center/announcements/dji-reinvents-the-drone-flying-experience-with-the-dji-fpv | Yes |
+| Mavic 3 (/ Classic / Pro) | "**O3+**" (15 km range) | dji.com/mavic-3-pro/specs, dji.com/mavic-3-classic/specs (product family) | Yes |
+| Avata | "**O3+** transmission system" | dji.com Avata spec/marketing copy | **Minor correction**: brief's table cell said "OcuSync 3.0"; DJI's own name for the Avata link is **O3+**, matching Mavic 3-era naming, not plain O3/OcuSync-3.0 |
+| Mini 4 Pro | "DJI **O4** FHD digital video transmission system" (20 km) | dji.com/mini-4-pro/specs, dji.com/mini-4-pro/faq | Yes |
+| Air 3 | "next-gen **O4** video transmission" (20 km) | dji.com/air-3/specs, dji.com/air-3/faq | Yes |
+| Air 3S | "adopts the **O4** video transmission system" | dji.com/air-3s/specs, dji.com/air-3s/faq, dji.com/media-center/announcements/dji-release-air-3s-us | Yes |
+| Avata 2 | "new **O4** video transmission" (13 km) | dji.com/media-center/announcements/dji-launch-avata-2-en, dji.com/avata-2/faq | Yes |
+| Neo | "**O4** transmission system" (10 km, with controller/goggles; phone uses Wi-Fi) | dji.com/neo/specs | **Resolves brief's "uncertain" flag** — DJI confirms O4 is the controller/goggles link; phone-only mode is separate Wi-Fi, consistent with the brief's caveat about control-mode-dependent link |
+| Flip | "DJI **O4** video transmission" (13 km) | dji.com/flip/specs, dji.com/flip/faq, dji.com/media-center/announcements/dji-release-flip-us | Yes |
+| Mavic 4 Pro | **Not found** on a dji.com page in this search pass | — | **Unresolved** — no primary confirmation of "O4+" found; DJI's O4 Air Unit / O4 Ground Station pages describe the FPV-goggle/enterprise ecosystem, not the Mavic 4 Pro specifically. Brief's "O4+, uncertain" stands as D-UNVERIFIED, do not upgrade |
+| Mini 5 Pro | **Not found** | — | **Unresolved** — no dji.com transmission-system spec surfaced. Remains D-UNVERIFIED |
+| Neo 2 | Ambiguous: one non-DJI source states "the onboard O4 transmission system removed" (uses external O4 transponder for controller flight; Wi-Fi for phone) | dronexl.co (secondary, not dji.com) | **Not confirmed by a primary DJI page in this pass** — remains D-UNVERIFIED; do not state a generation without a dji.com/neo-2 spec/FAQ page |
+
+**Conclusion:** No corrections to the O2 shortlist or to any decode-relevant claim. One wording correction
+(Avata is DJI-labelled **O3+**, not plain "OcuSync 3.0"/"O3" — same generation family as Mavic 3, so no
+change to decode expectations). The brief's "uncertain" flag on **Neo = O4** is now resolved to confirmed
+O4 by a direct dji.com spec page. Mavic 4 Pro, Mini 5 Pro, and Neo 2 remain unverified against any dji.com
+page found in this pass — treat their generation as D-UNVERIFIED still; do not upgrade. All O2 shortlist
+rows (Mini 4K, Mini 2 SE, Mini 2, Mini 3 non-Pro, Mavic Air 2) are now primary-source confirmed as O2.

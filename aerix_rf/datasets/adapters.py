@@ -405,9 +405,14 @@ class AerixSessionAdapter:
     ``original/``, so nested replay sessions are excluded by construction,
     not by an explicit filter.
 
-    Label semantics: ``emitter_class`` comes from the session's own
-    operator-authored ``test`` block ONLY -- never from ``detections.jsonl``/
-    ``decode.jsonl`` (this adapter never reads those files at all). A
+    Label semantics: when an ``annotations.json`` (``aerix-rf annotate``,
+    ``docs/field/positives-protocol.md``) exists next to the session, its
+    per-window operator-timeline label always wins, and each annotated
+    interval becomes its own ``run_id`` split group
+    (``<session_id>/<interval_id>``). Otherwise ``emitter_class`` comes from
+    the session's own operator-authored ``test`` block ONLY -- never from
+    ``detections.jsonl``/``decode.jsonl`` (this adapter never reads those
+    files at all). A
     ``drone_manufacturer``/``drone_model`` present in ``test`` is the
     strongest signal (operator flew a real aircraft during the capture); a
     session whose own label/``test_label`` names it as one of AERIX's
@@ -433,9 +438,27 @@ class AerixSessionAdapter:
                 meta = json.loads(session_json.read_text(encoding="utf-8"))
             except (OSError, json.JSONDecodeError):
                 continue  # torn/unreadable session.json: skip, don't fail the whole scan
-            yield from self._recordings_for_session(session_dir, meta)
+            annotations = self._load_annotations(session_dir)
+            yield from self._recordings_for_session(session_dir, meta, annotations)
 
-    def _recordings_for_session(self, session_dir: Path, meta: dict) -> Iterator[RecordingMeta]:
+    @staticmethod
+    def _load_annotations(session_dir: Path) -> Optional[dict]:
+        """Loads ``annotations.json`` (written by ``aerix-rf annotate``, see
+        ``aerix_rf.annotate`` and ``docs/field/positives-protocol.md``) next
+        to this session, if present. A torn/unreadable file is treated the
+        same as absent (falls back to the ``test``-block heuristics below)
+        rather than failing the whole scan."""
+        path = session_dir / "annotations.json"
+        if not path.exists():
+            return None
+        try:
+            return json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return None
+
+    def _recordings_for_session(
+        self, session_dir: Path, meta: dict, annotations: Optional[dict] = None
+    ) -> Iterator[RecordingMeta]:
         session_id = str(meta.get("session_id") or session_dir.name)
         session_receiver_type = meta.get("receiver_type")
         session_receiver_serial = meta.get("receiver_serial")
@@ -476,7 +499,19 @@ class AerixSessionAdapter:
         cum_received = 0
         cum_any = False
 
-        for entry in meta.get("files") or []:
+        # index -> this file's `annotations.json` window entry (operator
+        # timeline truth), when an annotation file exists for this session.
+        # Matched by `files[]` array position, the same index `aerix-rf
+        # annotate` itself enumerates from before sorting its own output by
+        # `captured_at` -- see `aerix_rf.annotate.annotate_session`.
+        annotation_by_index: dict[int, dict] = {}
+        if annotations is not None:
+            for w in annotations.get("windows") or []:
+                idx = w.get("index")
+                if idx is not None:
+                    annotation_by_index[int(idx)] = w
+
+        for file_index, entry in enumerate(meta.get("files") or []):
             rel = entry.get("file")
             if not rel:
                 continue
@@ -576,11 +611,24 @@ class AerixSessionAdapter:
             file_receiver_extra["rf_bandwidth_hz"] = bw_hz
             file_receiver_extra["readback"] = readback
 
+            # An `aerix-rf annotate` pass is operator-truth ground truth
+            # (evidence level 5) for this specific window and always wins
+            # over the `test`-block heuristics in `labels()` below. Each
+            # annotated interval is also its own split group -- windows from
+            # different intervals of the same session (e.g. `off-baseline`
+            # vs `on-near`) must never share a `run_id`, or a group-level
+            # train/val/test splitter could put a background window and its
+            # paired positive window in the same split by construction.
+            annotation_window = annotation_by_index.get(file_index)
+            run_id = session_id
+            if annotation_window is not None:
+                run_id = f"{session_id}/{annotation_window['interval_id']}"
+
             yield RecordingMeta(
                 dataset_id=self.dataset_id,
                 recording_id=f"{session_id}/{rel}",
                 device_id=device_id,
-                run_id=session_id,
+                run_id=run_id,
                 source_paths=(path,),
                 original_rate_hz=in_rate_hz,
                 original_center_freq_hz=centre_hz,
@@ -600,6 +648,7 @@ class AerixSessionAdapter:
                         "session_deficit_frac": session_deficit_frac,
                         "capture_complete": capture_complete,
                     },
+                    "annotation": annotation_window,
                 },
             )
 
@@ -620,6 +669,14 @@ class AerixSessionAdapter:
         return iq, rec.original_rate_hz, None, None
 
     def labels(self, rec: RecordingMeta) -> LabelsGroup:
+        annotation_window = rec.extra.get("annotation")
+        if annotation_window is not None:
+            # Operator timeline truth (`aerix-rf annotate`, evidence level 5)
+            # always wins over the `test`-block heuristics below -- see
+            # docs/field/positives-protocol.md and aerix_rf.annotate.
+            inst = LabelInstance(**annotation_window["label"])
+            return LabelsGroup(scene=inst, window=inst)
+
         test_block: dict[str, Any] = rec.extra.get("test") or {}
         manufacturer = test_block.get("drone_manufacturer")
         model = test_block.get("drone_model")

@@ -551,6 +551,20 @@ def cmd_replay(args) -> int:
     return 0
 
 
+def cmd_annotate(args) -> int:
+    """Apply an operator timeline (docs/field/positives-protocol.md) to a
+    recorded session: writes ``<session>/annotations.json`` and prints a
+    windows-per-interval / transition-count summary table."""
+    from .annotate import annotate_session, format_summary, write_annotations
+
+    session_dir = Path(args.session)
+    annotations = annotate_session(session_dir, Path(args.timeline))
+    out_path = write_annotations(session_dir, annotations)
+    print(format_summary(annotations))
+    print(f"annotations: {out_path}")
+    return 0
+
+
 def cmd_report(args) -> int:
     from .session.store import Session
     from .session.report import write_summary, build_summary
@@ -653,6 +667,11 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--json", action="store_true")
     p.set_defaults(fn=cmd_replay)
 
+    p = sub.add_parser("annotate", help="apply an operator timeline to a recorded session")
+    p.add_argument("session", help="session directory (contains session.json)")
+    p.add_argument("timeline", help="timeline.txt (see docs/field/positives-protocol.md)")
+    p.set_defaults(fn=cmd_annotate)
+
     p = sub.add_parser("report", help="(re)generate summary.md for a session")
     p.add_argument("session")
     p.add_argument("--print", action="store_true")
@@ -669,7 +688,7 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
     ap = build_parser()
-    known = {"info", "baseline", "scan", "lock", "capture", "replay", "report", "run"}
+    known = {"info", "baseline", "scan", "lock", "capture", "replay", "annotate", "report", "run"}
     # Back-compat: `aerix-rf --sim` / `aerix-rf --once` == `aerix-rf run ...`
     if not any(a in known for a in argv):
         argv = ["run"] + argv

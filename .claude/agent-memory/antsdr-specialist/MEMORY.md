@@ -3,3 +3,4 @@
 - [Firmware strategy](firmware_strategy.md) — why we keep stock 1R1T image instead of 2R2T/UHD, and when to revisit
 - [Firmware & streaming ceiling](firmware_streaming_ceiling.md) — iiod ~59 MB/s ceiling is firmware-bound; UHD fw unquantified; stay on IIO
 - [Silent-loss BIST measurement](silent_loss_bist_measurement.md) — 12.288/13.44 clean, 15.36 badly broken; risk is GIL/same-process contention, NOT genuine multi-core OS load (resolved 2026-09-18)
+- [UHD SD-trial prep](uhd_sd_trial_prep.md) — image v1.0 e200.zip identified+downloaded+hashed, host uhd 4.11 (conda-forge) installed, decision rule for adopting UHD vs staying on IIO (2026-09-19)

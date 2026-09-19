@@ -1,1 +1,2 @@
 - [DroneID channel raster / dwell / serial-mod method](droneid_channel_raster.md) — 2.4/5.8 GHz candidate lists, 640ms burst interval, NDSS'23 fuzzing-based SN spoof mechanism, PDF-fetch workaround
+- [Datasets+signatures brief 2026-09-19](datasets_and_signatures_2026_09_19.md) — RFUAV is 109.2GB raw per-model .rar (not just 299GB spectrograms); DJI 5-model subset (~43GB) downloading; aria2c tilde-expansion gotcha; ExpressLRS FHSS.cpp primary values
