@@ -62,6 +62,12 @@ class Config:
     # --- framing / spectrogram ---
     window_s: float = 1.0              # one detection frame per second
     fft_size: int = 1024
+    detector_looks: int = 1            # aerix_rf.detect.energy C4(c) detector-local
+                                        # multi-look STFT recompute; 1 = disabled (default,
+                                        # see docs/design/stage1-c4-c5-spec.md "CPU decision
+                                        # (2026-09-19)": every measured looks>=2 setting
+                                        # blows the ~220 ms/window budget at 12.288 MS/s).
+                                        # env AERIX_RF_DETECTOR_LOOKS
 
     # --- detection thresholds ---
     score_threshold: float = 0.60      # a "plausible detection"
@@ -118,6 +124,7 @@ class Config:
             antsdr_profile=_envs("AERIX_RF_ANTSDR_PROFILE", cls.antsdr_profile),
             band=_envs("AERIX_RF_BAND", cls.band),
             fft_size=_envi("AERIX_RF_FFT", cls.fft_size),
+            detector_looks=_envi("AERIX_RF_DETECTOR_LOOKS", cls.detector_looks),
             score_threshold=_envf("AERIX_RF_SCORE_THRESHOLD", cls.score_threshold),
             snr_threshold_db=_envf("AERIX_RF_SNR_THRESHOLD_DB", cls.snr_threshold_db),
             mode1_png_on_detection=_envb("AERIX_RF_MODE1", cls.mode1_png_on_detection),

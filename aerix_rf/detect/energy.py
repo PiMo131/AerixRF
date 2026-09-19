@@ -124,13 +124,26 @@ _T1_FREQ_SMOOTH_HZ = 300e3
 _L_FREQ_ADJ_BIN_RHO2 = 0.48
 
 # C4(c): detector-local L-look averaging of contiguous, non-overlapping FFTs
-# within one detector frame (design doc C4(c)). Free at the canonical rate
-# (``hop`` is already >= ``fft_size`` there) -- raises time coverage without
-# growing ``frame_dt_s``. Used ONLY here, from a caller-supplied ``iq``; the
-# canonical ``Spectrogram`` passed into ``detect()`` (PNG / ML tensor /
-# snr_db / occupied_bw_mhz / duty_cycle / peak_freq_mhz / score) is never
-# touched.
-MAX_DETECTOR_LOOKS = 8
+# within one detector frame (design doc C4(c)). NOT free at the canonical
+# rate: it recomputes a second STFT from the raw ``iq`` (the canonical
+# ``Spectrogram`` only stored one look per hop, since ``hop`` is widened well
+# past ``fft_size`` to cap frame count -- see ``dsp.spectrogram``'s
+# ``_TARGET_FRAMES``), so the other ``looks - 1`` frames per hop are not
+# otherwise available and there is no way to average them out of the existing
+# ``spec`` object. Measured cost (see docs/design/stage1-c4-c5-spec.md "CPU
+# decision (2026-09-19)"): the recompute adds ~200-300 ms per 1 s window at
+# 12.288 MS/s/1024 REGARDLESS of ``looks`` being 2, 3, 4 or 8 (dominated by
+# the fancy-index gather + second FFT/fftshift over the whole window, not by
+# the look count itself, and ``looks`` is silently clamped to
+# ``hop // fft_size`` = 3 at this rate/fft_size anyway) -- there is no
+# ``looks >= 2`` setting that fits the ~220 ms detector budget, so this
+# constant / ``Config.detector_looks`` (env ``AERIX_RF_DETECTOR_LOOKS``)
+# default to 1 (recompute disabled; ``iq`` is not passed to ``detect()`` at
+# all in that case -- see ``pipeline.process_window``). Used ONLY here, from
+# a caller-supplied ``iq``; the canonical ``Spectrogram`` passed into
+# ``detect()`` (PNG / ML tensor / snr_db / occupied_bw_mhz / duty_cycle /
+# peak_freq_mhz / score) is never touched.
+MAX_DETECTOR_LOOKS = 1
 
 
 def _l_freq_eff(smooth_bins: int) -> float:

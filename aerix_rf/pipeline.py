@@ -246,8 +246,14 @@ def process_window(win: IQWindow, cfg: Config, *, decode: bool = True,
     center_mhz = win.center_freq_hz / 1e6
 
     spec = spectrogram.compute(win.iq, win.sample_rate, cfg.fft_size)
+    # C4(c) detector-local multi-look recompute (aerix_rf.detect.energy
+    # MAX_DETECTOR_LOOKS docstring): only pay for the second STFT when a
+    # non-default cfg.detector_looks explicitly asks for it (default 1 =
+    # disabled; see docs/design/stage1-c4-c5-spec.md "CPU decision
+    # (2026-09-19)").
     det = energy.detect(spec, center_mhz, cfg.snr_threshold_db, cfg.occupied_bw_ref_mhz, cfg.gain_db,
-                        iq=win.iq)
+                        iq=win.iq if cfg.detector_looks > 1 else None,
+                        max_looks=cfg.detector_looks)
     cls = classify_model.classify_window(spec, det, center_mhz,
                                          iq=win.iq, sample_rate=win.sample_rate)
     plausible = det.score >= cfg.score_threshold

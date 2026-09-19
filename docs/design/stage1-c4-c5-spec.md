@@ -734,3 +734,60 @@ ANTSDR ambient corpus, 1160 windows, `bench/out/stage1_fa_budget_c4_fix2.md`:
   is an untested corner.
 * Not yet measured on real weak-hopper IQ: RC-positives at 8-10 dB SNR against
   a *live* Wi-Fi occupant is still the outstanding validation.
+
+### CPU decision (2026-09-19)
+
+`aerix_rf.pipeline.process_window` was calling `energy.detect(..., iq=win.iq)`
+unconditionally, unlocking the C4(c) detector-local multi-look recompute on
+every window at `MAX_DETECTOR_LOOKS = 8`. Measured wall time of
+`energy.detect()`, synthetic 1 s complex64 IQ at 12.288 MS/s (fft_size=1024,
+one narrowband bursty component + noise floor; `.venv`/scipy.fft
+`workers=-1`), 15 repetitions after 1 warmup call, on a loaded 24-core box
+(load average ~12 from two concurrent stage-1 benches running from this
+worktree; min is the least-contended reading, closest to an idle box):
+
+| `max_looks` (`iq=`)        | min (ms) | median (ms) |
+|-----------------------------|---------:|------------:|
+| 1, `iq=None` (no recompute) |    160.7 |       168.4 |
+| 2                            |    341.6 |       398.3 |
+| 3                            |    373.1 |       421.8 |
+| 4                            |    382.7 |       468.7 |
+| 8 (previous default)        |    369.9 |       436.5 |
+
+At this rate/fft_size, `hop = 3072` (see `dsp.spectrogram`'s
+`_TARGET_FRAMES` time-decimation) and `fft_size = 1024`, so
+`n_looks = min(max_looks, hop // fft_size)` clamps to 3 for any
+`max_looks >= 3` — `max_looks` in {3, 4, 8} all run the *same* recompute, and
+even `looks=2` is nearly as expensive. `cProfile` on the `looks=3` recompute
+path (`aerix_rf.dsp.spectrogram.compute`) shows the cost is dominated by the
+second STFT's fancy-index gather of `looks` contiguous sub-frames per hop,
+its FFT, and a `fftshift` over the full `[n_starts, looks, fft_size]` array —
+not by the look count itself. Reordering `fftshift` to run after the
+per-look mean (shifting a `[n_starts, fft_size]` real array instead of the
+3x-larger complex one) measured no reliable improvement under this box's
+contention (142 ms vs 158 ms on repeated A/B runs — noise-dominated, not a
+real win) and was not adopted.
+
+Deriving the multi-look product from the existing canonical `spec` instead of
+a second STFT (this task's suggested alternative) is **not possible without
+changing the canonical representation**: the canonical `Spectrogram` already
+has its hop widened past `fft_size` (`_TARGET_FRAMES` decimation) specifically
+to bound frame count, so it stores only one look's worth of samples per hop
+step — the other `looks - 1` sub-frames per hop were never computed and
+aren't recoverable by re-averaging `spec`'s own frames. Computing them
+requires touching the raw `iq`, which is exactly what the recompute already
+does; there is no cheaper equivalent that avoids a second STFT over the
+window.
+
+Conclusion: no `max_looks >= 2` fits the ~220 ms/window budget on top of the
+~169 ms no-recompute baseline (extra cost is ~200-300 ms, roughly constant
+across `looks` values, not proportional to them). Smallest change: disable
+the detector-local recompute by default. `MAX_DETECTOR_LOOKS` in
+`aerix_rf/detect/energy.py` is lowered from 8 to 1, and a new
+`Config.detector_looks` knob (`AERIX_RF_DETECTOR_LOOKS`, default `1`) gates
+whether `pipeline.process_window` passes `iq=win.iq` to `energy.detect()` at
+all (`iq=None` when `detector_looks <= 1`, matching the measured ~169 ms
+no-recompute path exactly). Setting `AERIX_RF_DETECTOR_LOOKS=2` (or higher)
+re-enables C4(c) for anyone who can afford the measured cost (e.g. offline
+replay/bench runs, not the 1 Hz live loop). C4(c) itself (the averaging math)
+is unchanged; this is a call-site/default change only.
