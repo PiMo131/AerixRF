@@ -1,7 +1,7 @@
 # AERIX RF — Project Status (living document)
 
 *Maintained by the architect session; updated with every commit that changes scope, plan or evidence.
-Last update: 2026-09-19 (evening). Audience: technical manager. One page; details link to the repo.*
+Last update: 2026-09-19 (late). Audience: technical manager. One page; details link to the repo.*
 
 ## 1. Scope — what AERIX RF is (and is not)
 
@@ -35,7 +35,10 @@ A stage-1 candidate is never reported as a confirmed drone.
 - **A. ANTSDR bring-up** — hardware discovery ✅, receiver backend ✅, canonical signal representation ✅,
   acceptance A4 (decode on the E200) ⏳ aircraft-dependent.
 - **B/C. Datasets** — download all accessible public RF/UAV datasets, catalogue them, review usefulness ✅
-  (ongoing for gated sets).
+  (ongoing for gated sets). RFUAV corpus (109 GB, 349 recordings / 37 models incl. 31 RC transmitters) fully
+  local; adapter handles XML-less recordings and short tail slices; full `prepare` at the canonical
+  15.36 MS/s is running (~240/349 at time of writing). Next: retrain `features_v2` / rerun the benchmark
+  with real RC + DJI positives.
 - **D. Normalisation + benchmark** — one canonical representation for live and training data,
   leakage-safe splits, receiver-confound controls ✅ built; first honest results in ✅.
 - **E. Research corpus** — 1,113 unique local sources indexed with evidence grades ✅.
@@ -44,14 +47,32 @@ A stage-1 candidate is never reported as a confirmed drone.
 - **G. Firmware trial** — second-SD-card UHD image ✅ booted; 15.36 MS/s sc16 and 20 MS/s sc8 stream clean in
   short runs, one 10-min soak failed (host socket buffer suspected) ⏳ needs a sysctl on the host to conclude.
 - **I. Non-DJI targets (approved 2026-09-19)** — ranked brief with legal flags; user approved passive MAVLink
-  payload decode and video-content demod for research (Wi-Fi frame parsing → ESP32 system). Built today, all
-  synthetic-validated (evidence level 1): SiK deframer (bit-exact vs firmware), MAVLink parser (default-off,
-  7-day retention tag); GFSK demodulator under DSP rework (not yet at spec); analog-FPV carrier-grid detector
-  in test; a public analog-FPV IQ dataset found (Zenodo 19870020) and a 1 GB chunk downloading. TDOA is in
-  scope → the UHD image (timestamps, 2 RX) is the target platform, pending the buffered soak.
+  payload decode and video-content demod for research (Wi-Fi frame parsing → ESP32 system). SiK/MAVLink
+  passive-decode chain now **complete end-to-end on synthetic data** (T1–T4; 197 tests): GFSK BER < 1e-3 at
+  12 dB in-band SNR; Golay/CRC deframe; 250 kHz/N=50 raster; seed (NETID, unencrypted links only) recovery;
+  MAVLink payload parsing OFF by default (`decode_third_party_mavlink`), `personal_7d` retention tagging.
+  Independently reviewed (two reviewers): **PASS with conditions** — the review found the hop-map PRNG was
+  *not* the firmware algorithm, fixed by transcribing `freq_hopping.c` from the local ArduPilot SiK source
+  and verified 410/410 against an independently compiled C rig. Evidence level 1 (synthetic) — needs one
+  real SiK recording (field, user) to reach level 3/4. Brief: `research/briefs/sik-freq-hopping-firmware.md`;
+  design: `docs/design/sik-mavlink-passive-decode.md`. Analog-FPV detector: measured parameters from real
+  1240 MHz Zenodo VTX captures (level 2, shape) — `docs/design/analog-fpv-detector.md`. New negative-control
+  generators (`aerix_rf/dsp/ofdm_sim.py`): Wi-Fi-like OFDM bursts/scenes and BLE-like GFSK scenes (802.11a-style
+  STF/LTF from memory, flagged unverified vs the standard) for Stage-1 and SiK false-positive testing. TDOA is
+  in scope → the UHD image (timestamps, 2 RX) is the target platform, pending the buffered soak.
 - **H. Stage-1 link-signature rules** — burst extraction + raster/period/cadence tests ✅ built; false-alarm audit on
   1,160 real ambient windows: `hopping` 1.0 % (budget 5 %) and DroneID-cadence 0 after one rule correction ✅;
   the FHSS-grid rules were never triggered by ambient RF (not exercised — needs real hopper positives, e.g. RFUAV RC set).
+  **Update:** bench run against 31 RFUAV RC transmitters (`bench/stage1_rc_positives.py`) produced 136 level-1
+  labels on 28/31 models vs 0/100 on ANTSDR ambient, and 0/428 on level-2 grid rules. Diagnosis found five
+  structural defects (period test degenerate on dt=0 and on constant intervals; a 64-event cap that was
+  actually a time cut; unbounded cluster chaining; single-look floor over-estimating bandwidth 15–50×; grid
+  test resolution-starved at 100 MS/s). C1–C3 fixed and committed (`41a1787`) after independent review caught
+  two further defects (merge cap splitting wideband bursts; `frame_dt_s` not forwarded on the session path);
+  ambient false-alarm rate after the fix: `hopping` 11/1160 (0.95 %), level-2 = 0. C4/C5 spec in progress; the
+  RC-positives bench rerun is in progress. Evidence: level 1–2 on a third-party X310 capture in a crowded
+  band; same-receiver single-TX captures on the E200 are the conversion path to level 5. Doc:
+  `docs/design/stage1-rc-positives-2026-09-19.md`.
 - **Server integration** — after F.
 
 ## 4. Progress to date (what is actually proven)
@@ -78,6 +99,15 @@ host buffer raised; otherwise revert to the proven IIO path.
 encrypted). The user's Avata (O3+) is therefore a live decode-test candidate — checklist in
 `docs/field/avata-o3-decode-test.md`. Aircraft/link-generation table verified against dji.com.
 
+**Non-DJI expansion, detail (2026-09-19):** the SiK/MAVLink passive-decode chain (§3.I) is complete
+end-to-end on synthetic data and independently reviewed twice — PASS with conditions; the review's main
+catch was a hop-map PRNG that did not match the firmware, fixed by transcribing `freq_hopping.c` and
+verified 410/410 against an independently compiled C rig. Evidence level 1 (synthetic) throughout; a real
+SiK recording is the conversion path to level 3/4. Stage-1's RC-positives bench (§3.H) found five structural
+defects in the burst/period/cluster/bandwidth/grid tests; three are fixed and committed, cutting ambient
+false alarms to `hopping` 11/1160 (0.95 %) and level-2 grid to 0; C4/C5 and the RC-positives rerun are in
+progress.
+
 **Synthetic-only (level 1–2) so far:** decoder sensitivity knee (≈3 dB in-band) and its robustness to
 strong adjacent emitters; the classifier feature set's device-invariance properties.
 
@@ -96,6 +126,8 @@ positives campaign is the next step, not more training.
 | Loss handling | producer in its own process + exact ring accounting; rate monitor with real deficits | measured |
 | Decoder | validated on real IQ; blocker-robust via zc6-ranked centre selection | real IQ + synthetic bench |
 | Benchmark honesty | no detection-probability or cross-receiver claim yet; receiver-ID probe is a mandatory control | first results §5 of the design doc |
+| SiK hop-map | firmware algorithm transcribed from `freq_hopping.c`; naive shuffle, 8-bit draw mod n, 16-bit seed; NETID → seed only on unencrypted links | verified 410/410 vs independently compiled C rig |
+| Stage-1 RC-positives | five structural defects found (period test, event cap, cluster chaining, bandwidth floor, grid resolution); C1–C3 fixed | `bench/stage1_rc_positives.py`, independent review |
 
 ## 6. Open items, risks, needs
 
@@ -109,7 +141,9 @@ positives campaign is the next step, not more training.
 - Positives campaign: the Avata test first (`docs/field/avata-o3-decode-test.md`), then the ON/OFF protocol
   (`docs/field/positives-protocol.md`); an O2 reference aircraft (Mini 4K / Mini 2 SE / Mini 2 / Mini 3 / Mavic Air 2) if available.
 - Housekeeping: IEEE DataPort / Kaggle credentials for gated datasets; approval for the very large sets
-  (DroneRFa ≈570 GB, RFUAV up to 1.3 TB).
+  (DroneRFa ≈570 GB, RFUAV up to 1.3 TB); `dialout` group membership.
+- A real SiK radio recording (field, user) — the only path from the SiK/MAVLink chain's current level-1
+  (synthetic) evidence to level 3/4.
 
 **Main risks**
 - Without same-receiver positives, no classifier claim is defensible (mitigation: campaign F).
@@ -117,9 +151,15 @@ positives campaign is the next step, not more training.
 - Live classifier features cost ≈1.2 s per second of signal on this workstation; the field box may need the
   cheaper v1 features (decision pending hardware choice).
 
+**Working practice**
+- Subagent turn limits are being hit repeatedly, producing deliverables written early; independent review is
+  now catching real defects in every recent batch (Stage-1 C4/C5, the SiK hop-map). Treat this as a working
+  practice to keep — every builder deliverable gets an independent review pass before it is trusted — not as
+  a one-off complaint.
+
 ## 7. Where to look
 
 `README.md` (status log) · `AERIX_RF_ANTSDR_PROJECT.md` (plan, §0 decisions/questions) ·
 `docs/design/*.md` (architecture memos) · `research/briefs/*.md` (evidence briefs) ·
 `docs/BACKLOG.md` (engineering backlog) · `docs/field/positives-protocol.md` (campaign checklist).
-Tests: ≈600 passing. Commits on `main`: 45+ since the pivot.
+Tests: 699 collected (incl. 197 SiK, 46 Stage-1, 8 OFDM/BLE negative-control). Commits on `main`: 45+ since the pivot.

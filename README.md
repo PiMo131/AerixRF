@@ -255,6 +255,16 @@ prints serial + position), `cap` = capture health (`ok` or `INCOMPLETE(-n)`; the
 
 ## Status
 
+- **2026-09-19 (late) — SiK/MAVLink chain complete (synthetic); Stage-1 RC-positives defects fixed.**
+  SiK/MAVLink passive-decode chain (T1–T4, 197 tests) is complete end-to-end on synthetic data — GFSK,
+  Golay/CRC deframe, 250 kHz/N=50 raster, seed recovery, MAVLink parsing default-off with `personal_7d`
+  retention; independently reviewed twice, PASS with conditions, after fixing a hop-map PRNG that did not
+  match the firmware (`freq_hopping.c` transcribed, verified 410/410); evidence level 1, needs a real SiK
+  recording. Stage-1's RC-positives bench against 31 RFUAV RC transmitters found five structural defects;
+  three fixed and committed (`41a1787`), cutting ambient false alarms to `hopping` 11/1160 (0.95 %) and
+  level-2 grid to 0; C4/C5 and the bench rerun are in progress. New Wi-Fi/BLE-like negative-control
+  generators (`aerix_rf/dsp/ofdm_sim.py`) added for false-positive testing. Details:
+  `docs/PROJECT_STATUS.md`.
 - **2026-09-19 (afternoon) — Stage-1 link-signature rules live; UHD-mode trial; non-DJI ranking.** Stage-1 now
   extracts burst events (−6 dB edge-midpoint centres) and applies raster/period/cadence tests with a controlled,
   vendor-free vocabulary (`fhss_1mhz_grid_candidate`, `hopping_candidate`, `droneid_cadence_candidate`, …, tags
