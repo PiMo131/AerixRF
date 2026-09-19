@@ -164,3 +164,6 @@ Run 2 (revised): grid 0, `droneid_cadence_candidate` 0, `rc_link_family_candidat
 MET. Trade-off accepted: a narrow hopper with < 5 channels visible in one dwell (e.g. a DJI-RC-like 2 MHz
 raster) is NOT labelled from a single dwell (`INSUFFICIENT_CHANNELS`) — it needs the multi-dwell path.
 Reports: `stage1-fa-budget-2026-09-19.md` (run 1), `stage1-fa-budget-2026-09-19-run2.md` (run 2).
+
+
+**Wording correction (review 2026-09-19):** `INSUFFICIENT_CHANNELS` = 1160/1160 means the FHSS-grid lattice test (and hence `fhss_*_grid_candidate` / `rc_link_family_candidate`) was NEVER ATTEMPTED on this corpus — ambient RF in this room never presents ≥10 narrow burst clusters in a dwell. Read those rows as "grid-candidate false-alarm rate NOT EXERCISED by real ambient data", not as 0/1160 rejections. The exercised, budgeted results are `hopping_candidate` 12/1160 (1.0 %) and `droneid_cadence_candidate` 0/1160. Measured Stage-1 cost ≈210 ms per 1 s window (12.288 MS/s).

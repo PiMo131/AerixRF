@@ -44,7 +44,8 @@ A stage-1 candidate is never reported as a confirmed drone.
 - **G. Firmware trial** — second-SD-card UHD image ✅ booted; 15.36 MS/s sc16 and 20 MS/s sc8 stream clean in
   short runs, one 10-min soak failed (host socket buffer suspected) ⏳ needs a sysctl on the host to conclude.
 - **H. Stage-1 link-signature rules** — burst extraction + raster/period/cadence tests ✅ built; false-alarm audit on
-  1,160 real ambient windows: all budgeted rules pass after one rule correction (hopping 65 % → 1.0 %) ✅.
+  1,160 real ambient windows: `hopping` 1.0 % (budget 5 %) and DroneID-cadence 0 after one rule correction ✅;
+  the FHSS-grid rules were never triggered by ambient RF (not exercised — needs real hopper positives, e.g. RFUAV RC set).
 - **Server integration** — after F.
 
 ## 4. Progress to date (what is actually proven)
