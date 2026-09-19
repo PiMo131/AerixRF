@@ -7,3 +7,4 @@
 - [First benchmark results (2026-09-18)](project_first-benchmark-results.md) — the chamber-vs-ambient shortcut, the fac0aacf receiver-state outlier, and why below-chance BA is not a pass.
 - [Blocker failure split (2026-09-18)](project_blocker-failure-split.md) — the wideband-blocker knee is centre-hypothesis selection, not sync/CFO/turbo.
 - [Centre-hypothesis scorer](project_centre-hypothesis-scorer.md) — zc6 not zc4 ranks centres; ranked full-sync + gated refinement fixes the wb blocker, edge de-bias rejected.
+- [Stage-1 link-signature rules](project_stage1-link-signatures.md) — Rayleigh lattice test for hop rasters, the 60 kHz centre-jitter budget, and why 2 MHz rasters and 640 ms cadence need multi-dwell.

@@ -757,12 +757,17 @@ def test_aerix_session_adapter_prefers_annotations_json(tmp_path):
                              limit=1, write_iq=False, write_tensor=True)
     assert stats.windows == 1
     sc = next(iter_dataset(dataset_id, root=tmp_path))
-    assert sc.receiver.gain.mode == GainMode.UNKNOWN
-    assert sc.receiver.gain.db is None
+    # This session's own session.json carries real receiver/health metadata
+    # (an ANTSDR session, unlike the legacy-schema1 HackRF fixture above) --
+    # annotating a session must not blank out its receiver/capture-health
+    # sidecar fields, only add/override the operator-truth label + run_id
+    # split group (see AerixSessionAdapter's docstring).
+    assert sc.receiver.gain.mode == GainMode.MANUAL
+    assert sc.receiver.gain.db == pytest.approx(40.0)
     assert sc.receiver.readback is None
-    assert sc.signal.window_deficit_frac is None
-    assert sc.signal.session_deficit_frac is None
-    assert sc.signal.capture_complete is None
+    assert sc.signal.window_deficit_frac == pytest.approx(0.0)
+    assert sc.signal.session_deficit_frac == pytest.approx(0.0)
+    assert sc.signal.capture_complete is True
 
 
 # ---------------------------------------------------------------------------
