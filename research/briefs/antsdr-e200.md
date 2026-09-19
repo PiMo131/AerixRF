@@ -325,3 +325,9 @@ socket buffer (INFERRED host-side; needs `sudo sysctl -w net.core.rmem_max=50000
 overflows are REPORTED (`ERROR_CODE_OVERFLOW`) and timestamps allow exact gap sizing — the two properties the
 IIO path lacked. 2R2T is available in this mode without any U-Boot change. Decision pending the 10-minute
 soaks (15.36 sc16 now; 20 sc16 after the sysctl).
+
+Re-test after the failed 600 s soak (device reachable again; reachability logged every 2 s, never down):
+15.36 MS/s sc16 120 s → ratio 1.0000, 3 overflows, 2 timestamp discontinuities incl. one 63.9 s jump with no
+sample loss (INFERRED: device time reset, to be explained); **20 MS/s sc8 120 s → 0 overflows, 0 discontinuities**.
+The 600 s failure (overflow train → control ACK timeout → "network unreachable") remains unexplained; host UDP
+buffers were still 212 KB in all runs. Next: repeat with `net.core.rmem_max=50 MB`, 20 sc16 and 15.36 sc16 soaks.
