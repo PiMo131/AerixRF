@@ -12,3 +12,4 @@
 - [SiK 2-GFSK T1 demod](project_sik-gfsk-t1.md) — post-detection matched filter = the missing dB, OBW98 calibration, preamble-gated 2-bit sync arithmetic.
 - [SiK T4 dwell pipeline](project_sik-pipeline-t4.md) — wideband-fixture AWGN trap, -6 dB centre bias on bimodal 2-FSK, single-look gating, per-burst DDC cost.
 - [Stage-1 RC-capture defects (2026-09-19)](project_stage1-rc-defects.md) — t̂=1.0 s period bug, first-64 event cap, cluster chaining, single-look gate, grid bin-width limit.
+- [Stage-1 C4/C5 decisions](project_stage1-c4-c5-decisions.md) — per-bin p25 floor + clamp, PFA-targeted gates, L_eff from freq smoothing, free Welch looks, grid guard, C3b merge defect.
