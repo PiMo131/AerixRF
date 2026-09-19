@@ -681,6 +681,78 @@ def test_aerix_session_adapter_schema1_receiver_and_health_fields_unknown(tmp_pa
     # No session-level bandwidth_hz -> falls back to the file's own rate.
     assert rec.extra["receiver"]["rf_bandwidth_hz"] == pytest.approx(_HACKRF_SESSION_RATE_HZ)
 
+
+def test_aerix_session_adapter_prefers_annotations_json(tmp_path):
+    """When `annotations.json` (`aerix-rf annotate`, T-annotate) exists next
+    to a session, its per-window operator-timeline label wins over the
+    `test`-block heuristics, and each annotated interval becomes its own
+    `run_id` split group -- never the bare session_id shared across the
+    whole session (see AerixSessionAdapter's docstring)."""
+
+    dataset_id = "aerix_test_annotations"
+    session_name = "2026-09-19_060000_positives_24"
+    session_id = _write_antsdr_session(
+        tmp_path, dataset_id, session_name,
+        label="positives_24",
+        test_block={"drone_manufacturer": "DJI", "drone_model": "mavic_3"},
+        n_files=2,
+    )
+    sdir = tmp_path / dataset_id / "original" / session_name
+    annotations = {
+        "schema": 1,
+        "tz": "UTC",
+        "session_id": session_id,
+        "intervals": [
+            {"id": "off-baseline", "start_iso": "2026-09-19T06:00:00.000Z",
+             "end_iso": "2026-09-19T06:00:01.000Z", "note": "baseline"},
+            {"id": "on-near", "start_iso": "2026-09-19T06:00:01.000Z",
+             "end_iso": "2026-09-19T06:00:02.000Z", "note": "drone near"},
+        ],
+        "windows": [
+            {
+                "index": 0, "file": "iq/capture_0000.cs16", "captured_at": 1_800_000_000.0,
+                "interval_id": "off-baseline",
+                "label": {
+                    "emitter_class": "background", "link_family": "not_applicable",
+                    "link_role": "not_applicable", "manufacturer": "unknown", "model": "unknown",
+                    "individual_id": "unknown", "activity": "off",
+                    "evidence_level": 5, "label_source": "operator_ground_truth",
+                },
+                "evidence_level": 5, "label_source": "operator_truth", "transition": False,
+            },
+            {
+                "index": 1, "file": "iq/capture_0001.cs16", "captured_at": 1_800_000_001.0,
+                "interval_id": "on-near",
+                "label": {
+                    "emitter_class": "drone_link", "link_family": "unknown", "link_role": "unknown",
+                    "manufacturer": "DJI", "model": "mavic_3", "individual_id": "unknown",
+                    "activity": "unknown", "evidence_level": 5, "label_source": "operator_ground_truth",
+                },
+                "evidence_level": 5, "label_source": "operator_truth", "transition": False,
+            },
+        ],
+    }
+    (sdir / "annotations.json").write_text(json.dumps(annotations), encoding="utf-8")
+
+    adapter = AerixSessionAdapter(dataset_id=dataset_id)
+    recs = list(adapter.iter_recordings(tmp_path))
+    assert len(recs) == 2
+    rec0, rec1 = recs
+
+    assert rec0.run_id == f"{session_id}/off-baseline"
+    assert rec1.run_id == f"{session_id}/on-near"
+    assert rec0.run_id != rec1.run_id  # each interval is its own split group
+
+    labels0 = adapter.labels(rec0)
+    assert labels0.scene.emitter_class == EmitterClass.BACKGROUND
+    assert labels0.scene.evidence_level == EvidenceLevel.OPERATOR_TRUTH
+    assert labels0.scene.label_source == LabelSource.OPERATOR_GROUND_TRUTH
+
+    labels1 = adapter.labels(rec1)
+    assert labels1.scene.emitter_class == EmitterClass.DRONE_LINK
+    assert labels1.scene.manufacturer == "DJI"
+    assert labels1.scene.model == "mavic_3"
+
     stats = prepare_dataset(dataset_id=dataset_id, adapter=adapter, root=tmp_path,
                              limit=1, write_iq=False, write_tensor=True)
     assert stats.windows == 1
