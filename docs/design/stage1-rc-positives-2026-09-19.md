@@ -385,3 +385,18 @@ with the diagnosis that the remaining level-2 blocker is bandwidth over-estimati
 (C4, parked on `wip/stage1-c4` pending the ambient-FA fix). Whether SIYI MK15 / WFLY ET10 are documented 1 MHz-grid
 hoppers is to be checked against research/briefs/rc-link-raster-facts.md before any `consistent_with` wording is
 attached. Level-1 coverage 30/31 models; 0 errors. Evidence stays level 1–2 (third-party X310, crowded band).
+
+### RC positives on branch `wip/stage1-c4` (C4 + FA fix 1, commit 594eed9; branch predates C5 so two columns)
+
+| | main (C1–C3+C5) | branch (C4 + FA fix 1) |
+|---|---|---|
+| models with ≥1 level-1 label | 30/31 | **25/31** |
+| dwell: hopping / rc_link_family / fhss_1mhz | 46 / 2 / 0 | 70 / **9** / **2** (3 models) |
+| full_band (1024): hopping / fhss_1mhz | 145 / 0 (withheld, G1) | 142 / 22 (6 models; no G1 guard on branch) |
+| ambient control (100 windows) hopping | 0 | **4** |
+
+Reading: C4 does what the diagnosis predicted — corrected bandwidths let the level-2 grid/family rules fire on
+real RC transmitters (3 models in the 10 MHz dwell, 6 in full band) — but FA fix 1 pays for its 1.38 % ambient FA
+with level-1 coverage (30 → 25 models) and 4 % control FA, matching the reviewer's sensitivity measurement
+(all true bursts ≤ 13 dB flagged noise-limited). FA fix 2 (occupancy-span discriminant, fail-open) is in progress on
+the branch; merge criteria: ambient hopping ≤ ~1.5 %, control ≤ 1 %, level-1 coverage ≥ 30/31, level-2 hits retained.
