@@ -26,3 +26,9 @@ detector-local — do NOT change the canonical STFT/tensor for it; (5) evidence 
 tests and an independent review yet raised ambient hopping FA 0.95 % → 17.2 %. Unit tests and synthetic reviews
 do not substitute for the ambient FA bench; every detector-threshold change must run `bench/stage1_fa_budget.py`
 BEFORE commit to main, and the RC-positives bench after. Park on a branch rather than merge-and-fix.
+
+**Grid-test lesson (2026-09-19 late):** `fhss_1mhz_grid_candidate` fired with Rayleigh r 0.95–0.99 on windows with NO
+narrowband hop comb (SIYI MK15, WFLY ET10/ET16S: one always-on carrier + diffuse ≥19 MHz occupant) — on both main
+and the C4 branch. A high lattice r alone is not evidence; the grid path needs a wideband-occupant / dominant-carrier
+veto and minimum per-channel duty. `rc_link_family_candidate` survived independent GT on 4/5 models. Always pair a
+level-2 "unlock" with independent ground-truth alignment before quoting it.
