@@ -441,3 +441,18 @@ ambient rate as a field rate. First own-receiver RC capture: paired RC-on/RC-off
 room with the in-room Wi-Fi AP on; measure bw vs known modulation width, grid spacing and burst duration vs known
 values, fraction of hops tagged fragment inside the active Wi-Fi channel, detection vs SNR by distance, RC-off
 hopping rate as in-session FA.
+
+### Gate (ii) result — level-2 fires vs independent ground truth (2026-09-19 late): **FAIL → HOLD**
+
+Independent full-coverage channel histograms on 11/40 level-2 windows (see `stage1-level2-alignment-2026-09-19.md`):
+`rc_link_family_candidate` genuine on FlySky FS-i6X / NV14 (14–20 channels, AFHDS 2A nominal 16), JR Propo XG7
+(GT spacing 2.985 MHz vs fitted 2.995 MHz), Skydroid T10; Futaba T18SZ marginal (near-floor evidence, r = 0.59).
+`fhss_1mhz_grid_candidate` is **contamination-driven** on SIYI MK15, WFLY ET10, WFLY ET16S (one always-on carrier
++ a 19–74 MHz diffuse occupant, no narrowband comb; lattice test still reports 32–65 channels at r = 0.95–0.99) and
+partially on Radiolink AT9S Pro; WFLY ET10/ET16S are 17 of the 20 grid positives. The same two models produced
+main's own `full_band_4096` grid hits → **defect in the grid test itself** (locks onto scattered near-floor
+crossings inside a wide occupant), independent of C4. Also noted: Skydroid raster r = 0.0 on one window with the
+same real hop structure as a neighbouring r = 0.989 window — r is not a reliable severity gate in either direction.
+Decision: HOLD the merge; add a wideband-occupant / dominant-carrier veto to the grid path (clusters coincident
+with a ≥ 8 MHz diffuse occupant or with a near-100 % duty carrier do not count), require minimum per-channel duty
+for lattice members, re-run the 40 windows. `rc_link_family_candidate` is not blocked by this finding.
