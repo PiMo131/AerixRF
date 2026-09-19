@@ -255,6 +255,20 @@ prints serial + position), `cap` = capture health (`ok` or `INCOMPLETE(-n)`; the
 
 ## Status
 
+- **2026-09-19 (evening) — Stage-1 C5 grid guard committed; C4 parked; RFUAV classifier retrain.**
+  Stage-1 C5 (grid-resolution guard, `7affe10`) tags `GRID_RESOLUTION_LIMITED` and withholds level-2
+  grid labels when bin pitch > Δ/20 or bursts < 8 bins; ambient false alarms unchanged (`hopping`
+  11/1160 = 0.95 %, level-2 0). RC-positives bench v3 (dwell/full_band/full_band_4096, 2 models):
+  level-1 on 30/31 transmitters; first 1 MHz-grid hits (5 windows, 2 models), all correctly flagged
+  `GRID_RESOLUTION_LIMITED` in the new 24.4 kHz-bin column; ambient control 0/100. Stage-1 C4
+  (per-bin floor/P_fa/Welch) is **parked on `wip/stage1-c4`**, not merged: 710 tests pass and
+  independent review was PASS-with-conditions, but ambient hopping false alarms rose 0.95 % → 17.2 %,
+  so it stays off `main` pending diagnosis; lesson recorded — detector-threshold changes must clear
+  the ambient FA bench before merge. RFUAV `prepare` finished (349 recordings, 1.4 GB tensors);
+  `features_v2` retrained on it vs. ANTSDR ambient — receiver-ID probe CONDITIONAL (bal. acc. 0.647),
+  cross-receiver holdout recall 0.875 (14/16, Zenodo), Tier D confound unchanged, level 2 at best. No
+  new open decisions for the user; E200 field items (sysctl soak, Avata O3+ decode test, positives
+  campaign, SiK recording) remain the highest-value inputs. Details: `docs/PROJECT_STATUS.md`.
 - **2026-09-19 (late) — SiK/MAVLink chain complete (synthetic); Stage-1 RC-positives defects fixed.**
   SiK/MAVLink passive-decode chain (T1–T4, 197 tests) is complete end-to-end on synthetic data — GFSK,
   Golay/CRC deframe, 250 kHz/N=50 raster, seed recovery, MAVLink parsing default-off with `personal_7d`

@@ -155,3 +155,12 @@ and independent review before it is "done". Evidence-wording rules apply.
 - [ ] Firmware path: stay on stock IIO vs SD-card trial of MicroPhase UHD-style firmware.
 - [ ] Approve DroneRFa (~570 GB) and RFUAV full (0.3–1.3 TB) downloads; derived-IQ storage cap.
 - [ ] IEEE DataPort / Kaggle credentials (see `research/datasets/USER_TODO.md`).
+
+## Stage-1 C4 (parked 2026-09-19)
+- [ ] Branch `wip/stage1-c4` holds the per-bin floor / P_fa thresholds / Welch looks / C3b work (710 tests pass,
+      independently reviewed PASS-with-conditions) but ambient FA `hopping_candidate` rose 11 -> 199/1160 (17 %).
+      NOT on main. Needs: fragment/skirt fix or C6 (frequency-local floor reference), Wi-Fi discounts re-validated
+      with corrected bandwidths, ≥20 dB R2 regression test, CPU cost of the default-on second STFT (`iq=` path),
+      explicit decision on the R5 cadence-suppression false-negative risk (real RC link inside an active Wi-Fi channel).
+- [x] C5 committed on main (7affe10).
+- [ ] wip/stage1-c4 follow-ups: ≥20 dB R2 regression test (strong-component bw unchanged vs main) still missing; multi-look STFT is opt-in (`AERIX_RF_DETECTOR_LOOKS`) because the second STFT costs 340–470 ms/window — a cheaper multi-look product needs a detector-side STFT that shares the FFT with the canonical one; C6 frequency-local floor reference (needs the tilt test re-specified in dB/MHz).

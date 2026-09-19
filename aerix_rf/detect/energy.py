@@ -413,7 +413,7 @@ def detect(spec: Spectrogram, center_freq_mhz: float,
         l_eff=l_eff, t0_s=0.0,
     )
     clusters = raster_mod.cluster_centres(events)
-    raster_result = raster_mod.analyze_raster(events, frame_dt_s=slice_dt_s)
+    raster_result = raster_mod.analyze_raster(events, frame_dt_s=slice_dt_s, bin_hz=bin_hz)
     wifi_beacon_idx = {t.cluster_index for t in raster_result.cadence_tags
                        if t.tag == "wifi_beacon_like"}
     cadence_ms = _cluster_cadence_ms(clusters, wifi_beacon_idx, events=events)

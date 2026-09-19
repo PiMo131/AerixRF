@@ -368,3 +368,61 @@ while the ambient control stays at zero. Level-2 remains almost closed — as di
 over-estimated by the single-look scalar floor (C4) and the 100 MS/s column is resolution-limited (C5); those are
 specified in `stage1-c4-c5-spec.md`. Evidence: level 1–2, third-party X310 capture, crowded band; no burst is
 attributed to any named transmitter.
+
+### RC positives after C5 (bench v3, three columns, 2026-09-19 ~15:30)
+
+214 slices × {dwell, full_band, full_band_4096}; ANTSDR ambient control 100 windows (0 positives, 40 wifi_like_wideband).
+
+| column | hopping | fixed_channel | level-2 labels | GRID_RESOLUTION_LIMITED | INSUFFICIENT_CHANNELS |
+|---|---|---|---|---|---|
+| dwell (10 MHz @ 15.36 MS/s) | 46 | 1 | rc_link_family 2 (SKYDROID_T10) | 0 | 201 |
+| full_band (100 MS/s / 1024) | 145 | 0 | 0 (withheld by G1) | 214/214 | 45 |
+| full_band_4096 (24.4 kHz bins) | 143 | 3 | **fhss_1mhz_grid 5 (SIYI_MK15, WFLY_ET10)** | 0 | 48 |
+
+Reading: with the resolution guard in place the 1024-pt full-band column is honestly marked unusable for grid
+tests, and the 4096-pt column produces the first 1 MHz-grid hits on two transmitters — a small number, consistent
+with the diagnosis that the remaining level-2 blocker is bandwidth over-estimation from the single-look scalar floor
+(C4, parked on `wip/stage1-c4` pending the ambient-FA fix). Whether SIYI MK15 / WFLY ET10 are documented 1 MHz-grid
+hoppers is to be checked against research/briefs/rc-link-raster-facts.md before any `consistent_with` wording is
+attached. Level-1 coverage 30/31 models; 0 errors. Evidence stays level 1–2 (third-party X310, crowded band).
+
+### RC positives on branch `wip/stage1-c4` (C4 + FA fix 1, commit 594eed9; branch predates C5 so two columns)
+
+| | main (C1–C3+C5) | branch (C4 + FA fix 1) |
+|---|---|---|
+| models with ≥1 level-1 label | 30/31 | **25/31** |
+| dwell: hopping / rc_link_family / fhss_1mhz | 46 / 2 / 0 | 70 / **9** / **2** (3 models) |
+| full_band (1024): hopping / fhss_1mhz | 145 / 0 (withheld, G1) | 142 / 22 (6 models; no G1 guard on branch) |
+| ambient control (100 windows) hopping | 0 | **4** |
+
+Reading: C4 does what the diagnosis predicted — corrected bandwidths let the level-2 grid/family rules fire on
+real RC transmitters (3 models in the 10 MHz dwell, 6 in full band) — but FA fix 1 pays for its 1.38 % ambient FA
+with level-1 coverage (30 → 25 models) and 4 % control FA, matching the reviewer's sensitivity measurement
+(all true bursts ≤ 13 dB flagged noise-limited). FA fix 2 (occupancy-span discriminant, fail-open) is in progress on
+the branch; merge criteria: ambient hopping ≤ ~1.5 %, control ≤ 1 %, level-1 coverage ≥ 30/31, level-2 hits retained.
+
+### C4 FA fix 2 (branch b2bbc1f, occupancy-span fragment rule, fail-open) — 2026-09-19 evening
+
+- Sensitivity restored: reviewer scripts now show `frac_unresolved_fragment = 0.00` at every SNR 6–20 dB (fix 1:
+  1.00 at ≤ 10.5 dB). `bw_noise_limited` is still flagged for bursts ≤ 13 dB, but it no longer removes them from
+  hop-set membership; their centre comes from the above-hold centroid instead of the −6 dB midpoint.
+- Ambient FA: hopping **39/1160 = 3.36 %** (main 0.95 %; fix 1 1.38 %; design S9 cap 5 %), spread over all six
+  sessions (0/20, 5/122, 3/60, 5/59, 16/300, 9/599); level-2 0; `wifi_beacon_like` 1.
+- Pending before a merge decision: RC-positives bench on fix 2 (coverage ≥ 30/31? level-2 hits retained? control
+  ≤ 1/100?), CPU cap for the multi-look STFT, the FA rerun after that cap. The FA-vs-sensitivity trade
+  (0.95 % blind-to-level-2 vs ~3.4 % with level-2 unlocked) is an architecture decision, to be taken with the
+  numbers on the table — not by tuning the budget.
+
+### Branch comparison table (RFUAV RC positives, 2026-09-19 late)
+
+| variant | level-1 models | dwell rc_link_family / fhss_1mhz | full_band (1024) fhss grid | control hopping /100 | ambient FA hopping /1160 |
+|---|---|---|---|---|---|
+| main (C1–C3 + C5) | 30/31 | 2 / 0 (1 model) | withheld (G1) | 0 | 11 (0.95 %) |
+| branch fix 1 (594eed9) | 25/31 | 9 / 2 (3 models) | 22 (6 models) | 4 | 16 (1.38 %) |
+| branch fix 2, looks=8 (b2bbc1f) | 28/31 | 9 / 1 (2 models) | 21 (5 models) | **12** | 39 (3.36 %) |
+| branch fix 2, looks=1 (0125deb) | 28/31 | 11 / 0 (3 models) + 9 rc_link_family full-band | 20 (7 models) | **12** | 46 (3.97 %) |
+
+Grid hits at 1024-pt full band are resolution-limited by definition (bin 97.7 kHz > Δ/20) and are shown only
+because the branch predates the C5 guard; treat them as "the lattice statistic exceeded threshold", not as grid
+evidence. The RC-bench control (100 ANTSDR ambient windows) is drawn from the noisier session, hence higher rates
+than the 1160-window FA bench.

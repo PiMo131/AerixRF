@@ -791,3 +791,17 @@ no-recompute path exactly). Setting `AERIX_RF_DETECTOR_LOOKS=2` (or higher)
 re-enables C4(c) for anyone who can afford the measured cost (e.g. offline
 replay/bench runs, not the 1 Hz live loop). C4(c) itself (the averaging math)
 is unchanged; this is a call-site/default change only.
+
+## Status 2026-09-19 (main)
+
+Status: merged into main after the Fable gate 2026-09-19 (see stage1-rc-positives-2026-09-19.md).
+
+### C5 implemented on main (2026-09-19)
+
+`analyze_raster(..., bin_hz=)`: G1 (`bin_hz > Δ/20`) is a **column-level** tag — `GRID_RESOLUTION_LIMITED` is
+emitted whenever the caller's bin pitch cannot resolve a tested grid step, independent of channel count, so a
+resolution-limited column is always visibly marked; G2 (median burst width < 8 bins) applies only when a 1/2 MHz
+lattice was actually found. Level-2 grid labels are withheld under either guard; numeric RasterEvidence fields stay
+populated for diagnostics. Registry rates 12.288/13.44/15.36/20 MS/s at 1024 never trip G1; the bench `full_band`
+column (100 MS/s/1024) does, and the new `full_band_4096` column (24.4 kHz bins) does not. Ambient FA unchanged:
+11/1160 hopping, level-2 0 (bench/out/stage1_fa_budget_after_c5.md).

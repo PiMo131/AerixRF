@@ -79,19 +79,34 @@ def test_find_slices_caps_at_max_and_respects_aria2_marker(tmp_path):
     assert "pack1_2-3s.iq" not in {p.name for p in slices}
 
 
-def _synthetic_hopping_iq(fs: float, n: int, seed: int = 0) -> np.ndarray:
+# 10 tones on an exact 1 MHz lattice (M_MIN_RASTER = 10 channels, each
+# attested by >= 2 bursts below), offset by 0.5 MHz so none sits on the DC
+# bin that ``spectrogram.compute`` blanks. This is deliberately >=
+# M_MIN_RASTER so ``raster_test`` actually resolves ``delta_hz ~= 1e6``
+# (the old 3-tone list was below the minimum and never reached the C5
+# grid-resolution-guard code path at all).
+_GRID_1MHZ_TONES_HZ = [(-5.5 + i) * 1.0e6 for i in range(10)]
+
+
+def _synthetic_hopping_iq(fs: float, n: int, seed: int = 0,
+                           tones_hz: list[float] | None = None,
+                           burst_s: float = 0.001) -> np.ndarray:
     """A short synthetic burst-hopping-like complex signal: repeated narrow
     tones at a few frequencies with silence between, well above the noise
     floor -- just needs to be enough for detect_bursts to find >=1 event
     per window and for the full_band/dwell pipeline to run end-to-end
-    without error. Not used to assert any specific label (that is the real
-    dataset's job); only that the wrapper functions produce well-formed
-    records."""
+    without error, AND (with the default ``_GRID_1MHZ_TONES_HZ``) enough
+    distinct >=2x-attested channels on an exact 1 MHz lattice to exercise
+    the C5 grid-resolution guard (``GRID_RESOLUTION_LIMITED``,
+    docs/design/stage1-c4-c5-spec.md). Not used to assert any manufacturer
+    label (that is the real dataset's job); only that the wrapper functions
+    produce well-formed records and that the guard's bin_hz gating behaves
+    as documented."""
     rng = np.random.default_rng(seed)
     t = np.arange(n) / fs
     iq = (rng.standard_normal(n) + 1j * rng.standard_normal(n)).astype(np.complex64) * 0.01
-    tones_hz = [0.5e6, 1.5e6, 2.5e6]
-    burst_len = int(0.001 * fs)
+    tones_hz = tones_hz if tones_hz is not None else _GRID_1MHZ_TONES_HZ
+    burst_len = int(burst_s * fs)
     pos = 0
     k = 0
     while pos + burst_len < n:
@@ -104,16 +119,23 @@ def _synthetic_hopping_iq(fs: float, n: int, seed: int = 0) -> np.ndarray:
 
 
 def test_process_one_iq_end_to_end_synthetic():
-    fs_hz = 20_000_000.0
-    n = int(fs_hz * 0.05)  # 50 ms synthetic window -- enough frames, fast test
-    iq = _synthetic_hopping_iq(fs_hz, n)
+    # 100 MS/s -- the real bench's native RFUAV "full_band" rate (bin_hz =
+    # 97.7 kHz at fft_size=1024, 24.4 kHz at fft_size=4096; see the C5
+    # registry table, docs/design/stage1-c4-c5-spec.md) -- so the
+    # GRID_RESOLUTION_LIMITED assertions below exercise the actual G1
+    # bin-pitch boundary the guard is designed around, not an arbitrary rate.
+    fs_hz = 100_000_000.0
+    n = int(fs_hz * 0.04)  # 40 ms: >= 3 full cycles of the 10-tone lattice below
+    iq = _synthetic_hopping_iq(fs_hz, n, burst_s=0.0003)
     center_freq_hz = 2_450_000_000.0
 
     records = bench._process_one_iq(iq, fs_hz, center_freq_hz, "SYNTH_MODEL", "SYNTH_MODEL/pack1", "pack1_0-1s.iq")
 
-    assert len(records) == 2
+    assert len(records) == 3
     modes = {r["mode"] for r in records}
-    assert modes == {"full_band", "dwell"}
+    assert modes == {"full_band", "full_band_4096", "dwell"}
+    fft_sizes_by_mode = {r["mode"]: r["fft_size"] for r in records}
+    assert fft_sizes_by_mode == {"full_band": 1024, "full_band_4096": 4096, "dwell": 1024}
     for r in records:
         assert r["model"] == "SYNTH_MODEL"
         assert isinstance(r["labels"], list)
@@ -133,6 +155,15 @@ def test_process_one_iq_end_to_end_synthetic():
     assert dwell["dwell_select"]["method"] in ("occupancy_grid", "fallback_guard_too_wide_for_band")
     full_band = next(r for r in records if r["mode"] == "full_band")
     assert full_band["dwell_select"] is None
+    full_band_4096 = next(r for r in records if r["mode"] == "full_band_4096")
+    assert full_band_4096["dwell_select"] is None
+    # C5 grid-resolution guard (docs/design/stage1-c4-c5-spec.md): the
+    # coarse-bin "full_band" column (97.7 kHz bins at 100 MS/s) must fail G1
+    # for the 1/2 MHz hop-set deltas and carry GRID_RESOLUTION_LIMITED; the
+    # fine-bin "full_band_4096" column (24.4 kHz bins) passes G1, so it must
+    # never carry the tag on this same synthetic fixture.
+    assert "GRID_RESOLUTION_LIMITED" in full_band["tags"]
+    assert "GRID_RESOLUTION_LIMITED" not in full_band_4096["tags"]
 
 
 def test_dwell_center_by_occupancy_prefers_midband_hopping_over_edge_rolloff():

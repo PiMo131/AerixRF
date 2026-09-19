@@ -87,7 +87,11 @@ drift on one emitter, which is precisely the test the current code lacks; otherw
 Level 1 (morphology): `fixed_channel_burst_candidate`, `hopping_candidate`, `wideband_ofdm_burst_candidate`, `continuous_wideband_candidate`,
 `unknown_channel_structure`. Level 2 (probabilistic family, no manufacturer): `fhss_1mhz_grid_candidate`, `fhss_2mhz_grid_candidate`,
 `rc_link_family_candidate` (hopping + T̂ ∈ 1–20 ms + per-hop BW ≤2 MHz + duration mode <3 ms), `droneid_cadence_candidate`. Discount tags:
-`wifi_beacon_like`, `ble_connection_like`, `ble_advertising_like`. Mandatory structured evidence on every level-2 output: `raster = {spacing_hz,
+`wifi_beacon_like`, `ble_connection_like`, `ble_advertising_like`. Diagnostic tags (never suppress, never a detection):
+`wifi_like_wideband`, `INSUFFICIENT_CHANNELS` (grid test not attempted, too few channel clusters), `GRID_RESOLUTION_LIMITED`
+(C5, `docs/design/stage1-c4-c5-spec.md` §"C5" — the grid test *was* run but the frequency resolution (`bin_hz`) or the measured
+burst bandwidth is too coarse relative to the tested Δ to resolve the lattice; `fhss_1mhz_grid_candidate`/`fhss_2mhz_grid_candidate`
+are withheld, not asserted-false). Mandatory structured evidence on every level-2 output: `raster = {spacing_hz,
 offset_hz, n_channels, rayleigh_r, rayleigh_r_debiased, p_false, n_dwells}`, `period = {t_hat_s, n_intervals, rayleigh_r, p_false}`,
 `consistent_with: [...]`. **Naming rule: no vendor token (`elrs`, `dji`, `flysky`) in a stage-1/2 label**; vendor consistency lives only in
 `consistent_with`. Identity requires a CRC-valid decode (level 4).

@@ -13,6 +13,10 @@ from aerix_rf.detect.raster import (
     CLUSTER_MAX_MERGE_HZ,
     CLUSTER_MAX_SPAN_HZ,
     FREE_PERIOD_RANGE_S,
+    GRID_G1_MAX_BIN_FRAC_OF_DELTA,
+    GRID_G2_MIN_BW_BINS,
+    TAG_VOCAB,
+    _grid_resolution_guard,
     analyze_raster,
     cluster_centres,
     period_test,
@@ -403,3 +407,110 @@ def test_result_labels_and_tags_are_from_controlled_vocabulary():
     assert all(t in TAG_VOCAB for t in result.tags)
     d = result.as_dict()
     assert "raster" in d and "period" in d
+
+
+# --------------------------------------------------------------------------
+# C5 -- grid-resolution guard (docs/design/stage1-c4-c5-spec.md "C5").
+# --------------------------------------------------------------------------
+
+def test_tag_vocab_contains_grid_resolution_limited():
+    assert "GRID_RESOLUTION_LIMITED" in TAG_VOCAB
+
+
+def test_grid_guard_g1_bin_pitch_trips_1mhz_label():
+    """97.7 kHz bins (bench full_band, 100 MS/s / 1024) exceed the G1 limit
+    for Delta=1 MHz (50 kHz): the label is withheld and the reason is
+    reported as 'bin_pitch', not the (data-dependent) G2 burst-width check."""
+    rng = np.random.default_rng(0)
+    events = _hopper_for_duration(rng, duration_s=1.0, packet_period_s=0.004,
+                                   in_band_prob=0.125, n_channels=10,
+                                   base_hz=ELRS_BASE_HZ, spacing_hz=1.0e6,
+                                   bw_hz=0.3e6, dur_s=0.5e-3)
+    bin_hz = 100e6 / 1024
+    assert bin_hz > 1.0e6 * GRID_G1_MAX_BIN_FRAC_OF_DELTA
+    result = analyze_raster(events, bin_hz=bin_hz)
+    assert "GRID_RESOLUTION_LIMITED" in result.tags
+    assert "fhss_1mhz_grid_candidate" not in result.labels
+    assert result.consistent_with == []
+    assert any("bin_pitch" in n for n in result.notes)
+    # numeric evidence is still populated for diagnostics (design: "insufficient
+    # resolution, not a negative result")
+    assert abs(result.raster.delta_hz - 1.0e6) <= 5e3
+
+
+def test_grid_guard_g2_burst_bins_trips_2mhz_label():
+    """At 97.7 kHz bins, Delta=2 MHz passes G1 (limit 100 kHz) but a 3-bin
+    (293 kHz) median burst fails G2 (needs >= 8 bins = 781.6 kHz): the label
+    is withheld with reason 'burst_bins'."""
+    bin_hz = 100e6 / 1024
+    assert bin_hz <= 2.0e6 * GRID_G1_MAX_BIN_FRAC_OF_DELTA
+    events: list[BurstEvent] = []
+    for dwell_idx, k0 in enumerate([0, 3, 6]):
+        rng = np.random.default_rng(100 + dwell_idx)
+        events.extend(_hopper(rng, n_inband=30, packet_period_s=0.004, in_band_prob=1.0,
+                               n_channels=6, base_hz=DJI_BASE_HZ + k0 * 2.0e6,
+                               spacing_hz=2.0e6, bw_hz=3 * bin_hz, dur_s=0.5e-3))
+    result = analyze_raster(events, bin_hz=bin_hz)
+    assert result.raster.n_channels >= 10
+    assert "GRID_RESOLUTION_LIMITED" in result.tags
+    assert "fhss_2mhz_grid_candidate" not in result.labels
+    assert any("burst_bins" in n for n in result.notes)
+
+
+def test_grid_guard_passes_at_canonical_bin_width_and_normal_burst():
+    """Regression: at the canonical 15 kHz bin width with a normal (20-bin,
+    300 kHz) burst, neither G1 nor G2 trips and the label is unaffected by
+    the guard."""
+    rng = np.random.default_rng(0)
+    events = _hopper_for_duration(rng, duration_s=1.0, packet_period_s=0.004,
+                                   in_band_prob=0.125, n_channels=10,
+                                   base_hz=ELRS_BASE_HZ, spacing_hz=1.0e6,
+                                   bw_hz=0.3e6, dur_s=0.5e-3)
+    bin_hz = 15e3
+    assert 0.3e6 / bin_hz >= GRID_G2_MIN_BW_BINS
+    result = analyze_raster(events, bin_hz=bin_hz)
+    assert "GRID_RESOLUTION_LIMITED" not in result.tags
+    assert "fhss_1mhz_grid_candidate" in result.labels
+    assert "expresslrs_2g4" in result.consistent_with
+
+
+def test_grid_guard_bin_hz_none_evaluates_as_before():
+    """Backwards compatibility: omitting ``bin_hz`` (the default) evaluates
+    identically to before C5 -- guard not evaluated, no tag added."""
+    rng = np.random.default_rng(0)
+    events = _hopper_for_duration(rng, duration_s=1.0, packet_period_s=0.004,
+                                   in_band_prob=0.125, n_channels=10,
+                                   base_hz=ELRS_BASE_HZ, spacing_hz=1.0e6,
+                                   bw_hz=0.3e6, dur_s=0.5e-3)
+    baseline = analyze_raster(events)
+    explicit_none = analyze_raster(events, bin_hz=None)
+    assert baseline.labels == explicit_none.labels
+    assert baseline.tags == explicit_none.tags
+    assert "GRID_RESOLUTION_LIMITED" not in baseline.tags
+
+
+def test_grid_guard_g1_registry_rates_table():
+    """docs/design/stage1-c4-c5-spec.md C5 registry table (fft_size=1024,
+    G1 only): none of the shipping receiver rates trip G1 for either grid
+    Delta; only the 100 MS/s bench column trips G1 (for Delta=1 MHz -- at
+    Delta=2 MHz that same bin width still passes G1, "marginal pass", and is
+    only gated by the separate, data-dependent G2 check)."""
+    live_rates_hz = (12.288e6, 13.44e6, 15.36e6, 20e6)
+    for rate in live_rates_hz:
+        bin_hz = rate / 1024
+        for delta in (1.0e6, 2.0e6):
+            ok, reason = _grid_resolution_guard(delta, bin_hz, median_bw_hz=None)
+            assert ok, f"rate={rate} delta={delta} unexpectedly failed G1 ({reason})"
+
+    bench_bin_hz = 100e6 / 1024
+    ok_1mhz, reason_1mhz = _grid_resolution_guard(1.0e6, bench_bin_hz, median_bw_hz=None)
+    assert not ok_1mhz and reason_1mhz == "bin_pitch"
+    ok_2mhz, reason_2mhz = _grid_resolution_guard(2.0e6, bench_bin_hz, median_bw_hz=None)
+    assert ok_2mhz and reason_2mhz is None
+
+    # bench full_band_4096 (4096-pt FFT at 100 MS/s -> 24.4 kHz bins): G1
+    # passes at both Delta.
+    bench_4096_bin_hz = 100e6 / 4096
+    for delta in (1.0e6, 2.0e6):
+        ok, reason = _grid_resolution_guard(delta, bench_4096_bin_hz, median_bw_hz=None)
+        assert ok, f"full_band_4096 delta={delta} unexpectedly failed G1 ({reason})"
