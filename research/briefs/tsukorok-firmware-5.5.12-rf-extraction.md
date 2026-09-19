@@ -492,6 +492,53 @@ or a sample more than 4 dB below the peak → returns 1 (immediate "dji 5.8" con
 Labels "Sc" and "X3" have no other references in the image; by the naming pattern (Or = Orlan, Za = Zala,
 ZL = ZalaLancet, El = ELRS, Lc = Lancet) "Sc" is most likely Supercam and "X3" the cryptoorlan class — INFERRED only.
 
-### 7.6 Remaining unknowns
-1. Exact A5133 strobe/register table (needs the v0.7 datasheet from a reachable host).
-2. Field semantics of the time-domain classifier block (constants listed, state machine not fully traced).
+### 7.6 Time-domain burst classifier (`dji_alg == 1`) — now traced
+
+Parameter block (CONFIRMED from the `s8i/s32i` sequence at 0x40376179–0x403761b9, base stack 0x74, 0x38 bytes,
+copied by `SkydioParams_Copy` 0x4200457c which also zeroes the run-statistics area):
+
+| off | value | role (INFERRED from `TimeDomain_Accumulate` 0x420052f0 / `TimeDomain_Classify` 0x4200512c) |
+|---|---|---|
+| +0x00 | i8 −100 | RSSI threshold dBm separating "burst" from "gap" samples |
+| +0x04 | 2 | hysteresis: a state change needs > 2 consecutive opposite samples |
+| +0x08 | 750 | max allowed gap length (samples) — longer → reject |
+| +0x0C / +0x10 | 32 / 75 | "short burst" length window; bursts with 32 < len < 75 are counted |
+| +0x14 | 3 | reject if short-burst count ≥ 3 |
+| +0x18 | 0.3 | min duty (burst samples / total) |
+| +0x1C | 0.9 | max duty (above it the channel is treated as continuously occupied → class 0, pass) |
+| +0x20 | 64 | min run length recorded into the long-burst / long-gap vectors |
+| +0x24 | 20 | quantisation bucket (samples) for run-length histogramming |
+| +0x28 | 5 | min number of long bursts and long gaps |
+| +0x2C | 5 | min repeat count of the modal gap length (test uses value − 2 = 3 for gaps) |
+| +0x30 / +0x34 | 0.5 / 0.5 | min fraction of runs covered by the modal length buckets (bursts / gaps) |
+
+Samples: 8192 RSSI reads on one channel (`SX1280_ObserveTimeDomain`), each read ≈ 20–30 µs over SPI
+(INFERRED), so the trace spans roughly 0.2 s and the 20-sample bucket ≈ 0.5 ms.
+Decision: duty ≥ 0.9 → class 0 (pass, "continuous"); else reject (class 2) if max gap > 750 or
+short-burst count ≥ 3 or duty < 0.3; else require ≥ 5 long bursts and ≥ 5 long gaps, quantise run lengths to
+20-sample buckets, and pass (class 1) when the modal gap bucket repeats ≥ 3 times, the modal burst bucket
+repeats ≥ 5 times and the top buckets cover ≥ 50 % of runs. A candidate is confirmed when both observed
+channels (start + width/3 and end − width/3) pass. CONFIRMED structure, INFERRED naming.
+
+### 7.7 Timing helpers (CONFIRMED)
+`FUN_42027a2c` is Arduino `delayMicroseconds` (busy-wait on `esp_timer_get_time`), `FUN_42027a1c` is `delay(ms)`,
+`FUN_42027a00` is `millis()`. All settle times quoted in §2 are therefore microseconds as stated.
+
+### 7.8 Remaining unknowns
+1. Exact A5133 strobe/register table (the v0.7 datasheet is on hosts this sandbox cannot reach; web.archive.org
+   is also blocked here).
+
+## 8. Implications for AERIX RF (INFERRED, for the architect)
+
+* This device is a useful *reference of vendor heuristics*, not of ground truth: every alarm it raises is
+  stage‑1/2 evidence. Its "DJI" verdict is a spectral-width/persistence score in 2.4/5.8 GHz; AERIX RF's
+  Stage‑1 morphology vocabulary already covers the same features (bandwidth ≈ 7–23 MHz, persistence across
+  sweeps, edge steepness). The concrete thresholds in §7.1 are a reasonable prior for a "DJI-like wideband"
+  candidate class, nothing more.
+* The sub‑GHz FSK part is the most directly reusable: bitrate classes (57.6 k / 76.19 k / 38.15 k / 80 k Orlan‑class,
+  15.235 k Zala/Lancet‑class, ≈85 k and ≈115 k for other classes), the 860–885 / 895–928 / 970–1020 MHz plan,
+  and the nine static 32‑bit post-preamble words (§3.2). A HackRF/E200 capture at those bitrates can test whether
+  those words actually appear — that would move them from "vendor table" to protocol-specific evidence (level 3).
+* The ELRS logic (CAD on SF6–9 at 500 kHz, LoRa sync 0x12/0x14) is a cheap probabilistic test AERIX RF could
+  emulate with a LoRa CAD-equivalent correlator on captured IQ, but it is not identification.
+* Nothing here supports a deterministic decoder; the device stores only the first 0x16 bytes of a packet.
