@@ -317,6 +317,13 @@ Entries expire after 1,200,000 ms (lit 0x42000fd0, `FUN_420126dc`). Rules (freq 
   RSSI cal values read from regs 0x1B/0x1C. Strobes: 0x58 standby-like, 0x50, 0x80 sleep, 0xC0 RX (INFERRED names).
 * Channel: reg 0x0E = f_MHz − 5725. RSSI: reg 0x1E after 150 µs, formula in §2.3.
 
+**Hardware-variant note (2026-09-19):** the teardown brief (`tsukorok-teardown.md`) records two antenna
+connectors and vendor bands 720–1020 MHz and 2.4–2.5 GHz, and no A5133 was identified on the board. The firmware
+probes the A5133 at start-up and logs `a5133 not found` when absent, after which every 5.8 GHz path (§2.3, the
+TX-strobe issue in §7.2) is skipped. The 5.8 GHz section is therefore a firmware capability for a hardware variant
+that may not be populated on the unit in hand; confirm by looking for the A5133 (5.8 GHz FSK IC on the
+GPIO16/17/48 bit-banged bus) or by checking the boot log. INFERRED until the board is inspected.
+
 ### 4.3 SX1276/SX1278 (RadioLib SX127x) — `FUN_42019b34` "Starting radio"
 
 * SPI pins SCK 7, MISO 6, MOSI 8, SS 9; SPI clock 10,000,000 Hz (lit 0x42000260).
