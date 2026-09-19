@@ -91,6 +91,8 @@ __all__ = [
     "DEFAULT_DWELLS_PER_STEP",
     "DEFAULT_SETTLE_S",
     "DEFAULT_FFT_SIZE",
+    "DEFAULT_INNER_USABLE_FRAC",
+    "DEFAULT_DC_BLANK_BINS",
 ]
 
 DEFAULT_BIN_HZ = 500_000
@@ -102,6 +104,28 @@ DEFAULT_FFT_SIZE = 1024
 # bandwidth (``rf_bandwidth``/``bandwidth_hz``, e.g. ANTSDR's 10 MHz at
 # 12.288 MS/s). Matches the sim backend's default 20 MS/s -> 12 MHz.
 DEFAULT_USABLE_FRACTION = 0.6
+# FIXED (2026-09-19, seam-comb defect): a dwell's FULL analog bandwidth
+# (``step_hz``) includes its own edge roll-off / anti-alias transition band
+# (and, at zero-IF, a DC/LO-leak spike at its own centre). Measured on real
+# ANTSDR hardware (``base_58.npz``, 5.8 GHz baseline): a +7 dB, 4-bin-wide
+# (500 kHz bins) comb sat exactly at every 10 MHz step SEAM -- the edges of
+# each dwell's usable band -- because the OLD stitcher (a) fed a dwell's full
+# ``step_hz``-wide span, edges included, straight into the stitched grid, and
+# (b) stepped centres exactly ``step_hz`` apart with ZERO overlap, so each
+# edge region was covered by only one (contaminated) dwell instead of an
+# interior region of a neighbour. Only the CENTRAL ``DEFAULT_INNER_USABLE_FRAC``
+# of each dwell's own bandwidth is trusted; retune centres are then spaced by
+# that trimmed (interior) width instead of the full bandwidth, so consecutive
+# dwells' interiors exactly tile (no-gap) the requested band -- see
+# ``RetuneWelchSweep.__init__``/``_step_centers``/``_dwell_psd``.
+DEFAULT_INNER_USABLE_FRAC = 0.82
+# Fine (per-dwell PSD resolution, i.e. ``sample_rate / fft_size``) bins blanked
+# by interpolation around each dwell's OWN tuned centre (DC/LO-leak spike),
+# wider than :data:`aerix_rf.dsp.spectrogram._DC_BLANK_BINS`'s +-1 bin (which
+# already runs unconditionally inside ``spectrogram.compute``) as a second,
+# stitcher-level guard band -- LO leakage on real zero-IF hardware is not
+# always a single-bin Dirac.
+DEFAULT_DC_BLANK_BINS = 3
 
 
 @runtime_checkable
@@ -144,7 +168,9 @@ class RetuneWelchSweep:
     def __init__(self, source: IQSource, *, step_hz: float | None = None,
                  dwells_per_step: int = DEFAULT_DWELLS_PER_STEP,
                  settle_s: float = DEFAULT_SETTLE_S,
-                 fft_size: int = DEFAULT_FFT_SIZE) -> None:
+                 fft_size: int = DEFAULT_FFT_SIZE,
+                 usable_frac: float = DEFAULT_INNER_USABLE_FRAC,
+                 dc_blank_bins: int = DEFAULT_DC_BLANK_BINS) -> None:
         self.source = source
         caps = source.capabilities
         if not step_hz:
@@ -175,6 +201,22 @@ class RetuneWelchSweep:
         self.dwells_per_step = max(1, int(dwells_per_step))
         self.settle_s = float(settle_s)
         self.fft_size = int(fft_size)
+        # (a)/(b) seam-comb fix: only the central `usable_frac` of a dwell's own
+        # `step_hz`-wide span is trusted (edge roll-off trimmed); consecutive
+        # dwell centres are then spaced by that trimmed (interior) width --
+        # `usable_frac * step_hz` -- instead of the full `step_hz`, so
+        # interiors exactly tile the requested band with no gap left uncovered
+        # by any dwell's interior. `overlap_hz` (recorded for callers' meta,
+        # e.g. `aerix_rf.scan.sweep.save_baseline`) is the resulting overlap
+        # between consecutive dwells' FULL (untrimmed) spans -- exactly the
+        # total width trimmed off one dwell's two edges, i.e. the minimum
+        # overlap that guarantees full interior coverage; see module docstring.
+        self.usable_frac = float(usable_frac)
+        if not (0.0 < self.usable_frac <= 1.0):
+            raise ValueError(f"usable_frac must be in (0, 1], got {self.usable_frac!r}")
+        self.overlap_hz = self.step_hz * (1.0 - self.usable_frac)
+        self._retune_stride_hz = self.step_hz - self.overlap_hz  # == usable_frac * step_hz
+        self.dc_blank_bins = max(0, int(dc_blank_bins))
         self._windows: Iterator | None = None
         self.row_started_at: list[float] = []   # monotonic wall-clock per emitted row
 
@@ -192,13 +234,15 @@ class RetuneWelchSweep:
         return win
 
     def _step_centers(self, lo_hz: float, hi_hz: float) -> np.ndarray:
-        step = self.step_hz
-        span = max(hi_hz - lo_hz, step)
-        n = max(1, int(np.ceil(span / step - 1e-9)))
-        centers = lo_hz + step * (np.arange(n) + 0.5)
+        # Spaced by the TRIMMED interior width (`_retune_stride_hz`), not the
+        # full dwell bandwidth (`step_hz`) -- see __init__ / module docstring.
+        stride = self._retune_stride_hz
+        span = max(hi_hz - lo_hz, stride)
+        n = max(1, int(np.ceil(span / stride - 1e-9)))
+        centers = lo_hz + stride * (np.arange(n) + 0.5)
         if n > 1:
-            # last step ends exactly at hi_hz instead of overshooting by < step
-            centers[-1] = hi_hz - step / 2
+            # last step ends exactly at hi_hz instead of overshooting by < stride
+            centers[-1] = hi_hz - stride / 2
         return centers
 
     def _build_grid(self, lo_hz: float, hi_hz: float, bin_hz: float) -> np.ndarray:
@@ -231,7 +275,29 @@ class RetuneWelchSweep:
         with np.errstate(divide="ignore"):
             psd_db = 10.0 * np.log10(np.mean(lin, axis=0) + 1e-30)
         freqs_hz = spec.freqs_hz + center_hz
-        return freqs_hz, psd_db
+
+        # (c) DC/LO-leak guard: blank +-dc_blank_bins fine bins around this
+        # dwell's OWN tuned centre (index len//2, since freqs_hz is spec's
+        # fftshifted, zero-centred grid offset by center_hz) by interpolating
+        # from the immediate neighbours -- same style as, but wider than,
+        # spectrogram.compute's own unconditional +-1 bin DC blank.
+        k = self.dc_blank_bins
+        c = psd_db.size // 2
+        if k > 0 and psd_db.size >= 2 * k + 4:
+            left = psd_db[max(0, c - k - 3):c - k]
+            right = psd_db[c + k + 1:c + k + 4]
+            fill = 0.5 * (left.mean() + right.mean()) if left.size and right.size else np.nan
+            if np.isfinite(fill):
+                psd_db = psd_db.copy()
+                psd_db[c - k:c + k + 1] = fill
+
+        # (a) trim to this dwell's inner usable band only -- the outer edges
+        # (analog roll-off / anti-alias transition) are discarded rather than
+        # stitched in; retune centres are already spaced (see _step_centers)
+        # so every requested frequency falls inside the interior of >= 1 dwell.
+        half_width_hz = self.step_hz * self.usable_frac / 2.0
+        interior = np.abs(freqs_hz - center_hz) <= half_width_hz
+        return freqs_hz[interior], psd_db[interior]
 
     def _bin_row(self, grid: np.ndarray, contribs: list[tuple[np.ndarray, np.ndarray]]) -> np.ndarray:
         """Stitch per-step PSDs onto ``grid`` (linear-power average where steps

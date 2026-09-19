@@ -65,6 +65,114 @@ class _MultiToneSource(IQSource):
                            expected_samples=n)
 
 
+class _RolledOffNoiseSource(IQSource):
+    """Retunable synthetic IQSource: flat-floor coloured noise whose per-dwell
+    passband has a realistic analog roll-off (fixed relative to the CURRENT
+    tuned centre, as a real front-end's would be) plus a DC/LO-leak spur at
+    each dwell's own centre. Used to reproduce/verify the seam-comb defect
+    (``base_58.npz``) with a controlled, backend-neutral fake -- no hardware.
+    """
+
+    receiver_type = "fakerolloff"
+
+    def __init__(self, sample_rate: float = 20e6, window_s: float = 0.05,
+                 floor_lin: float = 1.0, rolloff_db_at_0_45fs: float = -6.0,
+                 dc_lin: float = 0.0, seed: int = 0) -> None:
+        self.sample_rate = float(sample_rate)
+        self.window_s = float(window_s)
+        self.floor_lin = float(floor_lin)
+        self.rolloff_db_at_0_45fs = float(rolloff_db_at_0_45fs)
+        self.dc_lin = float(dc_lin)
+        self._rng = np.random.default_rng(seed)
+        self._center_hz = 0.0
+        self._n = max(8, int(round(self.sample_rate * self.window_s)))
+        freqs = np.fft.fftfreq(self._n, d=1.0 / self.sample_rate)
+        nyq = self.sample_rate / 2.0
+        x = np.abs(freqs) / nyq                      # 0..1, fraction of Nyquist
+        # Flat (0 dB) passband out to 0.85*Nyquist, then a linear roll-off
+        # through `rolloff_db_at_0_45fs` at exactly |f| = 0.45*Fs (0.9*Nyquist)
+        # -- same relative shape every dwell, independent of where it is
+        # tuned (a real front end's response is fixed relative to its own LO,
+        # not to absolute frequency). Flat well past the default
+        # `usable_frac` (0.82) interior boundary so the TRIMMED region is
+        # actually flat; only the discarded outer edge rolls off.
+        x0 = 0.85
+        resp_db = np.where(x <= x0, 0.0,
+                           self.rolloff_db_at_0_45fs * (x - x0) / (0.90 - x0))
+        self._mag = np.sqrt(self.floor_lin) * np.power(10.0, resp_db / 20.0)
+
+    @property
+    def capabilities(self) -> ReceiverCapabilities:
+        return ReceiverCapabilities(
+            receiver_type="fakerolloff", backend="fake",
+            tuning_range_hz=(0.0, 6e9),
+            sample_rates_hz=(self.sample_rate, self.sample_rate),
+            sample_rate_is_range=False, max_instantaneous_bw_hz=self.sample_rate,
+            channel_count=1, native_iq_format="complex64", native_full_scale=1.0,
+            supports_sweep=False,
+        )
+
+    def tune(self, center_freq_hz: float) -> None:
+        self._center_hz = float(center_freq_hz)
+
+    def windows(self):
+        n = self._n
+        while True:
+            spec = (self._rng.normal(0.0, 1.0, n) + 1j * self._rng.normal(0.0, 1.0, n))
+            spec *= self._mag
+            iq = np.fft.ifft(spec) * n
+            if self.dc_lin:
+                iq = iq + self.dc_lin   # constant offset -> delta exactly at this dwell's DC
+            yield IQWindow(iq=iq.astype(np.complex64), captured_at=time.time(),
+                           sample_rate=self.sample_rate, center_freq_hz=self._center_hz,
+                           receiver_type="fakerolloff", expected_samples=n)
+
+
+def _flat_region_stats(freqs: np.ndarray, row: np.ndarray, lo_mhz: float, hi_mhz: float) -> tuple[float, float]:
+    """(median_db, max_abs_deviation_db) over bins covered inside [lo, hi]."""
+    mask = (freqs >= lo_mhz) & (freqs <= hi_mhz) & np.isfinite(row)
+    vals = row[mask]
+    med = float(np.median(vals))
+    dev = float(np.max(np.abs(vals - med)))
+    return med, dev
+
+
+def test_seam_comb_fixed_by_inner_trim_and_overlap():
+    """Regression for the measured base_58.npz defect: a +7 dB, 4-bin-wide
+    comb at every step SEAM. Reproduced here with OLD stitcher parameters
+    (usable_frac=1.0, no DC guard) on a synthetic flat-floor source with a
+    realistic per-dwell roll-off + DC spur; fixed with the NEW defaults."""
+    src = _RolledOffNoiseSource(sample_rate=20e6, window_s=0.05,
+                                rolloff_db_at_0_45fs=-6.0, dc_lin=0.02, seed=7)
+    bin_hz = 500_000
+
+    # OLD behaviour: no inner trim, no overlap, no extra DC guard -- reproduces
+    # the seam pattern (edges of each 20 MHz dwell abut with zero overlap).
+    old = RetuneWelchSweep(src, step_hz=20e6, dwells_per_step=1, settle_s=0.0,
+                           fft_size=1024, usable_frac=1.0, dc_blank_bins=0)
+    freqs_old, mat_old, _ = old.sweep(LO, HI, seconds=0.0, bin_hz=bin_hz)
+    _, dev_old = _flat_region_stats(freqs_old, mat_old[0], LO + 1.0, HI - 1.0)
+    assert dev_old > 1.5, f"expected the OLD stitcher to show a seam artifact, got dev={dev_old:.2f} dB"
+
+    # NEW behaviour: inner-trim + overlap-safe stepping + DC guard -> flat.
+    new = RetuneWelchSweep(src, step_hz=20e6, dwells_per_step=1, settle_s=0.0,
+                           fft_size=1024)
+    freqs_new, mat_new, _ = new.sweep(LO, HI, seconds=0.0, bin_hz=bin_hz)
+    _, dev_new = _flat_region_stats(freqs_new, mat_new[0], LO + 1.0, HI - 1.0)
+    assert dev_new <= 0.5, f"expected a flat stitched floor, got max deviation {dev_new:.2f} dB"
+
+
+def test_step_centers_use_trimmed_interior_stride():
+    """Retune spacing is `usable_frac * step_hz`, not the full `step_hz` --
+    the mechanism that removes the seam gap (see module docstring)."""
+    src = _RolledOffNoiseSource(sample_rate=20e6, window_s=0.01)
+    sweep = RetuneWelchSweep(src, step_hz=20e6, usable_frac=0.8)
+    assert sweep.overlap_hz == pytest.approx(20e6 * 0.2)
+    centers = sweep._step_centers(0.0, 80e6)
+    spacing = np.diff(centers)
+    assert np.allclose(spacing, 20e6 * 0.8)
+
+
 LO, HI = 2400.0, 2480.0
 
 
