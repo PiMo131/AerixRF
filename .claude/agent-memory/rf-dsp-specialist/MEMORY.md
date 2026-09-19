@@ -8,3 +8,4 @@
 - [Blocker failure split (2026-09-18)](project_blocker-failure-split.md) — the wideband-blocker knee is centre-hypothesis selection, not sync/CFO/turbo.
 - [Centre-hypothesis scorer](project_centre-hypothesis-scorer.md) — zc6 not zc4 ranks centres; ranked full-sync + gated refinement fixes the wb blocker, edge de-bias rejected.
 - [Stage-1 link-signature rules](project_stage1-link-signatures.md) — Rayleigh lattice test for hop rasters, the 60 kHz centre-jitter budget, and why 2 MHz rasters and 640 ms cadence need multi-dwell.
+- [Analog 5.8 GHz FPV detector](project_analog-fpv-58.md) — grid false-match ~13 %, Band A == U-NII-3, the 10 MHz sweep-seam comb, and the duty-1.0 floor trap.
