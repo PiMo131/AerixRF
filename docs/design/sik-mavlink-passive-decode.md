@@ -158,3 +158,22 @@ classification remain available with the flag off. Video/content payloads over M
 - **RFD900x / Si446x** boards use `radio_446x.c` — every register-derived number in §1 is out of scope for them.
 - **Raster quantisation** (10 kHz hop-step units), the **NETID-seeded base offset**, `MANCHESTER`, and non-default
   `MIN_FREQ`/`MAX_FREQ`/`NUM_CHANNELS`/`AIR_SPEED` all break hardcoded values: infer, never assume.
+
+## Independent review (test-reviewer, 2026-09-19, part A) — PASS WITH CONDITIONS
+
+- 194 passed / 1 skipped (skip = pymavlink not installed, not a logic skip).
+- BER: the **asserted and documented** figure is BER < 1e-3 at 12 dB in-band SNR (noise referenced to a 2·rate_bps
+  bandwidth, i.e. Eb/N0 ≈ 15 dB; complex noise, bandwidth-normalised — verified). The "4.8e-5 at 12 dB" number
+  quoted in an earlier status report was an ad-hoc measurement from the DSP rewrite session, NOT a committed
+  assertion — treat < 1e-3 as the claim of record.
+- Third-party MAVLink payload parsing is OFF by default (`decode_third_party_mavlink`, env override, tested);
+  position/identity fields carry `retention_class=personal_7d`. Downstream *enforcement* of retention is outside
+  this module and unverified here.
+- No transmit/send/write-to-device code paths in `aerix_rf/decode/sik/` (receive-only confirmed).
+- Evidence ladder as coded: level 1 any burst; level 2 `sik_like_hopper_candidate` (raster/Rayleigh + ≥5 bursts);
+  level 3 `sik_netid_confirmed` (≥5 CRC-valid SiK frames over ≥3 channels); level 4 only with MAVLink CRC-16 +
+  CRC_EXTRA. No vendor/drone identity asserted; `netid` is a firmware config value, not an operator identity.
+- Conditions / open: (1) no negative-control test with non-SiK ISM hoppers or dense multi-emitter scenes — level 2/3
+  false-positive rate is untested; (2) thresholds (5 frames / 3 channels / 5 bursts) are design-derived, not
+  validated against a real 64 kbps SiK link; (3) everything is level-1 synthetic self-consistency until a real SiK
+  recording exists.

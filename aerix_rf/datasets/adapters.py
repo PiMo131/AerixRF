@@ -1209,14 +1209,41 @@ class RfuavAdapter:
     ) -> tuple[np.ndarray, float, Optional[float], Optional[float]]:
         raw = np.memmap(rec.source_paths[0], dtype="<f4", mode="r")
         expected_samples = int(rec.extra["sample_count"])
-        if raw.size != expected_samples * 2:
+        if raw.size % 2 != 0:
             raise ValueError(
                 f"RfuavAdapter: {rec.source_paths[0]} has {raw.size} float32 "
-                f"values, expected {expected_samples * 2} (2 * XML "
+                "values -- odd count, cannot pair into complex64 samples -- "
+                "format assumption (complex64, no header) may not hold for "
+                "this file"
+            )
+        actual_samples = raw.size // 2
+        if actual_samples > expected_samples:
+            raise ValueError(
+                f"RfuavAdapter: {rec.source_paths[0]} has {raw.size} float32 "
+                f"values ({actual_samples} complex64 samples), more than "
+                f"expected {expected_samples * 2} (2 * XML "
                 f"SampleCount={expected_samples}) -- format assumption "
                 "(complex64, no header) may not hold for this file"
             )
         iq = np.asarray(raw).view(np.complex64)
+        if actual_samples < expected_samples:
+            # A pack's last `.iq` slice legitimately covers less than the
+            # nominal ~1 s if the capture ended mid-slice (verified against
+            # 6 real slices across the corpus, all exactly a whole number of
+            # complex64 samples and all the numerically-last slice of their
+            # pack -- see prepare_full2.log / FORMAT.md). Any byte count
+            # that is not a whole number of complex64 samples, or exceeds
+            # the XML-declared count, still means the format assumption
+            # itself may not hold (raised above) -- only a clean, smaller
+            # sample count is treated as a legitimate short tail.
+            rec.extra["truncated_tail"] = True
+            rec.extra["expected_sample_count"] = expected_samples
+            rec.extra["sample_count"] = actual_samples
+            _rfuav_logger.info(
+                "RfuavAdapter: %s is a short tail slice -- %d complex64 "
+                "samples vs XML SampleCount=%d; accepted as truncated_tail",
+                rec.source_paths[0], actual_samples, expected_samples,
+            )
         return iq, rec.original_rate_hz, rec.original_center_freq_hz, rec.original_bw_hz
 
     def labels(self, rec: RecordingMeta) -> LabelsGroup:

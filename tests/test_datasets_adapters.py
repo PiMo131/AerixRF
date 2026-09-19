@@ -929,10 +929,92 @@ def test_rfuav_load_iq_round_trips_and_checks_sample_count(tmp_path):
     assert centre_hz == pytest.approx(2.45e9)
     assert bw_hz == pytest.approx(1000.0)
 
-    # Corrupt sample_count so load_iq's own byte-count check must fire
-    # rather than silently returning a truncated/misaligned array.
+    # Corrupt sample_count *smaller* than the file's actual content so
+    # load_iq's own byte-count check must fire (too many samples for the
+    # declared count) rather than silently returning a misaligned/truncated
+    # array. (A sample_count *larger* than actual is the legitimate
+    # short-pack-tail case -- see the truncated_tail tests below.)
     import dataclasses
-    bad_rec = dataclasses.replace(rec, extra={**rec.extra, "sample_count": 999})
+    bad_rec = dataclasses.replace(rec, extra={**rec.extra, "sample_count": 2})
+    with pytest.raises(ValueError):
+        adapter.load_iq(bad_rec)
+
+    # Non-multiple-of-8-bytes files (odd float32 count) are always a
+    # format-assumption failure, regardless of the declared sample_count.
+    odd_path = tmp_path / "odd.iq"
+    odd_path.write_bytes(b"\x00" * 12)  # 3 float32 values -- can't pair
+    odd_rec = dataclasses.replace(
+        rec, source_paths=(odd_path,), extra={**rec.extra, "sample_count": 999}
+    )
+    with pytest.raises(ValueError):
+        adapter.load_iq(odd_rec)
+
+
+def test_rfuav_load_iq_accepts_short_pack_tail(tmp_path):
+    """The numerically-last `.iq` slice of a pack can legitimately be
+    shorter than the XML SampleCount if the capture ended mid-slice
+    (verified: 6 real slices across the RFUAV corpus, all a whole number of
+    complex64 samples, all the last slice of their pack). load_iq must
+    accept it, use the file's actual sample count, and flag
+    ``truncated_tail`` rather than raising -- this is what crashed the full
+    `prepare` run (prepare_full2.log)."""
+
+    _build_rfuav_mirror(tmp_path, n_samples=8)
+    adapter = RfuavAdapter()
+    recs = {r.recording_id: r for r in adapter.iter_recordings(tmp_path)}
+    rec = recs["dji_testmodel/VTSBW=10/pack1_1-2s"]
+
+    import dataclasses
+    # Truncate the on-disk file to 3 complex64 samples (24 bytes, a whole
+    # multiple of 8) while the XML still declares sample_count=8.
+    truncated_path = tmp_path / "pack1_1-2s_truncated.iq"
+    full = np.fromfile(rec.source_paths[0], dtype="<f4")
+    full[: 3 * 2].tofile(truncated_path)
+    short_rec = dataclasses.replace(rec, source_paths=(truncated_path,))
+    assert short_rec.extra["sample_count"] == 8
+    assert "truncated_tail" not in short_rec.extra
+
+    iq, rate_hz, centre_hz, bw_hz = adapter.load_iq(short_rec)
+    assert iq.dtype == np.complex64
+    assert iq.size == 3
+    assert short_rec.extra["truncated_tail"] is True
+    assert short_rec.extra["expected_sample_count"] == 8
+    assert short_rec.extra["sample_count"] == 3
+    assert rate_hz == pytest.approx(1000.0)
+    assert centre_hz == pytest.approx(2.45e9)
+    assert bw_hz == pytest.approx(1000.0)
+
+
+def test_rfuav_load_iq_rejects_non_multiple_of_8_bytes(tmp_path):
+    """A byte count that is not a whole number of complex64 samples (odd
+    float32 count) is always a format-assumption failure -- never treated
+    as a short tail."""
+
+    _build_rfuav_mirror(tmp_path, n_samples=8)
+    adapter = RfuavAdapter()
+    recs = {r.recording_id: r for r in adapter.iter_recordings(tmp_path)}
+    rec = recs["dji_testmodel/VTSBW=10/pack1_1-2s"]
+
+    import dataclasses
+    odd_path = tmp_path / "pack1_1-2s_odd.iq"
+    full = np.fromfile(rec.source_paths[0], dtype="<f4")
+    full[:5].tofile(odd_path)  # 5 float32 values -- can't pair into complex64
+    odd_rec = dataclasses.replace(rec, source_paths=(odd_path,))
+    with pytest.raises(ValueError):
+        adapter.load_iq(odd_rec)
+
+
+def test_rfuav_load_iq_rejects_larger_than_expected(tmp_path):
+    """A file with *more* complex64 samples than the XML SampleCount
+    declares is a format-assumption failure, never a short tail."""
+
+    _build_rfuav_mirror(tmp_path, n_samples=8)
+    adapter = RfuavAdapter()
+    recs = {r.recording_id: r for r in adapter.iter_recordings(tmp_path)}
+    rec = recs["dji_testmodel/VTSBW=10/pack1_1-2s"]
+
+    import dataclasses
+    bad_rec = dataclasses.replace(rec, extra={**rec.extra, "sample_count": 4})
     with pytest.raises(ValueError):
         adapter.load_iq(bad_rec)
 
@@ -1027,6 +1109,35 @@ def test_rfuav_prepare_dataset_synthetic(tmp_path):
     )
     assert stats.recordings == 2
     assert stats.windows == 2
+
+
+def test_rfuav_prepare_dataset_short_pack_tail_no_crash(tmp_path):
+    """End-to-end regression for the crash in prepare_full2.log: a pack's
+    last `.iq` slice shorter than its XML SampleCount must still flow
+    through `prepare_dataset` to a (short, never padded) window instead of
+    raising and killing the whole run."""
+
+    _build_rfuav_mirror(tmp_path, n_samples=200_000, sample_rate_hz=200_000.0)
+    # Truncate the second slice on disk to ~30% of its declared length,
+    # mirroring the real pack-tail files (whole number of complex64
+    # samples, smaller than XML SampleCount).
+    tail_path = (
+        tmp_path / "rfuav" / "original" / "extracted" / "DJI TESTMODEL"
+        / "VTSBW=10" / "pack1_1-2s.iq"
+    )
+    full = np.fromfile(tail_path, dtype="<f4")
+    truncated_samples = 60_000  # complex64 samples, < 200_000 expected
+    full[: truncated_samples * 2].tofile(tail_path)
+
+    adapter = RfuavAdapter()
+    stats = prepare_dataset(
+        "rfuav", adapter, root=tmp_path, limit=None, write_iq=False, write_tensor=True
+    )
+    assert stats.recordings == 2
+    assert stats.windows == 2
+    # The truncated slice (0.3 s at 200 kHz) is shorter than the 1.0 s
+    # canonical window and must be flagged short, never padded.
+    assert stats.short_windows == 1
 
 
 # ---------------------------------------------------------------------------

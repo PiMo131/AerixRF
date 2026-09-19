@@ -42,6 +42,9 @@ and independent review before it is "done". Evidence-wording rules apply.
       canonical 15.36 — must yield identical CRC-valid frames. **Session is not on this machine.**
 
 ## Non-DJI (approved 2026-09-19)
+- [x] SiK/MAVLink passive chain built (T1–T4, synthetic level 1, 194 tests); NEXT: a real SiK recording (field, user) to
+      reach level 3/4; `detect_bursts` −6 dB edge-midpoint centre is biased ~−54 kHz on bimodal FSK spectra — the SiK
+      pipeline applies a centroid refinement; consider the same refinement option in Stage-1 for narrow FSK hops.
 - [ ] SiK/MAVLink passive telemetry decoder (GFSK demod + SiK framing + MAVLink parse) — design brief first; zero public IQ,
       needs a recorded capture (no transmit by us).
 - [ ] Analog FPV: Zenodo 19870020 chunk10 = 3 sweeps at 1240 MHz / 25 mW (1.2 GHz analog video) → validates FM-video shape
