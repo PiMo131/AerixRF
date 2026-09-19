@@ -456,3 +456,20 @@ same real hop structure as a neighbouring r = 0.989 window — r is not a reliab
 Decision: HOLD the merge; add a wideband-occupant / dominant-carrier veto to the grid path (clusters coincident
 with a ≥ 8 MHz diffuse occupant or with a near-100 % duty carrier do not count), require minimum per-channel duty
 for lattice members, re-run the 40 windows. `rc_link_family_candidate` is not blocked by this finding.
+
+### Gates (iii)/(iv) results (rf-dsp-specialist, 2026-09-19 late; full text in `stage1-c4-gate-findings-2026-09-19.md`)
+
+(iv) All 46 ambient `hopping_candidate` windows on the branch reproduced and classified. Sessions 1–4 (27 windows):
+3–4 repeat clusters on the absolute even-MHz 2 MHz grid (2432…2442 MHz, scatter ≤ 120 kHz, SNR 15–42 dB) — a
+**correct level-1 hopper label** (BLE-like morphology; identity not claimed — advertising channels and the 150–400 µs
+burst test are outside this capture's band/frame pitch). Sessions 5–6 (19 windows): band-edge lines at
+2430.88 / 2443.10 MHz (bw ≈ 0, SNR 2–3 dB, in every window) + near-edge speckle — **receiver band-edge artefacts,
+genuine FA** (2.3 % and 1.2–2.0 % per session). Per-session FA after removing correct labels: 0 / 0 / 0 / 0 / 2.3 /
+1.2 % (worst case counting UNKNOWN as FA: 5.0 / 2.5 / 6.7 / 0 / 2.3 / 2.0 %). Fix: exclude the outermost band-edge
+bins from burst admission (the sweep already trims seams; the dwell detector does not). Clean confirmation of the
+2 MHz comb as an emitter (not an LO spur) needs one ambient capture at a different LO.
+(iii) `is_unresolved_fragment` never excludes a true RC hop burst (0 % inside/outside an injected 20 MHz occupant,
+all duties). BUT the RFUAV recordings contain NO real ≥ 8 MHz active occupant once the per-bin floor is used — the
+"crowded band" in §0 was scalar-floor percolation. With a simulated occupant, a *different* mechanism,
+`is_occupancy_masked`, masks 100 % of true RC bursts inside the occupant (and 33–91 % of Futaba bursts even without
+one) → the fail-closed hazard is real and lives there. To be fixed before merge.
