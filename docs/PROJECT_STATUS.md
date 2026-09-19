@@ -1,7 +1,7 @@
 # AERIX RF — Project Status (living document)
 
 *Maintained by the architect session; updated with every commit that changes scope, plan or evidence.
-Last update: 2026-09-19. Audience: technical manager. One page; details link to the repo.*
+Last update: 2026-09-19 (afternoon). Audience: technical manager. One page; details link to the repo.*
 
 ## 1. Scope — what AERIX RF is (and is not)
 
@@ -21,10 +21,10 @@ Secondary/reference receiver: **HackRF / HackRF Pro** (the first field-tested pl
 | Goal | Success criterion | Status |
 |---|---|---|
 | G1 Trustworthy RF instrument on the E200 | live capture → self-describing session → deterministic replay; measured, not assumed, sample integrity | **Met** (2026-09-18/19) |
-| G2 DJI DroneID decode on the E200 (acceptance "A4") | CRC-valid frame captured by the E200 from a real OcuSync-2 aircraft | Software proven on real IQ; **needs an O2 aircraft** |
+| G2 DJI DroneID decode on the E200 (acceptance "A4") | CRC-valid frame captured by the E200 from a real OcuSync-2/3 aircraft | Software proven on real IQ; **next: Avata (O3+) test — checklist ready** |
 | G3 Honest detection/classification benchmark | claims backed by same-receiver positives and real ambient negatives; leakage-safe | Pipeline built; **needs the positives campaign** |
 | G4 Server integration | RF events, evidence, correlation, retention in AERIX | Unchanged from the HackRF phase; resumes after G2/G3 |
-| G5 Future: multi-receiver localisation | timestamps + loss counters available on the receiver | Not on the current firmware; **decision pending** |
+| G5 Future: multi-receiver localisation | timestamps + loss counters available on the receiver | **Available in UHD mode** (2 RX, per-packet timestamps, external clock) — trial in progress; scope decision pending |
 
 Evidence discipline (applies to every claim below): 1 RF candidate/morphology → 2 probabilistic
 classification → 3 protocol-specific evidence → 4 CRC-valid decode → 5 operator ground truth.
@@ -41,7 +41,11 @@ A stage-1 candidate is never reported as a confirmed drone.
 - **E. Research corpus** — 1,113 unique local sources indexed with evidence grades ✅.
 - **F. Positives campaign** — capture real aircraft (O2 for decode; O3/O4 for detection) on the E200 with
   an operator timeline (`docs/field/positives-protocol.md`) ⏳ next.
-- **G. Firmware trial** — second-SD-card UHD-style image (timestamps, higher rate) ⏳ approved, preparing.
+- **G. Firmware trial** — second-SD-card UHD image ✅ booted; 15.36 MS/s sc16 and 20 MS/s sc8 stream clean in
+  short runs, one 10-min soak failed (host socket buffer suspected) ⏳ needs a sysctl on the host to conclude.
+- **H. Stage-1 link-signature rules** — burst extraction + raster/period/cadence tests ✅ built; first real
+  false-alarm audit on 1,160 ambient windows: grid/DroneID/RC rules pass, `hopping` rule over-fires on Wi-Fi
+  (65 % vs 5 % budget) ⏳ rule correction in progress.
 - **Server integration** — after F.
 
 ## 4. Progress to date (what is actually proven)
@@ -58,6 +62,16 @@ A stage-1 candidate is never reported as a confirmed drone.
 the RUB-SysSec captures (Mavic Air 2, Mini 2) bit-exactly and is frozen as a regression fixture. Earlier
 (2026-09-04) a Mini 3 was decoded live with the HackRF.
 
+**UHD-mode trial (2026-09-19, second SD card, reversible):** the E200 presents as a 2-channel receiver with
+per-packet timestamps and reported overflows. 30–120 s runs: 15.36 MS/s sc16 (canonical rate, no resampling)
+and 20 MS/s sc8 clean; 20 MS/s sc16 overflows with the default 212 KB host socket buffer; one 10-minute soak
+lost the device mid-run (cause open). Decision rule unchanged: adopt only after a clean 10-minute soak with the
+host buffer raised; otherwise revert to the proven IIO path.
+
+**Decoder scope correction:** per primary sources, OcuSync 3/3+ DroneID is expected decodable (only O4 is
+encrypted). The user's Avata (O3+) is therefore a live decode-test candidate — checklist in
+`docs/field/avata-o3-decode-test.md`. Aircraft/link-generation table verified against dji.com.
+
 **Synthetic-only (level 1–2) so far:** decoder sensitivity knee (≈3 dB in-band) and its robustness to
 strong adjacent emitters; the classifier feature set's device-invariance properties.
 
@@ -72,7 +86,7 @@ positives campaign is the next step, not more training.
 |---|---|---|
 | Canonical representation | 15.36 MS/s, 1 s windows, FFT 1024, absolute dBFS | design memo + synthetic sweeps |
 | ANTSDR live profile | 12.288 MS/s default, 13.44 validated, cs16 full-scale 2048, manual gain | measured (BIST, soaks) |
-| Firmware | stay on stock IIO image; trial a UHD-style image from a second SD card (approved) | measured ceiling ≈59 MB/s; no timestamps on IIO |
+| Firmware | IIO image remains the proven production path (`antsdr_proc`, BIST gap-free); UHD image trialled from SD — decision after a buffered 10-min soak | measured (§14, §15 of the E200 brief) |
 | Loss handling | producer in its own process + exact ring accounting; rate monitor with real deficits | measured |
 | Decoder | validated on real IQ; blocker-robust via zc6-ranked centre selection | real IQ + synthetic bench |
 | Benchmark honesty | no detection-probability or cross-receiver claim yet; receiver-ID probe is a mandatory control | first results §5 of the design doc |
@@ -83,8 +97,11 @@ positives campaign is the next step, not more training.
 - First campaign measurement: the **Avata (O3) plaintext-decode test** (available). For a guaranteed O2
   reference: Mini 4K / Mini 2 SE / Mini 2 / Mini 3 non-Pro / Mavic Air 2. O4 aircraft for detection-only positives
   and the O4 CRC-identification experiment.
-- Answers: is multi-receiver/TDOA in scope (drives the firmware decision)? Field-box hardware and disk budget
-  (raw cs16 is ≈177 GB/h, so capture must be event-gated)?
+- One sudo command on this host for the UHD trial: `sudo sysctl -w net.core.rmem_max=50000000 net.core.wmem_max=50000000`.
+- Answers: is multi-receiver/TDOA in scope (now feasible in UHD mode — the main reason to prefer it)? Field-box
+  hardware and disk budget (raw cs16 is ≈177 GB/h, so capture must be event-gated)?
+- Positives campaign: the Avata test first (`docs/field/avata-o3-decode-test.md`), then the ON/OFF protocol
+  (`docs/field/positives-protocol.md`); an O2 reference aircraft (Mini 4K / Mini 2 SE / Mini 2 / Mini 3 / Mavic Air 2) if available.
 - Housekeeping: IEEE DataPort / Kaggle credentials for gated datasets; approval for the very large sets
   (DroneRFa ≈570 GB, RFUAV up to 1.3 TB).
 
@@ -99,4 +116,4 @@ positives campaign is the next step, not more training.
 `README.md` (status log) · `AERIX_RF_ANTSDR_PROJECT.md` (plan, §0 decisions/questions) ·
 `docs/design/*.md` (architecture memos) · `research/briefs/*.md` (evidence briefs) ·
 `docs/BACKLOG.md` (engineering backlog) · `docs/field/positives-protocol.md` (campaign checklist).
-Tests: 396 passing. Commits on `main`: 16 since the pivot.
+Tests: 442 passing. Commits on `main`: 30 since the pivot.
