@@ -6,3 +6,4 @@
 - [DJI generations Q1 verification 2026-09](dji_generations_q1_verification_2026-09.md) — dji.com-confirmed link-gen per aircraft; Avata=O3+ correction; Neo=O4 resolved; Mavic 4 Pro/Mini 5 Pro/Neo 2 still unverified.
 - [RC link raster facts](rc_link_raster_facts_2026_09_19.md) — DJI RC raster UNKNOWN (FCC blocked); ELRS period table; BLE/Wi-Fi discriminators; DIY-Multiprotocol PRIMARY hop/period tables (AFHDS2A/DSM/FrSky D-X)
 - [SiK Si4432 datasheet confirmation](sik_si4432_datasheet_2026_09_19.md) — AN440-confirmed sync word/CRC/deviation/rate regs; no public SiK/RFD900 IQ found
+- [Analog FPV VTX accuracy research 2026-09-19](analog_fpv_vtx_accuracy_2026-09.md) — RTC6705 ppm/BW-vs-power still open; found real analog FPV IQ dataset on Zenodo (19870020), chunk10 downloading

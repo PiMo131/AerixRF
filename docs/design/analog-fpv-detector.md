@@ -116,3 +116,41 @@ read-only: `scan/sweep.py`, `scan/candidates.py`, `detect/bursts.py`, `detect/ra
   measured occupied BW / deviation for common VTX at 25 and 600 mW (every BW number here is Carson + community tables).
 - `RESEARCH NEEDED:` does `research/library/fpv/AERIX_FPV/analog_video/sample_IQ/NOTES.md` resolve to a real downloadable IQ capture or only a recipe? Public analog 5.8 IQ would remove the field-session dependency for T1/T2.
 - Unmeasured: whether the 10 MHz seam comb is specific to `RetuneWelchSweep` or also appears in `hackrf_sweep` for this band (HackRF tiles differently) — check before trusting the seam mask. `R_shape`/duty thresholds are hypotheses; no analog FPV signal has ever been observed by this project.
+
+## Research findings 2026-09-19
+
+- **RTC6705 ppm/PLL step (τ):** no datasheet-level crystal ppm or PLL step size found, local
+  or web (datasheet PDF exists at richwave.com.tw/wildlab mirror but was not fetched this
+  pass). Local corpus (CSDN, grade PLASUIBLE/single-source, no instrument named) gives phase
+  noise (-90 dBc/Hz@100kHz, -115@1MHz) and power (+13/+2 dBm) but not frequency accuracy.
+  **Best available proxy, COMMUNITY grade, wrong chip family:** `ExpressLRS_rf_performance_measured`
+  (SX1280, not RTC6705) measured **±10 kHz at 25°C, 35–80 kHz drift across 10→50°C** between
+  two modules — order-of-magnitude only, not a substitute for RTC6705 data. Recommend τ stay
+  a conservative guess (current ±0.5 MHz is generous relative to this proxy) until an RTC6705
+  datasheet or bench measurement is obtained. **Action for RF-DSP:** fetch the RTC6705-DST-001
+  datasheet (PDF found at wildlab.org/wp-content/uploads/2015/07/RTC6705-DST-001.pdf) directly
+  if τ needs tightening — not read this pass, budget-limited.
+- **Occupied BW / deviation vs power:** no 25 mW vs 600 mW comparative measurement found,
+  local or web. Local corpus has one independent SDR measurement (batchdrake/RTL-SDR.com,
+  VERIFIED_PRIMARY for method, PLASUIBLE for generality): **~9 MHz occupied FM bandwidth**
+  for one low-power analog camera, vs the **30 MHz community channel-plan spacing** (Oscar
+  Liang, SUPPORTED/vendor-repeated, not independently measured) — these are different
+  quantities (occupancy vs raster spacing), not a power-dependent pair. No shape-ratio data
+  found either. Existing design guidance ("detect on measured occupancy, map to raster after")
+  stands; the 25↔600 mW BW-vs-power question is still open.
+- **Sample IQ NOTES.md:** confirmed recipe-only, no capture (already stated in that file).
+  **However, a real, openly-licensed capture exists and was NOT previously known to this
+  corpus:** Zenodo record 19870020, "FPV Analogue Video IQ Dataset" (pub. 2026-04-30, CC-BY-4.0),
+  HackRF One captures of active analog-VTX sweeps plus no-TX ground truth, with per-sweep
+  metadata (drone_freq, vtx_power_mw, distance_m, environment, hackrf_lna/vga, sample_rate=20
+  Msps) in `iq_recording_meta.csv`. Full dataset is 4.2 TB across 10 chunk zips (0.99–3.4 GB
+  each); only `chunk10.zip` (994.8 MB, smallest) was downloaded this pass, to
+  `~/rf-datasets/analog_fpv_public/original/` (manifest at
+  `~/rf-datasets/analog_fpv_public/manifest.md`) — download was still in progress at
+  handback (aria2c preallocates file size, so `ls -la` size is not a completion signal; check
+  `chunk10_aria2.log`). The `vtx_power_mw` column means this dataset can also answer the
+  25/600 mW BW question above once unzipped and cross-referenced, without a field session.
+  **Grade: COMMUNITY/self-published, CC-BY-4.0, not yet verified by this project as decodable.**
+  Second dataset found (Zenodo 4264467, "RF Control and Video Signal Recordings of Drones",
+  CC-BY-4.0, 8.6 GB) includes 5.8 GHz video from DJI/Yuneec models at 200 Msps but is
+  digital-link video, not analog FM — not relevant to this detector.
