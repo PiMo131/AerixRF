@@ -255,6 +255,15 @@ prints serial + position), `cap` = capture health (`ok` or `INCOMPLETE(-n)`; the
 
 ## Status
 
+- **2026-09-19 (afternoon) — Stage-1 link-signature rules live; UHD-mode trial; non-DJI ranking.** Stage-1 now
+  extracts burst events (−6 dB edge-midpoint centres) and applies raster/period/cadence tests with a controlled,
+  vendor-free vocabulary (`fhss_1mhz_grid_candidate`, `hopping_candidate`, `droneid_cadence_candidate`, …, tags
+  `wifi_beacon_like`/`ble_connection_like`); false-alarm budget met on 1,160 real ambient windows after one rule
+  correction (`docs/design/stage1-fa-budget-2026-09-19-run2.md`). The E200 booted MicroPhase's UHD image from a
+  second SD card: 2 RX channels, per-packet timestamps, reported overflows; 15.36 sc16 / 20 sc8 clean in short runs,
+  one 10-min soak failed with default host socket buffers — decision pending (`research/briefs/antsdr-e200.md` §15).
+  Non-DJI targets ranked with legal flags (`research/briefs/non-dji-targets.md`); OcuSync 3/3+ DroneID is expected
+  decodable per primary sources (Avata test checklist in `docs/field/`).
 - **2026-09-19 — producer-process backend accepted.** `--backend antsdr_proc` runs the libiio acquisition in its own
   OS process behind a shared-memory ring with exact host loss accounting. Two 600 s BIST-tone runs through the full
   pipeline (idle, and under a looping pytest load) show **0 phase discontinuities in 7.37 G samples each**, 0 host
