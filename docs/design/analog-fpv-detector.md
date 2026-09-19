@@ -32,10 +32,32 @@ Input: `(freqs_mhz, power_matrix[n_rows, n_bins] dB, Baseline)` from any `SweepS
 2. **Seam mask**: reject peaks within `±seam_guard_mhz` (0.75) of a sweep-step seam derived from the source's
    `step_hz` and band start. Mandatory for `RetuneWelchSweep` — see the §7 measurement that motivates it.
 3. **Peak pick** per row: local maxima with `Δ ≥ peak_delta_db` (start 8) and prominence `≥ 4 dB`.
-4. **Carrier estimate**: 3-point parabolic interpolation in dB on the 500 kHz grid. Budget **±250 kHz worst case,
-   ±100 kHz target** — the FM-video peak is not parabolic, so the bias must be *measured* (§8) before quoting tighter.
+4. **Carrier estimate** (CORRECTED 2026-09-19 after T1 measurement — supersedes "3-point parabolic interpolation
+   on the peak", which was wrong): the carrier is the **midpoint of the −12 dB edges of the occupied band** in the
+   baseline-differenced, 3-bin-smoothed row, each edge refined by *linear* interpolation in dB between the last
+   in-band and first out-of-band bin. Rationale: wideband FM video is not a peaked spectrum. Its strongest bins are
+   wherever the instantaneous frequency *dwells* (blanking line, sync-tip line, luma plateau); that structure is
+   several bins wide, asymmetric, and moves with picture content, so a peak-based estimator measured **0.59-0.84 MHz**
+   of error against a planted carrier on the 500 kHz grid — 2-3× the ±250 kHz budget. Sub-bin refinement belongs on
+   the *edges*, not on the peak (same edge-midpoint principle as the DroneID centroid in `detect/bursts.py`).
+   The contour level matters and was measured on four fixtures (three flat-floor, one real `base_58.npz` ambient):
+   −6/−10 dB sits *inside* the dwell structure (error up to +0.76 MHz, +0.58 MHz on the real-ambient row); −20 dB runs
+   out into the one-sided shoulder of colour-subcarrier/ramp products (+0.49 to +0.86 MHz); −12/−15 dB gives
+   **|error| ≤ 0.09 MHz**. Achieved after the fix: **−15 kHz / +75 kHz / −15 kHz / −43 kHz** on those four fixtures,
+   i.e. inside the ±100 kHz target. `carrier_edge_drop_db` (12 dB), `edge_margin_db` (4 dB) stay configurable, and
+   every record reports which estimator was used (`carrier_estimator`). Caveat: this estimator assumes the published
+   channel frequency is the **mid-band** of the emitted spectrum. That is unverified for real hardware (§11): if a
+   real VTX instead puts its blanking/residual-carrier line on the published channel, every estimate is biased by
+   ≈ +0.9 MHz (measured with `fmvideo_sim(carrier_convention="blanking")`), which would exceed τ = 0.5 MHz and
+   break grid matching. **A measured VTX spectrum is required before the ±250 kHz budget can be claimed on-air.**
 5. **Occupied BW**: −20 dB width about the peak in absolute power-over-floor, valid only when `peak_over_floor ≥
-   25 dB`, else the −10 dB width. Accept 5-9 MHz (−20 dB) / 3-7 MHz (−10 dB).
+   25 dB`, else the −10 dB width. Accept 5-9 MHz (−20 dB) / 3-7 MHz (−10 dB). Widths use the same interpolated
+   **outermost** crossings — a contiguous walk outwards from the peak stops at the first internal notch of an FM
+   spectrum and understated the width by ~1.6 MHz at −20 dB. Measured on `fmvideo_sim` (midband, default deviation
+   2.7 MHz one-sided = 5.4 MHz p-p, mid-range of §2's "4-8 MHz p-p"): raw binned profile −20 dB **5.4 MHz**,
+   −10 dB **4.5 MHz**; through the detector (smoothed) **5.86-6.30 MHz** / **3.82-5.25 MHz** — inside both windows.
+   Reading §2's 4-8 MHz as *one-sided* instead (deviation 4 MHz, 8 MHz p-p) gives 11.8 MHz at −20 dB and falls
+   outside the accepted window, so the two readings are not interchangeable; which one a real VTX follows is open.
 6. **Persistence**: same centre (±0.75 MHz) in `≥ min_sweeps` (3) consecutive rows — `base_58.npz` has `n_sweeps = 1`
    and so does *not* exercise this test. Output: `analog_video_carrier_candidate` per surviving centre.
 
