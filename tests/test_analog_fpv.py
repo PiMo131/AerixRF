@@ -142,7 +142,7 @@ def _repeat_rows(row: np.ndarray, n: int) -> list[tuple[np.ndarray, np.ndarray]]
 # --------------------------------------------------------------------------- #
 
 def test_persistent_raceband_pair_promotes_to_level2():
-    """Two co-band Raceband carriers (R5 5806, R6 5843), persistent in 5/5
+    """Two co-band Raceband carriers (R4 5769, R6 5843), persistent in 5/5
     sweeps, both promote to level 2 via the '>=2 co-band carriers' path
     (design doc S4/S9's own decisive multi-carrier case) -- not via grid
     position alone. NOTE: the task packet's own single-carrier acceptance
@@ -150,10 +150,17 @@ def test_persistent_raceband_pair_promotes_to_level2():
     gate definition ("on-grid AND shape AND persistence AND (>=2 co-band OR
     dwell-confirmed)") for a *lone* carrier with no dwell call; this test
     exercises the gate as specified using two co-band carriers instead --
-    flagged for architect/reviewer attention."""
+    flagged for architect/reviewer attention.
+
+    R4/R6 (not R5 5806) are chosen because at the measured GRID_TOL_MHZ_DEFAULT
+    (1.0 MHz) R5's 5806 MHz also falls within tolerance of Band A4 (5805 MHz,
+    U-NII-3 Wi-Fi), which correctly trips the Band-A-requires-dwell gate
+    (S4/S7) and is exercised separately by
+    ``test_band_a_carrier_needs_dwell_for_level2``; R4 5769 and R6 5843 have
+    no other band within 1.0 MHz."""
     rng = np.random.default_rng(3)
     row = _flat_floor(rng)
-    row = _embed_carrier(row, 5806.0, delta_db=30.0)
+    row = _embed_carrier(row, 5769.0, delta_db=30.0)
     row = _embed_carrier(row, 5843.0, delta_db=28.0)
     sweeps = _repeat_rows(row, 5)
 
@@ -163,20 +170,20 @@ def test_persistent_raceband_pair_promotes_to_level2():
     by_centre = sorted(cands, key=lambda c: c["centre_hz"])
     assert len(by_centre) == 2, by_centre
 
-    c5806, c5843 = by_centre
-    assert abs(c5806["centre_hz"] - 5806e6) <= 0.25e6
+    c5769, c5843 = by_centre
+    assert abs(c5769["centre_hz"] - 5769e6) <= 0.25e6
     assert abs(c5843["centre_hz"] - 5843e6) <= 0.25e6
-    assert c5806["label"] == "analog_fpv_grid_candidate"
+    assert c5769["label"] == "analog_fpv_grid_candidate"
     assert c5843["label"] == "analog_fpv_grid_candidate"
-    assert c5806["grid"] == "R" and c5806["grid_channel"] == 5
+    assert c5769["grid"] == "R" and c5769["grid_channel"] == 4
     assert c5843["grid"] == "R" and c5843["grid_channel"] == 6
-    assert "R5 5806" in c5806["consistent_with"]
+    assert "R4 5769" in c5769["consistent_with"]
     assert "R6 5843" in c5843["consistent_with"]
     for c in by_centre:
         assert 0.0 < c["grid_false_match_p"] < 1.0
         assert c["n_sweeps_present"] == 5
     # k=2 co-band tightens the false-match probability vs a lone carrier (k=1)
-    assert c5806["grid_false_match_p"] < afpv.grid_false_match_p(k=1)
+    assert c5769["grid_false_match_p"] < afpv.grid_false_match_p(k=1)
 
 
 def test_off_grid_carrier_is_level1_only():
@@ -369,3 +376,35 @@ def test_dwell_confirm_default_percentile_floor_would_fail():
 
     res = dwell_confirm(iq, fs, lo_offset_hz=lo_offset_hz)
     assert res["continuous"] is True
+
+
+def test_dwell_confirm_continuity_threshold_real_data_boundary():
+    """S5: real Zenodo 19870020 chunk10 dwells measured frac_time_occupied of
+    0.9945 and 1.0 (confirmed) with a continuous carrier; the continuity
+    criterion is >=0.98 (frac_time_threshold), not a strict ==1.0 requirement.
+    A 90 % occupancy (well below 0.98) must still fail confirmation, isolating
+    the frac_time_occupied gate from the continuous/r_shape gates (the on
+    segment stays a single >=0.5 s event in both cases)."""
+    fs = 15.36e6
+    lo_offset_hz = 3.0e6
+    duration_s = 1.0
+    n = int(fs * duration_s)
+
+    def gated(frac_on: float) -> np.ndarray:
+        iq = make_fm_video(fs, duration_s, carrier_offset_hz=-lo_offset_hz,
+                            deviation_hz=2.7e6, snr_db=30.0, seed=1)
+        off_len = int(round((1.0 - frac_on) * n))
+        if off_len:
+            iq = iq.copy()
+            iq[-off_len:] = 0.0
+        return iq
+
+    res_high = dwell_confirm(gated(0.994), fs, lo_offset_hz=lo_offset_hz)
+    assert res_high["continuous"] is True
+    assert res_high["frac_time_occupied"] >= 0.98
+    assert res_high["confirmed"] is True
+
+    res_low = dwell_confirm(gated(0.90), fs, lo_offset_hz=lo_offset_hz)
+    assert res_low["continuous"] is True
+    assert res_low["frac_time_occupied"] < 0.98
+    assert res_low["confirmed"] is False

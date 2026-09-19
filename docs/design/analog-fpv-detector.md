@@ -176,3 +176,18 @@ read-only: `scan/sweep.py`, `scan/candidates.py`, `detect/bursts.py`, `detect/ra
   Second dataset found (Zenodo 4264467, "RF Control and Video Signal Recordings of Drones",
   CC-BY-4.0, 8.6 GB) includes 5.8 GHz video from DJI/Yuneec models at 200 Msps but is
   digital-link video, not analog FM — not relevant to this detector.
+
+## Real-data check (Zenodo 19870020 chunk10, 2026-09-19)
+
+Three 32.8 ms dwells of a real 25 mW analog VTX at the published 1240 MHz (HackRF, 20 MS/s; `bench/analog_fpv_public_check.py`):
+- Spectral peak +620…+627 kHz above the published frequency; per-row −12 dB edge-midpoint carrier estimates
+  1239.18 / 1239.18 / 1240.32 MHz (1.14 MHz spread, picture-content dependent). ⇒ treat the published channel as
+  band centre ±1 MHz: `GRID_TOL_MHZ_DEFAULT = 1.0`, `DEFAULT_PERSIST_TOL_MHZ = 1.5` (adjacent channels are
+  ≥19 MHz apart, so no ambiguity). Supersedes the 0.25/0.5/0.75 MHz placeholders.
+- −6 dB bandwidth 2.8–5.1 MHz; `dwell_confirm` shape ratio 0.50–0.55; audio subcarrier detected at +6.0 MHz;
+  continuity: two rows at 1.00, one at 0.9945 — the criterion is now `frac_time_occupied ≥ 0.98`.
+- Sweep level: a self-baseline (median of rows that all contain the emitter) cancels an always-present carrier
+  → 0 candidates — baselines must be recorded WITHOUT the emitter; with a median-filter spectral floor the carrier
+  is found at 1239.56 MHz (`analog_video_carrier_candidate`). 5645–5945 MHz negative control: 0 candidates.
+Evidence: level 2 for FM-video shape/continuity on 1.2 GHz analog video from one dataset; the 5.8 GHz grid match is
+still unvalidated on air (needs another Zenodo chunk or a field sweep). Test count: 14.

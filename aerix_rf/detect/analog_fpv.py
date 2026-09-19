@@ -15,7 +15,8 @@ Two independent stages, matching the design doc:
   invalid for a duty-1 emitter), FM shape ratio and audio-subcarrier check.
 
 Every record carries ``grid_false_match_p`` (S4): 40 published channels at
-+-0.5 MHz tolerance cover ~13% of 5645-5945 MHz, so grid membership is weak
++-1.0 MHz tolerance (S11: measured VTX centre scatter, see GRID_TOL_MHZ_DEFAULT)
+cover ~27% of 5645-5945 MHz, so grid membership is weak
 evidence on its own and must always be reported as a number, not implied by
 the label. Evidence-level wording: never emit ``analog_fpv_detected`` or any
 aircraft-present/brand claim -- "consistent with the Raceband lattice" is the
@@ -68,16 +69,27 @@ GRID_DELTAS_HZ: dict[str, float] = {"A": 20e6, "B": 19e6, "F": 20e6, "R": 37e6}
 
 _CHANNELS_PER_BAND = 8
 _BAND_SPAN_MHZ = 300.0          # 5645-5945 MHz
-GRID_TOL_MHZ_DEFAULT = 0.5      # tau: VTX centre accuracy is unmeasured (S11); a placeholder budget
+GRID_TOL_MHZ_DEFAULT = 1.0      # tau: MEASURED 2026-09-19 on Zenodo 19870020 chunk10 -- real 1240 MHz
+                                 # analog VTX carrier estimates scattered 1.14 MHz across 3 rows (see
+                                 # DEFAULT_PERSIST_TOL_MHZ). 1.0 MHz covers that scatter with margin;
+                                 # adjacent published channels within a band are >=19 MHz apart (see
+                                 # GRID_DELTAS_HZ), so this cannot create cross-channel ambiguity.
+                                 # Supersedes the previous 0.5 MHz placeholder budget
 BAND_A_REQUIRES_DWELL_DEFAULT = True   # S4/S7: Band A == U-NII-3 Wi-Fi centres
 
 DEFAULT_PEAK_DELTA_DB = 8.0
 DEFAULT_PROMINENCE_DB = 4.0
 DEFAULT_SEAM_GUARD_MHZ = 0.75    # mandatory guard around RetuneWelchSweep step seams (S3.2, S7)
 DEFAULT_MIN_SWEEPS = 3
-DEFAULT_PERSIST_TOL_MHZ = 0.25   # builder-task persistence tolerance (design doc S3.6 uses 0.75 MHz
-                                 # for the same test; both are unmeasured placeholders -- see module
-                                 # docstring note in the test file / handback for the discrepancy)
+DEFAULT_PERSIST_TOL_MHZ = 1.5    # MEASURED 2026-09-19 on Zenodo 19870020 chunk10 (real 1240 MHz analog
+                                 # VTX, 3 sweeps): the per-row -12 dB edge-midpoint carrier estimate
+                                 # scattered 1239.18 / 1239.18 / 1240.32 MHz -- 1.14 MHz between rows --
+                                 # because picture content moves the FM dwell structure and the 500 kHz
+                                 # sweep grid quantises which local max is picked. At the previous 0.25
+                                 # (code) / 0.75 (design doc S3.6) the three rows never clustered and a
+                                 # strong (17-20 dB over baseline), continuously present real carrier was
+                                 # MISSED entirely. 1.5 MHz still cannot merge adjacent published channels
+                                 # (19-37 MHz apart). Supersedes both placeholders.
 DEFAULT_BW20_RANGE_MHZ = (5.0, 9.0)
 DEFAULT_BW10_RANGE_MHZ = (3.0, 7.0)
 DEFAULT_PEAK_OVER_FLOOR_FOR_BW20_DB = 25.0
@@ -98,7 +110,7 @@ def grid_false_match_p(k: int = 1, tol_mhz: float = GRID_TOL_MHZ_DEFAULT,
                         n_bands: int = len(GRID_CHANNELS_MHZ)) -> float:
     """Bonferroni false-match probability (S4) for ``k`` carriers claimed to
     sit on the SAME lattice: ``p = min(1, n_bands * p_band**k)``. ``k=1`` is
-    the single-carrier, any-of-5-bands union bound (~13% at tau=0.5 MHz)."""
+    the single-carrier, any-of-5-bands union bound (~27% at tau=1.0 MHz)."""
     p_band = _p_band(tol_mhz)
     return float(min(1.0, n_bands * (p_band ** max(1, int(k)))))
 
