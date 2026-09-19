@@ -128,19 +128,76 @@ def test_wifi_like_packets_have_no_cadence():
     assert not (det.cadence_ms is not None and 300 <= det.cadence_ms <= 1000)
 
 
+def _elrs_like_hopper(sample_rate, duration_s, *, n_channels, grid_hz=1e6,
+                       burst_bw_hz=1e6, packet_rate_hz=250.0, amp=8.0,
+                       burst_dur_s=1.5e-3, seed=7):
+    """An ELRS-like FHSS uplink: ``n_channels`` distinct, narrow (~1 MHz)
+    channels on a fixed ``grid_hz`` lattice, each channel revisited many
+    times over the window, packets emitted at a steady ``packet_rate_hz``
+    (an ExpressLRS-set rate, see ``raster.ELRS_PERIODS_S``). Unlike the old
+    ``_packets`` helper (continuous-random hop centre, essentially never
+    revisits the same channel), this is what the R4/R1 clustering rules
+    (docs/design/stage1-link-signatures.md, ``aerix_rf/detect/raster.py``)
+    are actually meant to model."""
+    rng = np.random.default_rng(seed)
+    n = int(sample_rate * duration_s)
+    iq = ((rng.standard_normal(n) + 1j * rng.standard_normal(n)) / np.sqrt(2)).astype(np.complex64)
+    channels = (np.arange(n_channels) - (n_channels - 1) / 2.0) * grid_hz
+    n_packets = int(round(duration_s * packet_rate_hz))
+    repeats = int(np.ceil(n_packets / n_channels))
+    seq = np.tile(np.arange(n_channels), repeats)[:n_packets]
+    rng.shuffle(seq)
+    seg_len = max(1, int(round(burst_dur_s * sample_rate)))
+    period_samples = sample_rate / packet_rate_hz
+    for k in range(n_packets):
+        t0 = int(round(k * period_samples))
+        seg = min(seg_len, n - t0)
+        if seg <= 0:
+            break
+        fc = float(channels[seq[k]])
+        s = rng.standard_normal(seg) + 1j * rng.standard_normal(seg)
+        f = np.fft.fftshift(np.fft.fftfreq(seg, 1 / sample_rate))
+        S = np.fft.fftshift(np.fft.fft(s))
+        S[np.abs(f - fc) > burst_bw_hz / 2] = 0
+        iq[t0:t0 + seg] += (amp * np.fft.ifft(np.fft.ifftshift(S))).astype(np.complex64)
+    return iq
+
+
 def test_hopper_is_hopping_or_grid_candidate():
     """The old power-centroid fhss_candidate is replaced by the T1/T2
     link-signature vocabulary (docs/design/stage1-link-signatures.md): a
     frequency hopper now surfaces as hopping_candidate (R4) or, if the
     channel centres happen to land on a decidable raster within this one
     window, one of the grid-raster labels (R1) -- never the removed
-    "fhss_candidate" string."""
-    det = _detect(_packets(20e6, 0.5, bw_hz=1e6, amp=8.0, hop_hz=16e6), 20e6)
+    "fhss_candidate" string.
+
+    Fixture: an ELRS-like hopper with 11 distinct 1 MHz-wide channels on a
+    1.000 MHz grid (10 MHz dwell span), ~250 Hz packet rate over a 1 s
+    window -- each channel is revisited well above R4's
+    ``HOPPING_MIN_M_REPEAT`` and the >=10-channel R1 grid floor
+    (``M_MIN_RASTER``). The old fixture (continuous-random hop centre) never
+    revisited a channel and so never exercised this clustering path."""
+    det = _detect(_elrs_like_hopper(20e6, 1.0, n_channels=11), 20e6)
     assert det.morphology in (
         "hopping_candidate", "fhss_1mhz_grid_candidate", "fhss_2mhz_grid_candidate",
         "rc_link_family_candidate",
     ), det
     assert "fhss_candidate" not in energy.MORPHOLOGIES
+
+
+def test_narrow_4channel_hopper_is_insufficient_not_hopping():
+    """A narrow hop set with only 4 distinct channels sits below R4's
+    ``HOPPING_MIN_M_REPEAT`` (5) and R1's ``M_MIN_RASTER`` (10) -- this is
+    the deliberate trade-off documented in raster.py's R4 revision:
+    single-dwell, few-channel hoppers (e.g. a DJI-RC-like link) are not
+    labelled hopping/grid from one window alone, and the module says so via
+    the ``INSUFFICIENT_CHANNELS`` tag rather than staying silent."""
+    det = _detect(_elrs_like_hopper(20e6, 1.0, n_channels=4), 20e6)
+    assert det.morphology not in (
+        "hopping_candidate", "fhss_1mhz_grid_candidate", "fhss_2mhz_grid_candidate",
+        "rc_link_family_candidate",
+    ), det
+    assert "INSUFFICIENT_CHANNELS" in det.stage1["tags"], det.stage1
 
 
 def test_narrowband_burst_is_narrowband_candidate():
