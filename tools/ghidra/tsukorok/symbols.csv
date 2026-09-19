@@ -57,18 +57,18 @@ addr,name,comment
 0x42008c40,A5133_ReadRegs,read n bytes from reg|0x40
 0x42008c88,A5133_WriteReg,write register
 0x42008cc0,A5133_ReadReg,read register (reg|0x40)
-0x42008cfc,A5133_Strobe,strobe cmd|0x80 (0x80 sleep, 0xC0 RX, 0xD0, 0xD8 per AMICCOM convention)
+0x42008cfc,A5133_Strobe,strobe cmd|0x80: 0x80 sleep 0xC0 RX 0xD0/0xD8 TX (datasheet Table 11.1)
 0x42008d40,A5133_WritePagedReg,reg 0x35 = page<<4 then reg
 0x42008d6c,A5133_TrimCalibration,CP/FT trim (reg 0x38 page 9 = 0xA0; read 8 @0x3F)
 0x42008e98,A5133_CalibrateChannelGroup,reg 0x0E=ch; reg2=0x1C; ok if bit4 of (0x25|0x26) clear
 0x42008f14,A5133_Init,ID 0xA1513300 check + register tables @3C0E3891..3C0E38CA
 0x42009108,A5133_Calibrate,reg2=0x63; CHGroup 25/75/125; FBCF reg0x23 bit4; RSSI cal regs 0x1B/0x1C
-0x420090c4,A5133_SetChannel,reg 0x0E = arg-0x5D (arg = MHz-5725 truncated)
+0x420090c4,A5133_SetChannel,reg 0x0E CHN = MHz-5725 (FRF = 5725.001 + CHN MHz)
 0x420090d8,A5133_StrobeSleep,strobe 0x80
-0x420090e8,A5133_StrobeD0,strobe 0xD0
-0x420090f8,A5133_StrobeD8,strobe 0xD8
+0x420090e8,A5133_StrobeTX_D0,strobe 0xD0 = 1101xxxx = TX mode per A5133 datasheet Table 11.1 (reg 0x3E=0)
+0x420090f8,A5133_StrobeTX_D8,strobe 0xD8 = 1101xxxx = TX mode per A5133 datasheet; used to exit RX before ADC read and for 10 ms at scan start
 0x420091bc,A5133_StrobeRX,strobe 0xC0
-0x420091cc,A5133_ReadRssiDbm,dBm = ((reg1E-cal1C)/(cal1B-cal1C))*12-80-3
+0x420091cc,A5133_ReadRssiDbm,RX strobe 150us then TX strobe then read ADC reg0x1E; dBm = ((ADC-RL)/(RH-RL))*12-83
 0x420093c8,A5133_TrackScan,f-10..f+10 MHz two passes; detect if >10 above dji_rssi_thrsh
 0x420094bc,A5133_RssiSpectrum175,5725..5899 MHz spectrum folded to 128 bins
 0x420095f8,A5133_SweepRange,raw RSSI vector over channel range

@@ -461,19 +461,42 @@ Constants: lits 0x420001dc (2.5), 0x4200016c (25), 0x420001e0/e4 (0.55), 0x42000
 `dji_alg` 1 uses `Spec_FindCandidates` (`FUN_42004acc`, params {quantile 0.4, +6 dB, ≥2 sweeps, level −97 dBm (0x9F as i8), width 20..102 bins, gap 3}) and the time-domain classifier `TimeDomain_Classify` (`FUN_4200512c`) on two 8192-sample traces; class 1 (pass) requires burst count ≥ (param 0x2C − 2) with period/duty limits from the {156, 2, 750, 32, 75, 3, 0.3, 0.9, 64, 20, 5, 5, 0.5} block.
 The "skydio" metric is the `NoiseLevelClassifier` output (80/60/40 by count of the dominant 3‑dB level > −90 dBm), compared with {100,70,60,50,40}[skydio_alg]. CONFIRMED.
 
-### 7.2 A5133 strobes and registers
+### 7.2 A5133 strobes and registers — CONFIRMED against the A5133 datasheet v0.7 (Nov 2021, supplied by the user)
 
-Web sources reachable from this environment confirm the part is AMICCOM's **A5133 5.8 GHz FSK transceiver**
-(64 control registers, 3/4‑wire SPI, 8‑bit RSSI, strobe commands; datasheet "A5133 Datasheet v0.7 (Preliminary)"
-at doc.cloudpeaks.cn — blocked by this sandbox's egress proxy, as are amiccom.com, CSDN and docplayer).
-The AMICCOM family strobe convention (confirmed from the A7105 driver header in DeviationTX):
-0x80 Sleep, 0x90 Idle, 0xA0 Standby, 0xB0 PLL, 0xC0 RX, 0xD0 TX, 0xE0/0xF0 FIFO pointer resets; register
-read flag = 0x40 (matches this firmware). Firmware use: 0x80 after every scan (sleep), 0xC0 before each RSSI
-read (RX), then 0xD8 150 µs later and again after calibration, 0xD0 once after channel-group calibration.
-0xD8 is not in the A7105 set; because it precedes the RSSI register read it is most plausibly an RX-side
-strobe of the A5133-specific table (e.g. RSSI/CCA measure or FIFO reset), **not** confirmed as TX. Still open:
-the A5133 v0.7 datasheet is required for the exact strobe table and for registers 0x1B/0x1C (RSSI calibration
-values), 0x23 (FBCF flag), 0x25/0x26 (calibration status), 0x35 (page select), 0x3F (ID).
+Datasheet facts used (§10.1, Table 10.3/11.1, §14.1, §17.1, register map):
+SPI address byte: bit 7 = 1 strobe, bit 6 = read flag (matches the firmware's `reg|0x40` reads).
+Strobes are 4-bit with A3..A0 don't-care when AFIDS = 0 and MIDS = 0 (reg 0x3E); the firmware writes reg 0x3E = 0.
+Table 11.1: 1000 Sleep, 1001 Idle, 1010 Standby, 1011 PLL, 1100 RX (LNA on), **1101 TX (PA on)**, 1110/1111 FIFO
+pointer resets. `FRF = 5725.001 MHz + CHN[7:0]·1 MHz` (reg 0x0E) — the firmware's 5725..5899 MHz plan is exact.
+Reg 0x1E: write RTH (RSSI threshold), read ADC[7:0] (8-bit RSSI, ±6 dB accuracy). Reg 0x1B read = RH, reg 0x1C
+read = RL (RSSI calibration high/low thresholds). Reg 0x23 bit 4 = FBCF (IF filter calibration fail), reg 0x25 bit 4 = VCCF
+(VCO current cal fail), reg 0x26 bit 4 = VBCF (VCO band cal fail). Reg 0x35 = RF analog test, AGT[3:0] (bits 7:4) selects
+the register page for 0x20/0x21/0x22/0x2A/0x38. Reg 0x3F = ID code. Reg 0x01 = mode control: firmware value 0x43 =
+ARSSI (auto RSSI on RX entry) + FMS (FIFO mode) + ADCM. Reg 0x03 = FIFO end pointer: 0x3F → 64-byte packets.
+Reg 0x21 page 8 = EXT2 with TPA[2:0] (PA current): firmware value 0x7C → TPA = 111 (maximum).
+Background RSSI procedure (§17.1): RX strobe, stay ≥ 140 µs, exit RX, read ADC[7:0] — the firmware's 150 µs dwell matches.
+
+Firmware strobe usage, decoded with that table:
+
+| Firmware call | Byte on wire | Datasheet meaning | Where |
+|---|---|---|---|
+| `A5133_StrobeSleep` (0x80) | 1000xxxx | Sleep | after every sweep |
+| `A5133_StrobeRX` (0xC0) | 1100xxxx | RX mode | start of each RSSI read (`FUN_420091cc`) |
+| `A5133_StrobeTX_D8` (0xD8) | **1101**1000 | **TX mode** | 150 µs after RX in every RSSI read; 10 ms before calibration (`FUN_42009108`); 10 ms at every scan start (`FUN_42009398`/`FUN_42009538`) |
+| `A5133_StrobeTX_D0` (0xD0) | **1101**0000 | **TX mode** | once after channel-group calibration at CHN 125 (5850 MHz) |
+
+Consequence: the 5.8 GHz section is **not receive-only as coded**. The firmware uses the TX strobe as its
+"exit RX" step. Each RSSI read leaves the chip in TX mode (PA enabled, TPA max) for the ~50–100 µs until the
+next RX strobe (inside the datasheet's ~120 µs TX settling/ramp-up window, so a full packet is unlikely there),
+but the two 10 ms dwells at calibration and at scan start are long enough for the FIFO-mode packet
+(preamble + ID + 64 bytes, then auto-standby) to be transmitted on the current channel — after calibration that is
+CHN 125 = 5850 MHz. Status: strobe bytes and datasheet semantics CONFIRMED; actual radiated emission is INFERRED
+and should be verified with a HackRF/E200 capture at 5850 MHz while the device starts a 5.8 GHz scan. This is
+either a firmware bug (author intended Standby 0xA0 or PLL 0xB0) or deliberate; the image contains no other TX use
+of the A5133.
+
+RSSI conversion (`A5133_ReadRssiDbm`): dBm = ((ADC − RL)/(RH − RL))·12 − 80 − 3, with RL/RH from regs 0x1C/0x1B
+after calibration; the datasheet gives no dBm formula, so the 12/−83 mapping is the vendor's own (CONFIRMED values).
 
 ### 7.3 Detector registration order (CONFIRMED, `DetectorSet_Ctor` 0x42012534)
 [0] syncword-count detector (vtable 0x3C0E6B38), [1] static table (0x3C0E6B4C), [2] cryptoorlan (0x3C0E6A3C).
@@ -525,8 +548,8 @@ channels (start + width/3 and end − width/3) pass. CONFIRMED structure, INFERR
 `FUN_42027a00` is `millis()`. All settle times quoted in §2 are therefore microseconds as stated.
 
 ### 7.8 Remaining unknowns
-1. Exact A5133 strobe/register table (the v0.7 datasheet is on hosts this sandbox cannot reach; web.archive.org
-   is also blocked here).
+None at the static-analysis level. Open verification items are hardware measurements: (a) the 5.8 GHz TX-mode
+emission described in §7.2; (b) whether the nine static sub-GHz syncwords occur in real captures.
 
 ## 8. Implications for AERIX RF (INFERRED, for the architect)
 
@@ -542,3 +565,6 @@ channels (start + width/3 and end − width/3) pass. CONFIRMED structure, INFERR
 * The ELRS logic (CAD on SF6–9 at 500 kHz, LoRa sync 0x12/0x14) is a cheap probabilistic test AERIX RF could
   emulate with a LoRa CAD-equivalent correlator on captured IQ, but it is not identification.
 * Nothing here supports a deterministic decoder; the device stores only the first 0x16 bytes of a packet.
+* Verification task for the hardware side: capture 5850 MHz (and a 5725–5899 MHz sweep) with the HackRF while the
+  Tsukorok starts a 5.8 GHz scan, to confirm or refute the A5133 TX-mode emission (§7.2). If confirmed, the device
+  must not be treated as a silent reference receiver during AERIX RF field tests at 5.8 GHz.
