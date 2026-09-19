@@ -188,3 +188,10 @@ classification remain available with the flag off. Video/content payloads over M
 - Robustness (`decode_sik_window`, fixture): pure noise ×3 seeds → 0 bursts, 0 CRC-valid frames; CFO ±20 kHz and
   rate ±2 % → 40/40 CRC-valid, NETID 25, unchanged. No breaking point located (larger sweep not run).
 - Gap: no wideband OFDM/Wi-Fi waveform simulator in the repo → false-CRC-under-wideband-interferer untested.
+
+## Independent verification of hop_map() (test-reviewer, 2026-09-19) — PASS
+
+Fresh C reimplementation typed from `freq_hopping.c` (gcc, 8051 integer widths) vs `raster.py::hop_map()`:
+0/410 mismatches (N∈{10,50}, seeds {0,1,25,4242,65535} + 200 random each); `hop_map(25,10)==[0,9,5,2,6,7,4,3,8,1]`;
+16-bit seed wrap (`hop_map(65536,n)==hop_map(0,n)`) faithful; `_hop_maps_all_seeds` == scalar for 1000 checks.
+Still outstanding: validation against a running SiK radio / real capture with known NETID (level 3/4 conversion).
