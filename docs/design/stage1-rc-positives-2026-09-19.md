@@ -420,7 +420,7 @@ the branch; merge criteria: ambient hopping ≤ ~1.5 %, control ≤ 1 %, level-1
 | main (C1–C3 + C5) | 30/31 | 2 / 0 (1 model) | withheld (G1) | 0 | 11 (0.95 %) |
 | branch fix 1 (594eed9) | 25/31 | 9 / 2 (3 models) | 22 (6 models) | 4 | 16 (1.38 %) |
 | branch fix 2, looks=8 (b2bbc1f) | 28/31 | 9 / 1 (2 models) | 21 (5 models) | **12** | 39 (3.36 %) |
-| branch fix 2, looks=1 (0125deb) | pending | pending | pending | pending | 46 (3.97 %) |
+| branch fix 2, looks=1 (0125deb) | 28/31 | 11 / 0 (3 models) + 9 rc_link_family full-band | 20 (7 models) | **12** | 46 (3.97 %) |
 
 Grid hits at 1024-pt full band are resolution-limited by definition (bin 97.7 kHz > Δ/20) and are shown only
 because the branch predates the C5 guard; treat them as "the lattice statistic exceeded threshold", not as grid
