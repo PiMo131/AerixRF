@@ -510,6 +510,21 @@
       "preprocessing_status": "raw session directories only (as produced by AERIX capture pipeline); not converted to a separate prepared/ format",
       "notes": "Only Tier-D (real-receiver negative-class) dataset AERIX currently has. Preserved 2026-09-18 from an ephemeral session-scoped scratchpad directory that would otherwise have been lost; see SOURCE.md for full per-session breakdown, the cs8-vs-cs16 smoke-test format flag, and the known ~5% sample-loss issue on the two earlier 600s soak runs. Afternoon 2026-09-18 pass added soak600_default_noiq and soak600_k32_4m_iq (both loss-free by ground truth, both include a receiver_readback block confirming live AD9361 config: gain 40dB manual, rf_bandwidth 10MHz, 12.288 MS/s, LO ~2437MHz, port A_BALANCED) plus sweep baselines (sweeps_2026_09_18/base_24.npz, base_58.npz). Do not describe any Stage-1 detection in this set as a confirmed drone - ground truth is 'no drone present' for every session.",
       "local_path": "aerix_antsdr_ambient_2026_09_18"
+    },
+    {
+      "dataset_id": "rfuav_dji_subset",
+      "dataset_name": "RFUAV - DJI models subset (curated by research-librarian)",
+      "source": "Hugging Face kitofrank/RFUAV, top-level per-model .rar files",
+      "license": "Apache 2.0",
+      "access_status": "open",
+      "download_status": "in_progress",
+      "size_expected": "~42.98 GB (5 files: DJI AVATA2 11.41GB, DJI FPV COMBO 15.00GB, DJI MAVIC3 PRO 5.16GB, DJI MINI3 6.48GB, DJI MINI4 PRO 4.95GB)",
+      "size_downloaded": "in progress, started 2026-09-19 via detached aria2c (pid varies, see ~/rf-datasets/manifests/rfuav_dji_subset_download.log)",
+      "signal_format": "raw per-model .rar archives (NOT spectrogram-only despite HF dataset-card 'imagefolder' framing; internal IQ format/sample rate not yet verified - first task once extracted)",
+      "drone_models": "DJI Avata 2 (O4, Med confidence), DJI FPV Combo (O3, Low-Med confidence - not independently confirmed), DJI Mavic 3 Pro (O3, Med), DJI Mini 3 (ambiguous - non-Pro vs Pro not disambiguated by label, Low confidence on generation), DJI Mini 4 Pro (O4, Med)",
+      "center_frequency_bands": "not confirmed this pass - needs extraction + read",
+      "curation_rationale": "Full RFUAV top-level raw set is 36 files / 109.2 GB (measured via HF API tree listing this pass), exceeding the 100GB budget. Curated to the 5 DJI files (~43GB) as highest priority for AERIX's O3/O4 overlap probe. Remaining 31 RC-transmitter-vendor files (FlySky/FrSky/Futaba/JR Propo/Jumper/RadioMaster/Radiolink/SIYI/Skydroid/WFLY/Yunzhuo/Herelink/Devention/Dautel, ~66GB) documented as a fast-follow in USER_TODO.md, not started.",
+      "related_brief": "research/briefs/datasets-and-signatures-plan.md"
     }
   ]
 }

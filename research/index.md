@@ -39,6 +39,14 @@ Each row is a cluster of same-topic CSDN articles (author-scraped blog posts, Ch
 | IQTLabs/RFClassification, Olafseisler/dji-drone-detector | — | code repositories | RF classification, detection | Referenced by project | Not present in local corpus (`research/library/`); GitHub-only | Referenced by project only | — |
 | Datasets referenced inside this corpus (DroneRFa 573.65 GB, RFUAV 281.6 GB, DroneRF_AlSad, DeepAoANet IQ, RadSeg, IQ_dataset_generation) | 2026-09-08 pointers captured | dataset pointers + 1 small mirrored code repo (`DroneRF_AlSad`, incl. LabVIEW acquisition project) | datasets | Ground truth for testing detection/classification/DOA claims above | See `briefs/rf-datasets.md` (dataset-librarian) | Pointers only, no bulk data downloaded by this pass | `briefs/rf-datasets.md` (dataset-librarian, owns `research/datasets/*`) |
 
+## Analyst briefs (not librarian-owned)
+
+| Brief | Owner | Content |
+|---|---|---|
+| `briefs/dji-generations-and-o3o4-identification.md` | `rf-protocol-analyst` (2026-09-19) | DJI consumer aircraft 2018-2026 ↔ OcuSync generation ↔ DroneID decodability, graded A-FIELD/A-IQ/B-VENDOR/C-COMMUNITY/D-UNVERIFIED; O3/O4 burst identification without payload decode; campaign measurement list. **Contains B-VENDOR rows needing primary DJI-spec confirmation — see its research-gaps section.** |
+
+| Datasets-and-signatures engineering brief (this pass) | 2026-09-19 | synthesis (dataset table + corpus signature table) | datasets, RFUAV, ExpressLRS, SiK, DroneID, Stage-1/2 rules | Answers "what more can we do with CSDN + public datasets" for two concrete uses: Stage-2 classifier training-set recommendation + receiver-ID probe design; hardware-neutral Stage-1/2 signature table with PRIMARY/COMMUNITY grading | Mixed — see brief for per-row grade | RFUAV HF file listing fetched+measured directly (109.2GB/36 files); ExpressLRS FHSS.cpp/.h and GENERIC_HOPPING_FEATURES.md/NON_DJI_POSITION_MATRIX.md read directly; RFUAV DJI 5-model subset (~43GB) download started this pass into `~/rf-datasets/rfuav/original/` | `briefs/datasets-and-signatures-plan.md` |
+
 ## Librarian bootstrap status
 
 - Local corpus (`AERIX_RF_CSDN.zip`, `AERIX_RF_CSDN_ENRICHED.zip`, `AERIX_FPV.zip`) inventoried, hashed, deduplicated, extracted to `research/library/{csdn,csdn_enriched,fpv}/` (gitignored) — 2026-09-18.

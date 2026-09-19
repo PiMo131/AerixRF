@@ -15,4 +15,4 @@ On 2026-09-18 the user redefined the roadmap: ANTSDR E200 (AD9361) is now the PR
 - C: `research/briefs/rf-datasets.md` dataset table + engineering literature review.
 - D: dataset normalization plan — must follow A3, never destroy originals, split by recording/device not random frames.
 - E: CSDN/local research corpus inventory → `research/index.md`.
-Keep DSP/classify/decode hardware-neutral; HackRF must keep working. See [[host-environment-2026-09]] and [[user-directive-style]].
+User answers 2026-09-19: 2nd-SD-card image trial APPROVED (persistent 2R2T NOT approved); both bands equally important; HackRF 2026-09-04 sessions NOT retrievable (Tier C blocked until side-by-side capture); user will have O3/O4 aircraft, O2 uncertain; wants more use of CSDN corpus + public datasets. Keep DSP/classify/decode hardware-neutral; HackRF must keep working. See [[host-environment-2026-09]] and [[user-directive-style]].

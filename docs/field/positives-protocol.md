@@ -4,6 +4,13 @@ Purpose: capture DJI aircraft (O2 if available; O3/O4 for detection/classificati
 ONE continuous session per band so positives and negatives share room, antenna, front-end state and time.
 Labels come ONLY from the operator timeline (evidence level 5). Never from detections.
 
+## Priority measurements (from `research/briefs/dji-generations-and-o3o4-identification.md`)
+1. O3 plaintext test with the Avata: dwell at 2400–2412 MHz (never captured before) and the raster centres
+   2414.5/2429.5/2444.5/2459.5 MHz, then 5.8 GHz; accept = ≥1 CRC-valid frame with a plausible device_type.
+2. O4 transport-to-CRC on any O4 airframe: ZC hit rate vs O2 reference, ≥20 frames with crc_byte==crc_calc,
+   payload failing a plaintext check (entropy > 7.5 bits/byte, no ASCII serial).
+3. Per-generation link morphology (occupied BW, burst duration/period, hop raster, band; idle/video/flight).
+
 ## Before
 - Backend: `--backend antsdr_proc` (producer process), profile default (12.288 MS/s, 10 MHz, cs16, manual 40 dB).
 - Session root on NVMe, e.g. `~/rf-sessions/positives_<date>/`. IQ ON (`--max-gb 200`).

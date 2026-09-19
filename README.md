@@ -135,8 +135,9 @@ Decisions we made and why:
    it. The sweep locator averages many sweeps (in linear power — single-shot is too noisy) and
    differences against a baseline to point the box at the right channel.
 
-9. **Decode scope is honest.** Only OcuSync ≤ 2.0 is decodable (O3/O4 encrypted; O4 gives a
-   session hash only). The front end is verified against *synthetic* bursts, not yet a real
+9. **Decode scope is honest.** OcuSync 2 DroneID is decodable (proven on real IQ); OcuSync 3/3+ is
+   expected decodable per the research corpus but untested by us; O4 encrypts the payload (any "session
+   hash" claim is unverified). See `research/briefs/dji-generations-and-o3o4-identification.md`. The front end is verified against *synthetic* bursts, not yet a real
    capture — flagged in `decode/droneid.py`.
 
 ---

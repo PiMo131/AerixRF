@@ -8,7 +8,7 @@ Last update: 2026-09-19. Audience: technical manager. One page; details link to 
 AERIX RF is the **passive, receive-only RF/SDR** side of AERIX drone detection. AERIX's ESP-based
 receivers hear Open Drone ID broadcasts; AERIX RF covers what they cannot: DJI OcuSync-family links,
 other control/video links, analog and digital FPV. It **detects** RF activity, **classifies** it, and
-**decodes** where the protocol allows (today: DJI DroneID on OcuSync 2 aircraft).
+**decodes** where the protocol allows (proven: DJI DroneID on OcuSync 2; OcuSync 3/3+ expected decodable, untested; O4 payload encrypted).
 
 It never transmits, jams, spoofs, deauthenticates or interrogates. Retention and privacy rules are
 enforced at ingest (decoded operator positions expire after 7 days).
@@ -80,8 +80,9 @@ positives campaign is the next step, not more training.
 ## 6. Open items, risks, needs
 
 **Needs from the team**
-- An **OcuSync-2 aircraft** (e.g. Mini 2 / Mini 2 SE / Mini 3 non-Pro / Mavic Air 2) for the decode acceptance;
-  O3/O4 aircraft (available) for detection/classification positives.
+- First campaign measurement: the **Avata (O3) plaintext-decode test** (available). For a guaranteed O2
+  reference: Mini 4K / Mini 2 SE / Mini 2 / Mini 3 non-Pro / Mavic Air 2. O4 aircraft for detection-only positives
+  and the O4 CRC-identification experiment.
 - Answers: is multi-receiver/TDOA in scope (drives the firmware decision)? Field-box hardware and disk budget
   (raw cs16 is ≈177 GB/h, so capture must be event-gated)?
 - Housekeeping: IEEE DataPort / Kaggle credentials for gated datasets; approval for the very large sets
