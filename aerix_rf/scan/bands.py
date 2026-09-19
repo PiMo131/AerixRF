@@ -20,6 +20,12 @@ BANDS: dict[str, tuple[float, float]] = {
     "5.8": (5725.0, 5875.0),   # 5.8 GHz ISM: DJI O3/O4, analog FPV video
     "5.2": (5150.0, 5350.0),   # U-NII-1/2A: DJI O4 5.1 GHz mode (region dependent)
     "900": (900.0, 930.0),     # 915 MHz ISM: long-range control links (crossfire, ELRS)
+    # SiK/MAVLink sub-GHz telemetry dwells (docs/design/sik-mavlink-passive-decode.md
+    # S2 "Dwell"); these are the full SiK board default freq_min/freq_max ranges,
+    # not just the ISM sub-band, so the whole default hop set is in view.
+    "sik915": (915.0, 928.0),   # US/AU board default; centre 921.5, 50-ch/250 kHz raster
+    "sik868": (868.0, 870.0),   # EU board default; centre 869.0, 10-ch raster
+    "sik433": (433.05, 434.79),  # 433 board default; centre 433.92, 10-ch raster
 }
 
 _RANGE_RE = re.compile(
