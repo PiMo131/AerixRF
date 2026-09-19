@@ -252,6 +252,11 @@ prints serial + position), `cap` = capture health (`ok` or `INCOMPLETE(-n)`; the
 
 ## Status
 
+- **2026-09-19 — producer-process backend accepted.** `--backend antsdr_proc` runs the libiio acquisition in its own
+  OS process behind a shared-memory ring with exact host loss accounting. Two 600 s BIST-tone runs through the full
+  pipeline (idle, and under a looping pytest load) show **0 phase discontinuities in 7.37 G samples each**, 0 host
+  drops. This is now the recommended ANTSDR backend; the in-process `antsdr_iio` remains as reference. Details:
+  `research/briefs/antsdr-e200.md` §14.2, design in `docs/design/antsdr-backend.md` §T7.
 - **2026-09-18 (late) — silent loss measured.** AD9361 BIST tone through the production buffering, 600 s per run:
   12.288 and 13.44 MS/s gap-free (0 discontinuities in 7,031 / 7,690 buffers); 15.36 MS/s broken (ratio 0.50);
   in-process (GIL) contention catastrophic (ratio 0.41) while 12 separate busy processes cause zero loss — the

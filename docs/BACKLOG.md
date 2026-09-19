@@ -82,7 +82,7 @@ and independent review before it is "done". Evidence-wording rules apply.
       listing; an earlier "orphan" was a pgrep self-match plus one stale fake-iio test process). Still add
       `prctl(PR_SET_PDEATHSIG)` + a consumer-heartbeat timeout so a crashed consumer can never leave a producer
       holding the IIO buffer; test by killing the parent.
-- [ ] **T7 producer process** (from §14.1: in-process GIL contention is THE loss mechanism; OS contention causes none):
+- [x] (done 2026-09-19, accepted §14.2) **T7 producer process** (from §14.1: in-process GIL contention is THE loss mechanism; OS contention causes none):
       run the libiio producer in its own OS process with a shared-memory ring + per-chunk header; design in
       `docs/design/antsdr-backend.md` (hardware-architect, 2026-09-18). Acceptance: BIST-verified zero gaps with a
       deliberately slow consumer and under pytest-style load.

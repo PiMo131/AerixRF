@@ -9,6 +9,8 @@ E200 at `ip:192.168.1.10` (host 192.168.1.20 via nmcli profile `antsdr-e200-stat
 
 BIST tone test 2026-09-18 (AD9361 `bist_tone` debug attr, 600 s, production-like 8×1M buffering, idle host): 12.288 MS/s → 7,031 buffers, **0 gaps** (no phase jumps, none at buffer boundaries), ratio 0.99989. 13.44 MS/s idle: 7,690 buffers, 0 gaps (validated profile). 15.36 idle: ratio 0.50, 2.1 M jumps (broken). 12.288 under IN-PROCESS GIL contention: ratio 0.41, 8.8 M mid-buffer jumps (catastrophic); genuine multi-core OS contention unmeasured (earlier pytest-load soak: ≈5 %). See brief §14. 12.288 stays default; 13.44 is a validated alternative; OS-level contention (12 separate busy processes, nice 0) causes ZERO loss (§14.1); the mechanism is in-process GIL sharing between the libiio producer thread and the DSP consumer ⇒ architectural fix = producer in its own OS process (shared-memory ring); host-load rule stays as prudence only.
 
+T7 ACCEPTED 2026-09-19: `antsdr_proc` (producer in its own process + shm ring) — 2×600 s BIST runs, idle and under pytest load, 0 phase jumps in 7.37 G samples each, host loss 0. Use `--backend antsdr_proc` for all future ANTSDR captures. Reminder: always verify `bist_tone`=0 after any BIST work (an agent died before its reset once).
+
 **Why:** These numbers drove the canonical-rate decision (must be ≤ ~14 MS/s on IIO path) and the firmware question.
 
 **How to apply:** Re-measure if firmware or libiio version changes. Any claim of "ANTSDR 20 MS/s" is false on this image. Firmware switches and U-Boot env changes are user-approval gates. Brief: `research/briefs/antsdr-e200.md`.

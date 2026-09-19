@@ -201,3 +201,51 @@ intercepting proxy that relays to the real server) resolves this:
   fully restored; verified by before/after diff.
 - `current_mode` read 3 then 2 across power cycles; left as-is (device-managed
   runtime state), not rewritten.
+
+---
+
+## 11. Firmware obtained and analysed (2026-09-18, update)
+
+The firmware image was obtained via operator-run active TLS interception of the
+device's own OTA on the operator's network (the device does **not** validate the
+server certificate — plain Arduino OTA, no secure-boot/flash-encryption). The
+OTA is a JSON POST to `/detector-server/activation/upgrade` with a **hard-coded
+static bearer token** (same on every unit); the server replies with a pre-signed
+AWS S3 URL to the image. Image: `tsukor_s3v4_5.5.12_en.bin`, 1,182,928 bytes,
+valid ESP32-S3 app image, Arduino-ESP32 / ESP-IDF v4.4.7, v5.5.12.
+
+**Sensitive values (kept out of this file):** the static update bearer token and
+the S3 access-key-id are recorded only in the local capture dir, not in the repo.
+
+### Detection engine (from firmware)
+
+RadioLib-style scanning (`LoraScan`, `BLoraScan`, `BRadio`) plus a second sub-GHz
+path (`A5133DroneSignalScan`). Per-target algorithms:
+
+| Target | Method (firmware evidence) |
+|---|---|
+| DJI | "paranoid scan", 5.8 GHz, signal-width + RSSI (`dji_alg`, `dji_sig_width`, `dji_qblock`, `dji_scan2`) |
+| Zala / ZalaLancet | SX1280 2.4 GHz video scan, signal-history accumulator |
+| Orlan / Orlan+S / "Cryptoorlan" | syncword-based (`cryptoorlan: adding syncword %x at %dmhz`), syncword-count detector |
+| ELRS | SF-based (`elrs24`, `ELRS freq=%d, sf=%d, rssi=%d`) |
+| Eleron, FPV | dedicated paths |
+
+Tunable NVS/config keys: `freq1_start..freq3_end`, `bitrate_first..forth`,
+`alarm_{lora,prmbl,rssi,track}_{cnt,frq,len}`, `fsk_config`, `dji_*`.
+
+### Notable capability: ATAK / CoT output
+
+The firmware emits **Cursor-on-Target (CoT) XML** events
+(`<event version="2.0" type="u-d-c-c">` with lat/lon, callsign, "Detected", and
+100–800 m range-ring ellipses) — i.e. it can feed detections directly into
+**ATAK**. This makes the device a networked sensor node, not just a local alarm.
+
+### Relevance to AERIX RF (updated)
+
+The firmware confirms the earlier inference: this is a multi-radio, per-target
+**syncword/bitrate/SF matching** detector. Concrete reusable intelligence for our
+passive detection: the target taxonomy (DJI 5.8/2.4, Zala/Lancet, Orlan family
+via syncwords, ELRS by SF, Eleron, FPV) and the parameterisation approach
+(3 freq windows × 4 FSK bitrates × 2 SFs + per-target syncword tables). Evidence
+level: this is vendor-implementation intelligence (how one fielded detector
+works), still to be validated independently before adoption.

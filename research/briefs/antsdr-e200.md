@@ -280,3 +280,23 @@ unrelated host load remains a secondary risk only insofar as it could exhaust to
 *all* processes including the producer's own process at very high load — untested at saturation levels
 above 12/24 cores, and not tested at rates above 12.288 MS/s under load. `bist_tone` confirmed reset to
 `0 0 0 0` and ambient RSSI 96.75 dB confirmed after all runs.
+
+## 14.2 T7 producer-process acceptance (2026-09-18, analysed 2026-09-19)
+
+`--backend antsdr_proc` (libiio producer in its own OS process, shared-memory ring, exact host loss
+accounting), 12.288 MS/s default profile, cs16 to NVMe, full Stage-1/2/3 pipeline, AD9361 BIST tone
+injected (mode 2, rate/32); offline phase-continuity analysis over all 600 saved one-second files per run
+(7,372,800,000 samples each), including across file boundaries.
+
+| Run | Host load | Windows | Phase jumps interior / boundary | host_dropped | overruns | ratio | rate_warnings | end_reason |
+|---|---|---|---|---|---|---|---|---|
+| t7c_a_idle | idle | 600/600 | **0 / 0** | 0 | 0 | 1.0001 | 0 | completed |
+| t7c_b_load | `pytest tests/test_decode.py tests/test_features_v2.py` looping in a separate process for the whole run | 600/600 | **0 / 0** | 0 | 0 | 1.0000 | 0 | completed |
+
+Verdict: ACCEPTED. The producer-process backend is gap-free through the whole pipeline both idle and
+under the pytest-style load that cost the in-process backend ≈5 % (§14 soak). Host-side loss accounting
+is exact (0 reported, 0 measured). `antsdr_proc` becomes the recommended ANTSDR backend; `antsdr_iio`
+(in-process) stays as a fallback/reference. Caveats: BIST bypasses the analog front end (no clipping/AGC
+exercised); `bist_tone` was found still enabled after the runs because the measuring agent died before
+its reset step — reset manually and verified (`0`, ambient RSSI normal). Producer PDEATHSIG/heartbeat
+hardening is still in the backlog.
