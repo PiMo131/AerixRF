@@ -88,6 +88,9 @@ and independent review before it is "done". Evidence-wording rules apply.
 - [ ] Locate data hosts for CageDroneRF and UAVSig.
 
 ## Receiver / sessions
+- [ ] `RetuneWelchSweep` stitching leaves a +7 dB comb (4 bins) at every 10 MHz step seam (measured in
+      `sweeps_2026_09_18/base_58.npz`) — coincides with the FPV Band-A lattice. Fix: overlap steps and trim/weight
+      passband edges; synthetic test: flat noise floor across steps → no seam. Until then FPV detection masks ±0.75 MHz.
 - [ ] `producer_main` robustness: live `antsdr_proc` runs DO terminate the producer on completion (verified by process
       listing; an earlier "orphan" was a pgrep self-match plus one stale fake-iio test process). Still add
       `prctl(PR_SET_PDEATHSIG)` + a consumer-heartbeat timeout so a crashed consumer can never leave a producer

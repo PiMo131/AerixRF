@@ -42,7 +42,7 @@ from typing import Any, Optional
 
 import numpy as np
 
-from .shmring import FLAG_RETUNE, STATE_ERROR, STATE_RUNNING, STATE_STOPPED, ShmRing
+from .shmring import FLAG_RESTART, FLAG_RETUNE, STATE_ERROR, STATE_RUNNING, STATE_STOPPED, ShmRing
 from .stream import raw_clip_stats
 
 log = logging.getLogger("aerix.rf.sdr.producer_main")
@@ -181,6 +181,58 @@ class AntsdrIioProducerSource:
         self.device.close()
 
 
+class UhdProducerSource:
+    """Adapts :class:`~aerix_rf.sdr.uhd_device.UhdDevice`'s device-paced
+    ``recv_chunk`` to this module's ``read_chunk(index)`` shape.
+
+    Like ``AntsdrIioProducerSource``, this source is device-paced
+    (``recv_chunk`` blocks until it has assembled a full chunk), so ``run()``
+    skips its wall-clock schedule for this source too (see ``device_paced``
+    in ``run()``).
+
+    Sets ``self.device_time_ns`` / ``self.gap_samples`` after every
+    ``read_chunk`` call -- generic, additive hooks ``run()`` checks via
+    ``getattr(..., default)`` for EVERY source (a no-op for
+    ``SyntheticSource``/``AntsdrIioProducerSource``, which never set them),
+    so the device time_spec can flow into the ring's ``t_mono_ns`` field
+    (repurposed for this backend only -- see ``run()``'s comment) and an
+    UHD-reported overflow gap can flow into ``sample_index`` EXACTLY, without
+    changing the ``read_chunk(index) -> raw | None`` contract other sources
+    rely on.
+    """
+
+    def __init__(self, device: "UhdDevice", *, chunk_samples: int) -> None:  # noqa: F821
+        self.device = device
+        self.center_freq_hz = device.center_freq_hz
+        self.sample_rate = device.sample_rate
+        self.chunk_samples = int(chunk_samples)
+        self.device_time_ns: Optional[int] = None
+        self.gap_samples: int = 0
+        self.device.start()
+
+    def read_chunk(self, index: int) -> "np.ndarray":  # noqa: ARG002 -- index unused, device-paced
+        try:
+            raw = self.device.recv_chunk(self.chunk_samples)
+        except Exception as exc:  # noqa: BLE001 -- any uhd-side failure means the device is lost
+            raise DeviceLostError(str(exc)) from exc
+        self.device_time_ns = self.device.last_device_time_ns
+        self.gap_samples = self.device.last_gap_samples
+        return raw
+
+    def readback(self) -> dict:
+        rb = dict(self.device.readback)
+        rb["device_overflows"] = self.device.device_overflows
+        return rb
+
+    def tune(self, center_freq_hz: float) -> dict:
+        rb = self.device.tune(center_freq_hz)
+        self.center_freq_hz = center_freq_hz
+        return rb
+
+    def close(self) -> None:
+        self.device.close()
+
+
 def build_source(args: argparse.Namespace):
     if args.source == "synthetic":
         return SyntheticSource(
@@ -199,6 +251,23 @@ def build_source(args: argparse.Namespace):
             gain_mode="manual", gain_db=40.0, buffer_samples=args.chunk_samples,
         )
         return AntsdrIioProducerSource(device)
+    if args.source == "uhd":
+        from .uhd_device import UhdDevice
+
+        if getattr(args, "fake_uhd", False):
+            from ._fake_uhd import build_fake_uhd
+            import sys as _sys
+            _sys.modules["uhd"] = build_fake_uhd(
+                overflow_after=args.fake_uhd_overflow_after,
+                gap_samples=args.fake_uhd_gap_samples,
+                sample_rate=args.rate,
+            )
+        device = UhdDevice(
+            addr=args.uhd_addr, sample_rate=args.rate, center_freq_hz=args.center,
+            gain_db=args.uhd_gain_db, bandwidth_hz=args.uhd_bandwidth_hz,
+            antenna=args.uhd_antenna,
+        )
+        return UhdProducerSource(device, chunk_samples=args.chunk_samples)
     raise ValueError(f"unknown --source {args.source!r}")
 
 
@@ -371,6 +440,19 @@ def run(args: argparse.Namespace) -> int:
                 break
             index += 1
             ring.heartbeat(STATE_RUNNING)
+            # Generic, additive hooks: only UhdProducerSource sets these today
+            # (getattr(..., default) is a no-op for SyntheticSource /
+            # AntsdrIioProducerSource, which never do) -- see its docstring.
+            gap_samples = getattr(source, "gap_samples", 0)
+            if gap_samples:
+                # An UHD-reported overflow's EXACT sample loss, attributed
+                # BEFORE this chunk: advances the sample counter without a
+                # slot write, exactly like the `raw is None` dropped-chunk
+                # gap above, so the consumer's existing sample_index-gap
+                # accounting (process_source.py's `producer_gap`) picks it up
+                # unchanged.
+                next_sample_index += gap_samples
+                source.gap_samples = 0
             if raw is None:
                 # Dropped chunk: no slot written, but the sample counter still
                 # advances so the gap is visible via `sample_index` even though
@@ -382,11 +464,22 @@ def run(args: argparse.Namespace) -> int:
                 state["retune_pending"] = False
                 center = state["center_freq_hz"]
                 epoch = state["meta_epoch"]
+            if gap_samples:
+                flags |= FLAG_RESTART
             clip_count, peak_abs, _ = raw_clip_stats(raw, full_scale)
+            # `t_mono_ns` is repurposed for a device-timestamped source
+            # (UhdProducerSource) to carry the device's own time_spec in ns
+            # instead of this process's wall clock -- see
+            # process_source.py's `_read_loop`, which only reinterprets it
+            # that way for `source_type == "uhd"` (every other source still
+            # gets ShmRing.write_chunk's own `time.monotonic_ns()` default,
+            # since `device_time_ns` is `None` for them).
+            device_time_ns = getattr(source, "device_time_ns", None)
             ring.write_chunk(
                 raw, sample_index=next_sample_index, flags=flags,
                 center_freq_hz=center, clip_count=clip_count,
                 peak_abs=float(peak_abs), meta_epoch=epoch,
+                t_mono_ns=device_time_ns,
             )
             next_sample_index += chunk_samples
     except Exception as exc:  # noqa: BLE001
@@ -413,7 +506,7 @@ def run(args: argparse.Namespace) -> int:
 def parse_args(argv: Optional[list] = None) -> argparse.Namespace:
     p = argparse.ArgumentParser(prog="python -m aerix_rf.sdr.producer_main")
     p.add_argument("--ring", required=True)
-    p.add_argument("--source", choices=("synthetic", "antsdr_iio"), default="synthetic")
+    p.add_argument("--source", choices=("synthetic", "antsdr_iio", "uhd"), default="synthetic")
     p.add_argument("--rate", type=float, required=True)
     p.add_argument("--center", type=float, required=True)
     p.add_argument("--chunk-samples", type=int, required=True)
@@ -427,6 +520,20 @@ def parse_args(argv: Optional[list] = None) -> argparse.Namespace:
     p.add_argument("--fake-iio-die-after", type=int, default=None,
                    help="--fake-iio only: the fake device's refill() raises on the Nth call "
                         "(0-indexed), simulating a real device-side failure mid-stream")
+    p.add_argument("--uhd-addr", default=None,
+                   help="--source uhd only: UHD device args string (default addr=192.168.1.10)")
+    p.add_argument("--uhd-gain-db", type=float, default=40.0)
+    p.add_argument("--uhd-bandwidth-hz", type=float, default=12.0e6)
+    p.add_argument("--uhd-antenna", default="RX2")
+    p.add_argument("--fake-uhd", action="store_true",
+                   help="--source uhd only: install a hardware-free fake `uhd` module before "
+                        "opening the device (no ANTSDR/UHD hardware needed; T8 tests)")
+    p.add_argument("--fake-uhd-overflow-after", type=int, default=None,
+                   help="--fake-uhd only: inject one ERROR_CODE_OVERFLOW recv() result before "
+                        "the Nth good packet (0-indexed)")
+    p.add_argument("--fake-uhd-gap-samples", type=int, default=100,
+                   help="--fake-uhd-overflow-after only: exact sample count the injected "
+                        "overflow's time_spec gap should represent")
     return p.parse_args(argv)
 
 

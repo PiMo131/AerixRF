@@ -331,3 +331,8 @@ Re-test after the failed 600 s soak (device reachable again; reachability logged
 sample loss (INFERRED: device time reset, to be explained); **20 MS/s sc8 120 s → 0 overflows, 0 discontinuities**.
 The 600 s failure (overflow train → control ACK timeout → "network unreachable") remains unexplained; host UDP
 buffers were still 212 KB in all runs. Next: repeat with `net.core.rmem_max=50 MB`, 20 sc16 and 15.36 sc16 soaks.
+
+AERIX backend on the UHD image (`--backend antsdr_uhd_proc`, T8, 2026-09-19): full pipeline at 15.36 MS/s,
+device timestamps in every window, `loss_detection=device_reported` with exact per-window drop counts; ambient
+Wi-Fi 31–34 dB SNR (sample scaling verified). With the host UDP buffer still at 212 KB: ratio 0.937, 29 M samples
+dropped in 30 s — all attributed. Adoption decision therefore hinges on `net.core.rmem_max` (sudo).

@@ -14,6 +14,8 @@ from __future__ import annotations
 
 import os
 import shutil
+import subprocess
+import sys
 from dataclasses import dataclass, replace
 from typing import Callable
 
@@ -31,6 +33,7 @@ from .capture import (
     hackrf_capabilities,
     sim_capabilities,
 )
+from .uhd_device import DEFAULT_SAMPLE_RATE as UHD_DEFAULT_SAMPLE_RATE, antsdr_uhd_capabilities
 
 
 @dataclass(frozen=True)
@@ -95,6 +98,61 @@ def _probe_antsdr_iio() -> tuple[bool, str]:
     return True, "python-iio (pylibiio) importable"
 
 
+# T8: ANTSDR/UHD (MicroPhase ``uhd-antsdr`` fork). Env vars a user sets by
+# running ``source ~/rf-tools/uhd-antsdr/ENV.sh`` before starting this
+# process -- forwarded EXPLICITLY (not just inherited via ``os.environ``) to
+# whatever child interpreter actually opens the device, because that
+# interpreter is normally NOT ``sys.executable`` (see ``_resolve_uhd_python``)
+# and this makes exactly what crosses the process boundary reviewable/testable
+# instead of "whatever happened to be in this process's env".
+_UHD_ENV_PASSTHROUGH = ("PATH", "LD_LIBRARY_PATH", "PYTHONPATH", "UHD_IMAGES_DIR")
+
+
+def _resolve_uhd_python() -> str:
+    """The python interpreter that can ``import uhd``: ``$AERIX_RF_UHD_PYTHON``
+    if set, else ``$UHD_ANTSDR_PYTHON`` (the var ``uhd-antsdr/ENV.sh`` itself
+    exports), else this process's own interpreter (will fail the probe/import
+    on a host that never installed the fork's bindings into it)."""
+    return (
+        os.environ.get("AERIX_RF_UHD_PYTHON")
+        or os.environ.get("UHD_ANTSDR_PYTHON")
+        or sys.executable
+    )
+
+
+def _uhd_child_env() -> dict:
+    env = dict(os.environ)
+    for key in _UHD_ENV_PASSTHROUGH:
+        if key in os.environ:
+            env[key] = os.environ[key]
+    return env
+
+
+def _probe_antsdr_uhd_proc() -> tuple[bool, str]:
+    """Availability = the CONFIGURED CHILD interpreter can ``import uhd``,
+    checked in a real subprocess (never this process's own interpreter,
+    which is ordinarily a plain venv without the ``uhd-antsdr`` fork's
+    bindings) -- unlike ``_probe_antsdr_iio``, an in-process ``import`` here
+    would test the wrong python and give a false negative on an otherwise
+    healthy setup."""
+    python = _resolve_uhd_python()
+    try:
+        result = subprocess.run(
+            [python, "-c", "import uhd"], env=_uhd_child_env(),
+            capture_output=True, text=True, timeout=10,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return False, f"could not run {python!r} to probe `import uhd`: {exc}"
+    if result.returncode == 0:
+        return True, f"`import uhd` OK in {python!r}"
+    detail = (result.stderr or result.stdout or "").strip().splitlines()
+    reason = detail[-1] if detail else f"exit code {result.returncode}"
+    return False, (
+        f"`import uhd` failed in {python!r} ({reason}); set $AERIX_RF_UHD_PYTHON to the "
+        "uhd-antsdr fork's interpreter (see ~/rf-tools/uhd-antsdr/ENV.sh, $UHD_ANTSDR_PYTHON)"
+    )
+
+
 # --- factories ---------------------------------------------------------------
 
 def _make_libhackrf(cfg: Config) -> IQSource:
@@ -153,6 +211,30 @@ def _make_antsdr_proc(cfg: Config) -> IQSource:
     )
 
 
+def _make_antsdr_uhd_proc(cfg: Config) -> IQSource:
+    from .process_source import ProcessIQSource
+    from .uhd_device import IQ_FULL_SCALE as UHD_IQ_FULL_SCALE
+
+    # Same "explicit request wins, otherwise the backend's own fixed default"
+    # rule _make_antsdr_proc applies to antsdr_iio's profile rate: this fork's
+    # canonical rate (uhd_device.DEFAULT_SAMPLE_RATE) needs no resampling, so
+    # only override it when the caller actually asked (--sample-rate /
+    # $AERIX_RF_SAMPLE_RATE), never with Config's HackRF-ish 20e6 dataclass
+    # default.
+    sample_rate = cfg.sample_rate if cfg.sample_rate_requested else UHD_DEFAULT_SAMPLE_RATE
+
+    return ProcessIQSource(
+        source_type="uhd",
+        sample_rate=sample_rate,
+        center_freq_hz=cfg.center_freq_mhz * 1e6,
+        full_scale=UHD_IQ_FULL_SCALE,
+        window_seconds=cfg.window_s,
+        python_executable=_resolve_uhd_python(),
+        env=_uhd_child_env(),
+        extra_args=["--uhd-gain-db", repr(cfg.gain_db)],
+    )
+
+
 def _make_antsdr_iio(cfg: Config) -> IQSource:
     from .antsdr_iio import AntsdrIIOSource
 
@@ -207,6 +289,20 @@ REGISTRY: dict[str, BackendEntry] = {
     # capability), so this comment is the documentation of that fact.
     "antsdr_proc": BackendEntry("antsdr_proc", _make_antsdr_proc, _probe_antsdr_iio,
                                 replace(antsdr_iio_capabilities(), backend="antsdr_proc")),
+    # T8: the same physical ANTSDR E200/AD9361 box, read through the
+    # MicroPhase ``uhd-antsdr`` fork's UHD python bindings instead of libiio
+    # (``uhd_device.UhdDevice`` / ``producer_main.UhdProducerSource``), over
+    # the same OS-process-producer plumbing as "antsdr_proc". Unlike the
+    # libiio path, this fork's RX metadata carries a real device time_spec
+    # AND an explicit overflow error code (see ``uhd_device.py``'s module
+    # docstring), so ``antsdr_uhd_capabilities()`` reports
+    # ``timestamp_quality="device_counter"``/``loss_counter_available=True``
+    # where "antsdr_proc" (honestly) cannot. Its own probe -- NOT
+    # ``_probe_antsdr_iio`` -- runs `import uhd` in the CONFIGURED CHILD
+    # interpreter (see ``_probe_antsdr_uhd_proc``), since the bindings live in
+    # a separate fork-specific venv, not this process's own interpreter.
+    "antsdr_uhd_proc": BackendEntry("antsdr_uhd_proc", _make_antsdr_uhd_proc,
+                                    _probe_antsdr_uhd_proc, antsdr_uhd_capabilities()),
 }
 
 # Documented order ``make_source(cfg)`` tries with no explicit --backend / cfg.sim /
@@ -218,5 +314,7 @@ REGISTRY: dict[str, BackendEntry] = {
 # It is still listed in ``REGISTRY`` (with a real availability probe) so
 # `aerix-rf info` can show it and ``--backend antsdr_iio`` / ``AERIX_RF_BACKEND``
 # can select it explicitly. Same for "antsdr_proc" (T7c, the OS-process
-# producer path to the same physical box): also excluded here on purpose.
+# producer path to the same physical box) and "antsdr_uhd_proc" (T8, the UHD
+# fork path to that same box): also excluded here on purpose -- explicit
+# --backend/$AERIX_RF_BACKEND selection only.
 AUTO_ORDER: tuple[str, ...] = ("libhackrf", "soapy", "hackrf_transfer")

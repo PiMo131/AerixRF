@@ -36,7 +36,7 @@ from typing import Any, Iterator, Optional
 
 import numpy as np
 
-from .capture import IQSource, IQWindow, ReceiverCapabilities
+from .capture import GainStage, IQSource, IQWindow, ReceiverCapabilities
 from .producer_main import EXIT_DEVICE_LOST, recv_json_line, send_json_line
 from .shmring import FLAG_RETUNE, ShmRing, sweep_stale_rings
 from .stream import StreamAssembler
@@ -99,31 +99,49 @@ class ControlClient:
             pass
 
 
+_BACKEND_BY_SOURCE_TYPE = {
+    # Registry backend name (registry.py) for each producer-process source
+    # type, so a live ``ProcessIQSource`` instance's own
+    # ``.capabilities.backend`` -- what ``cli._receiver_meta`` records into
+    # session.json's ``receiver_backend`` -- names the actually selected
+    # backend, not this module's generic plumbing name. "synthetic" (T7b)
+    # has no registry entry of its own to name-match, so it keeps the
+    # generic "process_source" name via the ``.get(..., default)`` below.
+    "antsdr_iio": "antsdr_proc",
+    "uhd": "antsdr_uhd_proc",
+}
+
+
 def process_capabilities(source_type: str, *, full_scale: float,
                           sample_rate: float) -> ReceiverCapabilities:
+    # "uhd" (T8): this fork's B210-labelled RX metadata carries a real
+    # device time_spec AND an explicit overflow error code (see
+    # uhd_device.py's module docstring) -- unlike every other
+    # process-producer source, which has no device clock/counter of its own
+    # (host_wallclock only). channel_count=2 documents the AD9361's second
+    # RX chain as a capability of the HARDWARE even though only channel 0 is
+    # opened today (see uhd_device.py's DEFAULT_CHANNEL / task non-goals).
+    is_uhd = source_type == "uhd"
     return ReceiverCapabilities(
         receiver_type=f"process:{source_type}",
-        # "antsdr_proc" is the registry backend name (registry.py) for the
-        # "antsdr_iio" producer path, so a live ``ProcessIQSource`` instance's
-        # own ``.capabilities.backend`` -- what ``cli._receiver_meta`` records
-        # into session.json's ``receiver_backend`` -- names the actually
-        # selected backend, not this module's generic plumbing name. Every
-        # other source_type (only "synthetic" today, T7b) keeps that generic
-        # name: it has no registry entry of its own to name-match.
-        backend="antsdr_proc" if source_type == "antsdr_iio" else "process_source",
-        tuning_range_hz=(0.0, 1e10),
-        sample_rates_hz=(1e3, 1e8),
+        backend=_BACKEND_BY_SOURCE_TYPE.get(source_type, "process_source"),
+        tuning_range_hz=(50e6, 6e9) if is_uhd else (0.0, 1e10),
+        sample_rates_hz=(2.083e6, 61.44e6) if is_uhd else (1e3, 1e8),
         sample_rate_is_range=True,
         max_instantaneous_bw_hz=sample_rate,
-        channel_count=1,
+        channel_count=2 if is_uhd else 1,
+        gain_stages=(GainStage("gain", 0.0, 76.0, None),) if is_uhd else (),
         native_iq_format="cs16",
         native_full_scale=full_scale,
-        supports_device_timestamps=False,
+        supports_device_timestamps=is_uhd,
         supports_drop_reporting=True,
-        timestamp_quality="host_wallclock",
+        timestamp_quality="device_counter" if is_uhd else "host_wallclock",
         # The ring's overrun/producer-drop accounting is exact by construction
         # (seqlock-derived, or an explicit sample_index gap) -- see the module
-        # docstring's `host_loss_detection` note.
+        # docstring's `host_loss_detection` note. True for every
+        # process-producer source regardless of the device's OWN loss
+        # signal (see `loss_detection`, a per-window metadata string, not a
+        # ReceiverCapabilities field).
         loss_counter_available=True,
     )
 
@@ -143,9 +161,22 @@ class ProcessIQSource(IQSource):
                  center_freq_hz: float, chunk_samples: int = DEFAULT_CHUNK_SAMPLES,
                  slots: int = DEFAULT_SLOTS, full_scale: float = DEFAULT_FULL_SCALE,
                  window_seconds: float = 1.0, extra_args: Optional[list] = None,
-                 start_timeout: float = 5.0) -> None:
+                 start_timeout: float = 5.0, python_executable: Optional[str] = None,
+                 env: Optional[dict] = None) -> None:
+        """``python_executable``/``env`` (T8): the acquisition producer is
+        normally spawned with THIS process's own interpreter (``sys.executable``)
+        and inherits this process's environment untouched (``env=None`` ->
+        ``subprocess.Popen``'s own default). The ANTSDR/UHD backend needs a
+        DIFFERENT interpreter (the ``uhd`` python bindings only exist inside
+        the MicroPhase ``uhd-antsdr`` fork's own venv -- see
+        ``uhd_device.py``'s ``_IMPORT_HINT``), so its factory
+        (``registry._make_antsdr_uhd_proc``) passes both explicitly instead of
+        this class guessing at a hardware-specific interpreter path itself.
+        """
         self.receiver_type = f"process:{source_type}"
         self._source_type = source_type
+        self._python_executable = python_executable or sys.executable
+        self._child_env = env
         self.sample_rate = float(sample_rate)
         self._center_hz = float(center_freq_hz)
         self.chunk_samples = int(chunk_samples)
@@ -167,7 +198,7 @@ class ProcessIQSource(IQSource):
         try:
             parent_sock, child_sock = socket.socketpair()
             argv = [
-                sys.executable, "-m", "aerix_rf.sdr.producer_main",
+                self._python_executable, "-m", "aerix_rf.sdr.producer_main",
                 "--ring", self._ring.name,
                 "--source", source_type,
                 "--rate", repr(self.sample_rate),
@@ -178,7 +209,10 @@ class ProcessIQSource(IQSource):
             if extra_args:
                 argv += [str(a) for a in extra_args]
 
-            self._proc = subprocess.Popen(argv, pass_fds=(child_sock.fileno(),))
+            popen_kwargs: dict[str, Any] = {"pass_fds": (child_sock.fileno(),)}
+            if self._child_env is not None:
+                popen_kwargs["env"] = self._child_env
+            self._proc = subprocess.Popen(argv, **popen_kwargs)
             child_sock.close()
             self._ctrl = ControlClient(parent_sock)
 
@@ -396,9 +430,19 @@ class ProcessIQSource(IQSource):
                 raw_flat = res.data.reshape(-1)
                 raw_stats = (header.clip_count, header.peak_abs, header.n_samples)
                 ts = header.t_wall_ns / 1e9
+                # ``t_mono_ns`` is repurposed by ``UhdProducerSource`` (see
+                # producer_main.py's ``run()``) to carry the DEVICE's own
+                # time_spec in ns instead of this process's monotonic clock;
+                # every other source type still writes plain
+                # ``time.monotonic_ns()`` there, which is not a device
+                # timestamp and must never be surfaced as one (see
+                # ``StreamAssembler``'s ``timing.clock_source`` -- only
+                # "uhd" claims "device").
+                device_time_ns = header.t_mono_ns if self._source_type == "uhd" else None
                 self._asm.push(
                     raw_flat, ts, header.center_freq_hz,
                     dropped_before=dropped_before, raw_stats=raw_stats,
+                    device_time_ns=device_time_ns,
                 )
         finally:
             self._running = False
