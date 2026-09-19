@@ -300,3 +300,28 @@ is exact (0 reported, 0 measured). `antsdr_proc` becomes the recommended ANTSDR 
 exercised); `bist_tone` was found still enabled after the runs because the measuring agent died before
 its reset step — reset manually and verified (`0`, ambient RSSI normal). Producer PDEATHSIG/heartbeat
 hardening is still in the backlog.
+
+## 15. UHD-mode trial (second SD card, MicroPhase antsdr_uhd v1.0 image, 2026-09-19)
+
+Boot from SD with the DIP switch on SD; QSPI untouched; host = MicroPhase UHD 4.1.0.0 fork built without
+sudo (`~/rf-tools/uhd-antsdr`, boost pinned 1.84). `uhd_find_devices`: ANTSDR-E200 "E200 v1", type `ant`.
+Probe (MEASURED): B210-emulation, **2 RX channels (A:A, A:B)**, antennas TX/RX + RX2, 50 MHz–6 GHz, RX gain
+0–76 dB, time sources none/internal/external, clock internal/external, **per-packet device timestamps**.
+
+Receive-only streaming benchmark (Python API, 30 s each, gain 40 dB, 2437 MHz, host UDP buffers at the
+default 212 KB — `net.core.rmem_max` not yet raised):
+
+| Rate | OTW | ratio | overflows | ts discontinuities (max gap) |
+|---|---|---|---|---|
+| 12.288 MS/s | sc16 | 0.9999 | 2 | 1 (2.7 ms) |
+| 13.44 MS/s | sc16 | 0.9997 | 6 | 3 (4.2 ms) |
+| **15.36 MS/s** | sc16 | **1.0000** | **0** | **0** |
+| 20 MS/s | sc16 | 0.9745 | 268 | 134 (17 ms) |
+| **20 MS/s** | sc8 | **1.0000** | **0** | **0** |
+
+Interpretation (MEASURED/INFERRED): the UHD image lifts the iiod ceiling — 15.36 MS/s sc16 (canonical rate,
+no resampling) and 20 MS/s sc8 stream clean; 20 MS/s sc16 (640 Mbit/s) overflows with the small host
+socket buffer (INFERRED host-side; needs `sudo sysctl -w net.core.rmem_max=50000000` to test). Unlike IIO,
+overflows are REPORTED (`ERROR_CODE_OVERFLOW`) and timestamps allow exact gap sizing — the two properties the
+IIO path lacked. 2R2T is available in this mode without any U-Boot change. Decision pending the 10-minute
+soaks (15.36 sc16 now; 20 sc16 after the sysctl).

@@ -11,6 +11,8 @@ BIST tone test 2026-09-18 (AD9361 `bist_tone` debug attr, 600 s, production-like
 
 T7 ACCEPTED 2026-09-19: `antsdr_proc` (producer in its own process + shm ring) — 2×600 s BIST runs, idle and under pytest load, 0 phase jumps in 7.37 G samples each, host loss 0. Use `--backend antsdr_proc` for all future ANTSDR captures. Reminder: always verify `bist_tone`=0 after any BIST work (an agent died before its reset once).
 
+UHD-MODE (SD trial 2026-09-19, MicroPhase antsdr_uhd v1.0 + fork host build): 2 RX channels, per-packet timestamps, overflow reporting; 15.36 MS/s sc16 and 20 MS/s sc8 clean over 30 s with default 212 KB socket buffers; 20 sc16 overflows (host buffer; needs sysctl rmem_max). Brief §15. Host fork env: `source ~/rf-tools/uhd-antsdr/ENV.sh`, bench script in session scratchpad `uhd_rx_bench.py`.
+
 **Why:** These numbers drove the canonical-rate decision (must be ≤ ~14 MS/s on IIO path) and the firmware question.
 
 **How to apply:** Re-measure if firmware or libiio version changes. Any claim of "ANTSDR 20 MS/s" is false on this image. Firmware switches and U-Boot env changes are user-approval gates. Brief: `research/briefs/antsdr-e200.md`.
