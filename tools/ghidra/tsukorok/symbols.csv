@@ -1,0 +1,174 @@
+addr,name,comment
+0x40375ce4,TwoFourGScanner_Tick,2.4/5.8 GHz scanner tick: dji_alg dispatch, spectrum scoring, Zala video, A5133; alarm rate limit 3000 ms
+0x40375c0c,SX1280_CaptureSpectrum8x256,8 sweeps x 256 bins from 2.4 GHz step 390625 Hz (20 us settle)
+0x4037587c,CC2500_DJIParanoidSweep,CC2500 path (0xCE channels, 300 us settle) - unused on this build
+0x403759b8,CC2500_DJIWidthScan,CC2500 path histogram width scan - unused on this build
+0x40376410,A5133_ParanoidSweep,5725..5899 MHz 1 MHz; 16-window count>7; guard<87; acc 0..4; return 2 if shape test passes
+0x403765fc,A5133_SpectralSweep,175-channel sweep; threshold -65..-99 step -5; width 16..69 MHz; edge match +-5 MHz across thresholds
+0x40376844,MainLoop_Tick,App main loop: mode switch, calls SubGHz_StateMachine and TwoFourGScanner_Tick (<= every 5000 ms)
+0x40376e74,FSK_MatchOnPacket,FSK packet handler: run syncword detectors, +15 dB noise corr, RSSI gate -(rssi_threshold>>1), capture to /fsk_data.bin
+0x403770a4,FSK_RssiPrePass,RSSI sweep over range with freq_step; 25 us settle; >30% channels < -112 dBm -> correction flag
+0x403771f0,FSK_ScannerTick,FSK scanner state dispatch (1 = pre-pass, 2 = match)
+0x4037721c,SX127x_DIO0_ISR,DIO0 interrupt handler
+0x40377298,SubGHz_StateMachine,Sub-GHz mode state machine (2 FSK, 3 LoRa, 4/5 RSSI/unknown, 0xd..0xf twin/walkie/morze)
+0x4037789c,SX1280_GetRssiFast,IRAM GetRssiInst
+0x40377904,SX1280_SetRfFrequencyFast,IRAM SetRfFrequency (Hz)
+0x403777cc,SX127x_GetRssiRaw,IRAM RSSI read (FSK)
+0x40377738,SX127x_RestartRxFast,IRAM restart RX
+0x42007564,SX1280_DJIParanoidSweep,2400..2500 MHz step 400 kHz, 40 us settle; 16-window count>7; guard<125; acc 0..4 confirm>1
+0x420076ec,SX1280_ZalaVideoSweep,2200..2399.6 MHz step 400 kHz, 60 us; count>6; guard<250; acc 0..3 confirm>1; enabled when detect_zl_la==2
+0x42007844,SX1280_TrackScan,f+-10 MHz step 400 kHz two passes 80 us; detect if >10 samples above -(rssi_threshold>>1)
+0x420074c8,SX1280_ObserveTimeDomain,8192 RSSI samples on one channel (390625 Hz raster)
+0x42007470,SX1280_BeginScan,reset + beginFSK(2400.0,250,195.0,10,16) + startReceive(0xFFFF)
+0x420074b8,SX1280_Sleep,SX128x sleep(true)
+0x42007c9c,SX1280_RssiSpectrum256,256 x 390625 Hz spectrum, 100 us settle, folded to 128 bins
+0x42007d20,SX1280_FpvSweep400,400 x 250 kHz sweep 2400-2500 MHz, 50 us settle, RSSI clamp [-100,-30]
+0x42007e08,SX1280_RssiSweepGeneric,generic (start,end,step) sweep on 250 kHz raster
+0x42007f88,FpvTracker_Ctor,FPV tracker constants (lits 0x420002c4..0x42000318) + 256-channel template @3C0E1958
+0x42007f3c,FpvTracker_Reset,reset 256 channel states
+0x42008094,NoiseLevelClassifier,histogram of 3 dB-quantised RSSI > -90; count>70->80.0, >50->60.0, >30->40.0 (skydio metric)
+0x42007a30,SX1280_ElrsScan,ELRS 2.4 scan: begin(2400,812.5,sf8,cr8,sync 0x14,2,12); SF5..8; step 400 kHz
+0x42007270,DJI_ScoreA,paramsA: median floor +5 dB, segments (gap 20, minw 2), trimmed-mean features; score=0.55*s1+0.45*s2 in [0,100]; tick threshold 40
+0x420073f4,DJI_ScoreA_Wrapper,wrapper for DJI_ScoreA
+0x4200552c,DJI_ScoreB,paramsB: floor +5.0, width 18..60, gap 3, persistence 3/2, ratios 0.85/0.4/0.25; tick threshold 3.14
+0x42006850,Spec_FindSegments,segments above threshold with gap merge (param_5) and min width (param_4)
+0x42006d44,Spec_SegmentFeatures,feature vector: trimmed mean, mean-median, range, flatness, persistence fractions
+0x42006428,Spec_Score1,s1 = clamp((mean-med-5)*2.5,0,25)+clamp((flat-0.55)*50,0,20)+width term+range term
+0x420061ec,Spec_Score2,s2 = clamp((p4-0.35)*60,0,30)+clamp((p3-0.5)*40,0,20)+clamp((f2-0.22)*80,0,20)+clamp((f1-0.25)*40,0,10)+clamp(mean-med-5,0,10)
+0x42006c1c,Spec_MedianAll,median over all 2048 samples
+0x42006c8c,Spec_MedianFilter,running median filter (half-window param)
+0x420061a0,Spec_MaxHold256,per-bin max over sweeps
+0x42004acc,Spec_FindCandidates,candidate finder: floor = quantile 0.4 + 6 dB, >=2 sweeps, width 20..102, gap 3
+0x4200512c,TimeDomain_Classify,burst/period classifier on 8192-sample RSSI trace
+0x420052f0,TimeDomain_Accumulate,per-sample burst statistics accumulator
+0x4200457c,SkydioParams_Copy,copy 0x38-byte parameter block
+0x4200423c,CC2500_DJISignalWidth,CC2500 path width test (unused)
+0x42008480,Radios24_Init,SX1280 init (beginFSK 2400/250/195/10/16) + A5133 id/calibration
+0x4200835c,TwoFourGScanner_Ctor,SPI pins 17/15/16/18, SX1280 module 18/14/12/13 @2 MHz, A5133 pins SDIO16 SCK17 CS48
+0x42008654,Radios24_RssiSpectrum,RSSI spectrum entry (cc2500 or sx1280)
+0x42008728,A5133_RssiSpectrum,5.8 GHz spectrum entry
+0x4200877c,ElrsScan_Entry,elrs scan entry (cc2500 unsupported)
+0x42008808,TrackScan_Dispatch,mode/freq dispatch to SX1280_TrackScan or A5133_TrackScan
+0x42008884,JammerScan_Entry,sx1280 jammer/FPV sweep entry (beginFSK)
+0x420089d4,RecordSpectrum_Entry,record spectrum (beginFSK)
+0x42008b7c,A5133_PinsInit,p[0]=SDIO p[1]=SCK p[2]=CS
+0x42008bac,A5133_SpiReadByte,bit-banged 3-wire read
+0x42008bf8,A5133_SpiWriteByte,bit-banged 3-wire write
+0x42008c40,A5133_ReadRegs,read n bytes from reg|0x40
+0x42008c88,A5133_WriteReg,write register
+0x42008cc0,A5133_ReadReg,read register (reg|0x40)
+0x42008cfc,A5133_Strobe,strobe cmd|0x80 (0x80 sleep, 0xC0 RX, 0xD0, 0xD8 per AMICCOM convention)
+0x42008d40,A5133_WritePagedReg,reg 0x35 = page<<4 then reg
+0x42008d6c,A5133_TrimCalibration,CP/FT trim (reg 0x38 page 9 = 0xA0; read 8 @0x3F)
+0x42008e98,A5133_CalibrateChannelGroup,reg 0x0E=ch; reg2=0x1C; ok if bit4 of (0x25|0x26) clear
+0x42008f14,A5133_Init,ID 0xA1513300 check + register tables @3C0E3891..3C0E38CA
+0x42009108,A5133_Calibrate,reg2=0x63; CHGroup 25/75/125; FBCF reg0x23 bit4; RSSI cal regs 0x1B/0x1C
+0x420090c4,A5133_SetChannel,reg 0x0E = arg-0x5D (arg = MHz-5725 truncated)
+0x420090d8,A5133_StrobeSleep,strobe 0x80
+0x420090e8,A5133_StrobeD0,strobe 0xD0
+0x420090f8,A5133_StrobeD8,strobe 0xD8
+0x420091bc,A5133_StrobeRX,strobe 0xC0
+0x420091cc,A5133_ReadRssiDbm,dBm = ((reg1E-cal1C)/(cal1B-cal1C))*12-80-3
+0x420093c8,A5133_TrackScan,f-10..f+10 MHz two passes; detect if >10 above dji_rssi_thrsh
+0x420094bc,A5133_RssiSpectrum175,5725..5899 MHz spectrum folded to 128 bins
+0x420095f8,A5133_SweepRange,raw RSSI vector over channel range
+0x4200b170,Settings_Load,NVS defaults (see brief section 1)
+0x42009e80,Settings_Save,NVS save
+0x4200aec0,Settings_SaveFreqRanges,freq1..3 save
+0x4200c79c,Menu_AlarmSettings,menu strings Orlan+S/ZalaLancet/FPV
+0x4200d434,Alarm_Display24G,display + dispatch for 2.4/5.8 GHz detections (types 2/3/4/5/DJI)
+0x4200e738,CLI_CommandHandler,serial CLI (settings, dji, elrs scan, freq ranges ...)
+0x4201168c,Menu_QuickActions,quick actions menu
+0x42011fd4,Det_CryptoOrlan_Detect,br 55001..57999, rssi>30; >3 entries with count==1 -> type 10
+0x42011e80,Det_CryptoOrlan_Ctor,vtable 3C0E6A3C
+0x42011e04,Syncword_Normalize,top bits 00/11 -> &0x7FFFFFFF else strip alternating prefix
+0x42012694,Syncword_IsUnlikely,rejects near-preamble words (mask 0x3FFFFFFF)
+0x42012804,Det_SyncCount_Detect,learned syncword table; types 5/6/7/9/1; expire 1200000 ms
+0x42012534,DetectorSet_Ctor,order: [0] SyncCount [1] StaticTable [2] CryptoOrlan
+0x42012c40,Det_StaticTable_Ctor,static syncwords F17C1599 EC7C402F C55E38A9 2A2C1481 12345678 -> 2; 69517E96 -> 3; A545FA58/0545FA58 -> 5; 69696969 -> 4
+0x420129a0,Det_StaticTable_Detect,lookup sw, sw>>1, (sw>>1)|0x04C4B400 (bug: decimal 80000000), normalised
+0x42012388,Detectors_RunAll,run all detector objects (vtable+8)
+0x42012180,Detections_ToLabel,type codes -> label string ("Or,","Za,","El,","ZL,","Lc,","?FPV,","FPVe,","Sc,","X3,")
+0x420170e8,Bitrate_IsOrlanClass,76190/38150/80000 or 55001..57999
+0x4201712c,Bitrate_IsEnabled,15235 needs detect_zl_la in {1,2}; Orlan-class needs detect_orlan
+0x42017404,FSK_ScanStart,linear/randomized FSK scan start
+0x420174e8,FSK_AdjustRange,range = [min_active-2 MHz, max_active+2 MHz]
+0x42017200,SX127x_RestartFSK,beginFSK(755.0, 100 kbps, 76.7, afcbw, 10, 16) + AFC + gain
+0x42017268,FSK_RestartRadio,set freq + bitrate from list
+0x42017300,FSK_StartMatchPhase,bitrate rotation 57.6/76.19/38.15 for step 0
+0x42017390,FSK_StartPrePass,RSSI pre-pass init at 100 kbps
+0x42017e00,LoRa_ScanStart,detect_fpv 1 -> LoRa_StartMode1, 2 -> LoRa_StartMode2
+0x42017c20,LoRa_StartMode1,begin(f,500k,sf_first,cr7,0x12,10,8); iterations 8/6
+0x42017d38,LoRa_StartMode2,begin(f,500k,sf,cr7,0x12,10,8); iterations 3/2
+0x42017e58,LoRa_TickMode1,CAD SF6..9, 50 ms window; confirm 6g+3b+t>=6 and dominant SF count
+0x420180f0,LoRa_TickMode2,CAD+RX; confirm 6g+3b>=6 and (g>=1 or b>=2)
+0x420181e8,LoRa_Tick,LoRa scanner state machine; step 125 kHz
+0x42018388,LoRa_InitSpreadingFactors,sf list init
+0x42018480,LoRa_Autosearch,autolora: CR7 BW500 pre8 sync0x12 gain1; SF6..9
+0x42018668,RSSI_ScanTick,RSSI scan; +15 dB corr; callback if peak > -rssi_scn_tresh
+0x420189a4,RSSI_ScanStart,beginFSK(start/1e6,100,76.7,afcbw,10,16)
+0x42019818,UnknownDrone_Search,linear FSK search, 1,800,000 ms budget
+0x42019b34,SX127x_Init,SPI 7/6/8/9 @10 MHz; beginFSK 755 MHz; image cal; AFC; agc
+0x42016b50,FHSS_BurstDetector,FHSS/Brst detector
+0x420196b4,SX1276Scanner_Instance,singleton accessor
+0x4201598c,CoT_SendEvent,CoT XML event a-h-A-M-F-Q, stale +3600 s
+0x42015dc0,CoT_SendCircleEvent,UTF-16 CoT template
+0x42015750,Alarm_EmitCsv,detect;... line
+0x42015870,Alarm_EmitJson,JSON detect line
+0x42016160,Alarm_ZalaVideo,alarm dispatch for Zala video / FPV5
+0x42016230,Alarm_DJI,alarm dispatch for DJI
+0x4201a038,TwinLink_Init,SX1278 begin(901.2, 62.5k, sf8, cr7, 0x35, 10, 8)
+0x4201a1a0,Meshtastic_Send,LongFast preset TX
+0x42018c8c,Capture_Build,capture record (0x24 bytes)
+0x42018cc8,Capture_Store,append to /fsk_data.bin
+0x42018dbc,Capture_Dump,print captures
+0x4201d668,SX127x_beginFSK,RadioLib SX127x::beginFSK
+0x4201da3c,SX1278_begin,RadioLib SX1278::begin (LoRa)
+0x4201daf0,SX1278_setBwSf500Opt,custom bw/sf set with 500 kHz optimise regs 0x36/0x3A
+0x4201e6e8,SX127x_setSpreadingFactor,
+0x4201e7e4,SX127x_setCodingRate,
+0x4201f460,SX127x_setPreambleLength,
+0x4201e880,SX127x_implicitHeader,
+0x4201e314,SX127x_setCRC,
+0x4201f428,SX127x_setSyncWord,reg 0x39
+0x4201e0a8,SX1278_setGain,reg 0x0C/0x26
+0x4201db6c,SX127x_setLnaBoostHf,reg 0x0C bits1:0 = 3 when enabled
+0x4201da18,SX127x_setAgcAuto,reg 0x26 bit 2
+0x4201fae0,SX127x_setActiveModem,reg 0x01 bit 7
+0x4201e3bc,SX1278_setBandwidth,
+0x4201d6f4,SX127x_mySetSF,reg 0x1E=0x60, reg 0x31 detect-optimise
+0x4201d830,SX127x_myPrepareScanChannel,reg 0x40 = 0xA0 (DIO0 CadDone/DIO1 CadDetected)
+0x4201d850,SX127x_scanChannel,CAD; -14 preamble detected / -15 channel free
+0x4201d97c,SX127x_receiveFast,RXSINGLE + FIFO read
+0x4201dab0,SX127x_setSymbTimeout,reg 0x1F
+0x4201d8b4,SX127x_restartReceiveFast,
+0x4201f4f8,SX127x_setBitRate,
+0x4201ee14,SX127x_setAFC,reg 0x0D bit 4 (AfcAutoOn)
+0x4201d7dc,SX127x_imageCalibration,reg 0x3B
+0x4201db94,SX127x_setFifoBase,regs 0x0F/0x0D
+0x4201fd18,SX127x_startReceive,
+0x4201edd4,SX127x_getSNR,reg 0x19 * 0.25
+0x4201e270,SX127x_getRSSI,reg 0x1A - 157 (HF)
+0x4202127c,SX128x_beginFSK,
+0x420213a8,SX128x_begin,LoRa
+0x42020e58,SX128x_setCodingRate,
+0x42020dd0,SX128x_setSpreadingFactor,
+0x42021844,SX128x_receive,
+0x4202193c,SX128x_getSNR,
+0x420214e0,SX128x_getFrequencyError,
+0x42021910,SX128x_getRSSI,-(reg 0x1F >> 1)
+0x42020c28,SX128x_startReceive,
+0x420206c8,SX128x_sleep,
+0x42020368,SX128x_reset,
+0x420c799c,Cfg_RssiThresholdDbm,-(rssi_threshold >> 1)
+0x420c78a8,A5133_WindowShapeTest,16-sample window peak-shape test (immediate 5.8 GHz confirm)
+0x4201cf58,Prefs_getUChar,
+0x4201cf28,Prefs_getChar,
+0x4201cf88,Prefs_getUShort,
+0x4201cfe0,Prefs_getInt,
+0x4201d020,Prefs_getBool,
+0x4201d130,Prefs_getFloat,
+0x4201d03c,Prefs_getString,
+0x4201cc70,Prefs_putUChar,
+0x4201ccb4,Prefs_putUShort,
+0x4201cd24,Prefs_putInt,

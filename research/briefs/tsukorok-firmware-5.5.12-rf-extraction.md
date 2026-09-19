@@ -399,11 +399,99 @@ steps, 80 µs settle, two passes, detect if > 10 samples above −94 dBm; otherw
 * No transmit, jamming or spoofing code was found in the detection paths; `jam_fpv` is a stored flag only, and the only TX is the Meshtastic/twin notification link (§4.4).
 * DJI OcuSync is not decoded; DJI detection is purely spectral (width/persistence in 2.4 GHz and 5.8 GHz), so its output is stage-1/stage-2 evidence only.
 
-## 7. Unknowns / needs a real interactive Ghidra project
+## 7. Follow-up pass (headless Ghidra, disassembly level) — resolutions of the former unknowns
 
-1. Exact field semantics of the `FUN_4200552c` parameter struct (offsets +0x08..+0x60) and reconstruction of the split doubles in the IRAM Tick parameter sets; only the raw literals are certain.
-2. Names of the A5133 strobe commands (0x50/0x58/0x80/0xC0) and register meanings — need the AMICCOM A5133 datasheet (device-specialist task).
-3. `FUN_42004acc` candidate finder and `FUN_4200512c` time-domain classifier internals (thresholds listed, algorithm not fully traced).
-4. `FUN_42012388` detector vector registration order (which object index is which class) — only inferred from vtables.
-5. Whether `FUN_4201ee14`/`FUN_4201db6c` are exactly RadioLib `setAFC`/`setRxBoostedGainMode` (register-level identification only).
-6. Meaning of labels "Sc" and "X3", and of `FUN_420c78a8`'s shape test.
+A named Ghidra program archive (`tsukor_s3v4_5.5.12_named.gzf`, 173 functions named with plate comments) and
+the reproduction scripts live in `tools/ghidra/tsukorok/`.
+
+### 7.1 DJI 2.4 GHz parameter structs (CONFIRMED layouts from the `s32i` sequence in `TwoFourGScanner_Tick` 0x40375dad–0x40376080)
+
+Two different scorers are used, not one:
+
+**Algorithm A** — `DJI_ScoreA` (`FUN_42007270`, via wrapper 0x420073f4), params at stack 0x118:
+
+| off | value | role (INFERRED from use) |
+|---|---|---|
+| +0x00 | double 390625.0 | bin width Hz |
+| +0x08 | 5 | threshold offset dB above global median (`FUN_42006850` arg) |
+| +0x0C | 5 | flatness tolerance dB (bins within ±5 dB of mean) |
+| +0x10 | 5 | range penalty start (dB) |
+| +0x14 | 2 | min segment width (bins) passed to segment finder |
+| +0x18 | 1 | running-median half window (`FUN_42006c8c`) |
+| +0x1C | 10 | trim percent for trimmed mean |
+| +0x20 / +0x24 | 26 / 52 | preferred width window (bins ≈ 10–20 MHz) |
+| +0x28 | 20 | gap merge (bins) and min width for features |
+| +0x30 | double 39.0 | ideal width (bins ≈ 15.2 MHz) |
+| +0x38 / +0x3C | 3 / 4 | per-bin sweep-count thresholds (of 8) |
+| +0x40 / +0x48 | 0.0 / 100.0 | score clamp |
+
+Pipeline: per-bin max over 8 sweeps → running median filter → segments above (median + 5 dB) with gap 20,
+min width 2 → for each segment feature vector F (trimmed mean, mean−median, max−min, flatness fraction,
+fraction of bins above threshold in ≥3 / ≥4 sweeps, per-sweep mean fractions) →
+`s1 = clamp((mean−median−5)·2.5, 0, 25) + clamp((flat−0.55)·50, 0, 20) + widthTerm + clamp(10 − max(0, range−5)², 0, 10)`
+where widthTerm = `clamp(25 − |w−39|·0.6, 8, 25)` inside [26, 52] else `clamp(12 − dist·0.8, 0, 12)`;
+`s2 = clamp((p4−0.35)·60, 0, 30) + clamp((p3−0.5)·40, 0, 20) + clamp((f2−0.22)·80, 0, 20) + clamp((f1−0.25)·40, 0, 10) + clamp(mean−median−5, 0, 10)`;
+score = max over segments of clamp(0.55·s1 + 0.45·s2, 0, 100); **tick threshold: score > 40.0** (lit 0x40374488).
+Constants: lits 0x420001dc (2.5), 0x4200016c (25), 0x420001e0/e4 (0.55), 0x420001e8 (50), 0x420001b0 (20),
+0x420001f4 (0.8), 0x420001d8 (12), 0x420001ec/f0 (0.6), 0x420001d4 (8), 0x42000170 (10), 0x420001b4/b8 (0.35),
+0x420001bc (60), 0x42000188 (30), 0x42000178 (0.5), 0x420001c0 (40), 0x420001c4/c8 (0.22), 0x420001cc (80),
+0x420001d0 (0.25), 0x4200017c/180 (0.45). All CONFIRMED.
+
+**Algorithm B** — `DJI_ScoreB` (`FUN_4200552c`), params at stack 0x118 (memset then stores):
+
+| off | value | role (INFERRED) |
+|---|---|---|
+| +0x00 | double 390625.0 | bin width |
+| +0x08 | double 5.0 | dB above median for "above" |
+| +0x10 / +0x14 | 18 / 60 | min / max segment width (bins ≈ 7–23 MHz) |
+| +0x18 | 3 | gap merge |
+| +0x20 | double 0.85 | fraction-above target |
+| +0x28 | double 12.0 | dB scale |
+| +0x30 | double 0.2 | |
+| +0x38 / +0x3C | 3 / 2 | persistence: sweeps with ≥2 bins above; need ≥3 of 8 |
+| +0x40 | double 0.4 | max fraction of "always-on" bins |
+| +0x48 | double 0.85 | min fraction of above-threshold cells (bins × sweeps) |
+| +0x50 | double 0.25 | edge fraction (edge bins = max(2, 0.25·w)) |
+| +0x58 | double 5.0 | min centre − edge margin dB |
+| +0x60 / +0x64 | 25 / 50 | soft width window (penalty (25−w)·3 below 25) |
+| +0x68 | double 0.0 | score floor |
+| +0x70 | double 100.0 | score cap |
+
+**Tick threshold: score > 3.14** (lit 0x403744ac = 0x40490000). `dji_alg` 2 = A∧B, 3 = A∨B.
+`dji_alg` 1 uses `Spec_FindCandidates` (`FUN_42004acc`, params {quantile 0.4, +6 dB, ≥2 sweeps, level −97 dBm (0x9F as i8), width 20..102 bins, gap 3}) and the time-domain classifier `TimeDomain_Classify` (`FUN_4200512c`) on two 8192-sample traces; class 1 (pass) requires burst count ≥ (param 0x2C − 2) with period/duty limits from the {156, 2, 750, 32, 75, 3, 0.3, 0.9, 64, 20, 5, 5, 0.5} block.
+The "skydio" metric is the `NoiseLevelClassifier` output (80/60/40 by count of the dominant 3‑dB level > −90 dBm), compared with {100,70,60,50,40}[skydio_alg]. CONFIRMED.
+
+### 7.2 A5133 strobes and registers
+
+Web sources reachable from this environment confirm the part is AMICCOM's **A5133 5.8 GHz FSK transceiver**
+(64 control registers, 3/4‑wire SPI, 8‑bit RSSI, strobe commands; datasheet "A5133 Datasheet v0.7 (Preliminary)"
+at doc.cloudpeaks.cn — blocked by this sandbox's egress proxy, as are amiccom.com, CSDN and docplayer).
+The AMICCOM family strobe convention (confirmed from the A7105 driver header in DeviationTX):
+0x80 Sleep, 0x90 Idle, 0xA0 Standby, 0xB0 PLL, 0xC0 RX, 0xD0 TX, 0xE0/0xF0 FIFO pointer resets; register
+read flag = 0x40 (matches this firmware). Firmware use: 0x80 after every scan (sleep), 0xC0 before each RSSI
+read (RX), then 0xD8 150 µs later and again after calibration, 0xD0 once after channel-group calibration.
+0xD8 is not in the A7105 set; because it precedes the RSSI register read it is most plausibly an RX-side
+strobe of the A5133-specific table (e.g. RSSI/CCA measure or FIFO reset), **not** confirmed as TX. Still open:
+the A5133 v0.7 datasheet is required for the exact strobe table and for registers 0x1B/0x1C (RSSI calibration
+values), 0x23 (FBCF flag), 0x25/0x26 (calibration status), 0x35 (page select), 0x3F (ID).
+
+### 7.3 Detector registration order (CONFIRMED, `DetectorSet_Ctor` 0x42012534)
+[0] syncword-count detector (vtable 0x3C0E6B38), [1] static table (0x3C0E6B4C), [2] cryptoorlan (0x3C0E6A3C).
+`FSK_MatchOnPacket` uses the first hit with a non-zero syncword for the capture record; the label function
+walks all hits and the last non-zero type wins the return code.
+
+### 7.4 RadioLib identities (CONFIRMED by register)
+`FUN_4201ee14` = `SX127x::setAFC` (reg 0x0D bit 4 AfcAutoOn); `FUN_4201db6c` = LNA boost HF (reg 0x0C bits 1:0 = 0b11
+when enabled; RadioLib `setRxBoostedGainMode`-equivalent); `FUN_4201daf0` = custom bandwidth/SF set with the
+500 kHz errata registers 0x36/0x3A.
+
+### 7.5 Shape test and labels
+`A5133_WindowShapeTest` (`FUN_420c78a8`, n = 16): find the peak index p; require 1 < p < n−1; require a strictly
+rising pair (x[i] < x[i+1] < x[i+2]) somewhere before p−2 and, after p, a falling pair (x[j] > x[j+1] > x[j+2])
+or a sample more than 4 dB below the peak → returns 1 (immediate "dji 5.8" confirm). CONFIRMED.
+Labels "Sc" and "X3" have no other references in the image; by the naming pattern (Or = Orlan, Za = Zala,
+ZL = ZalaLancet, El = ELRS, Lc = Lancet) "Sc" is most likely Supercam and "X3" the cryptoorlan class — INFERRED only.
+
+### 7.6 Remaining unknowns
+1. Exact A5133 strobe/register table (needs the v0.7 datasheet from a reachable host).
+2. Field semantics of the time-domain classifier block (constants listed, state machine not fully traced).
